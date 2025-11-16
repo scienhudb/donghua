@@ -5874,6 +5874,30 @@ def on_clear_element_merged_para_update(viewer_instance):
                 print(f"[铭牌元件检查] 检查失败: {e}")
                 import traceback
                 traceback.print_exc()
+        elif element_name in ["保温支撑"]:
+            try:
+                is_complete, missing, all_selected = check_insulation_support_completeness(product_id, element_id)
+                update_insulation_support_material_status(product_id, element_id, bool(is_complete))
+                updated = load_element_data_by_product_id(product_id)
+                updated = move_guankou_to_first(updated)
+                viewer_instance.element_data = updated
+                viewer_instance.render_data_to_table(updated)
+            except Exception as e:
+                print(f"[保温支撑元件检查] 检查失败: {e}")
+                import traceback
+                traceback.print_exc()
+        elif element_name in ["支座"]:
+            try:
+                is_complete, missing, all_selected = check_fixed_saddle_completeness(product_id, element_id)
+                update_fixed_saddle_material_status(product_id, element_id, bool(is_complete))
+                updated = load_element_data_by_product_id(product_id)
+                updated = move_guankou_to_first(updated)
+                viewer_instance.element_data = updated
+                viewer_instance.render_data_to_table(updated)
+            except Exception as e:
+                print(f"[支座元件检查] 检查失败: {e}")
+                import traceback
+                traceback.print_exc()
     except Exception as e:
         print("[支座数据库错误] 清空支座参数失败：", e)
 
@@ -6117,6 +6141,30 @@ def on_confirm_element_merged_para_param(viewer_instance):
                 print(f"[铭牌元件检查] 检查失败: {e}")
                 import traceback
                 traceback.print_exc()
+        elif element_name in ["保温支撑"]:
+            try:
+                is_complete, missing, all_selected = check_insulation_support_completeness(product_id, element_id)
+                update_insulation_support_material_status(product_id, element_id, bool(is_complete))
+                updated = load_element_data_by_product_id(viewer_instance.product_id)
+                updated = move_guankou_to_first(updated)
+                viewer_instance.element_data = updated
+                viewer_instance.render_data_to_table(updated)
+            except Exception as e:
+                print(f"[保温支撑元件检查] 检查失败: {e}")
+                import traceback
+                traceback.print_exc()
+        elif element_name in ["支座"]:
+            try:
+                is_complete, missing, all_selected = check_fixed_saddle_completeness(product_id, element_id)
+                update_fixed_saddle_material_status(product_id, element_id, bool(is_complete))
+                updated = load_element_data_by_product_id(viewer_instance.product_id)
+                updated = move_guankou_to_first(updated)
+                viewer_instance.element_data = updated
+                viewer_instance.render_data_to_table(updated)
+            except Exception as e:
+                print(f"[支座元件检查] 检查失败: {e}")
+                import traceback
+                traceback.print_exc()
 
         # 6) 显示成功提示
         box = QMessageBox(QMessageBox.Information, "提示", f"{tab_name} 的参数已保存", QMessageBox.NoButton, viewer_instance)
@@ -6287,6 +6335,45 @@ def _remove_element_merged_para_tab(viewer_instance, index):
             viewer_instance.render_data_to_table(updated)
         except Exception as e:
             print(f"[铭牌元件检查] 检查失败: {e}")
+            import traceback
+            traceback.print_exc()
+    elif element_name in ["支座"]:
+        try:
+            print(f"[支座元件检查] 删除tab页后检查支座元件完整性")
+            is_complete, missing, all_selected = check_fixed_saddle_completeness(product_id, element_id)
+            if is_complete:
+                print(f"[支座元件检查] 所有必需元件已定义")
+                update_fixed_saddle_material_status(product_id, element_id, True)
+            else:
+                print(f"[支座元件检查] 缺少必需元件: {missing}")
+                print(f"[支座元件检查] 已选择元件: {all_selected}")
+                update_fixed_saddle_material_status(product_id, element_id, False)
+            updated = load_element_data_by_product_id(viewer_instance.product_id)
+            updated = move_guankou_to_first(updated)
+            viewer_instance.element_data = updated
+            viewer_instance.render_data_to_table(updated)
+        except Exception as e:
+            print(f"[支座元件检查] 检查失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    elif element_name in ["保温支撑"]:
+        try:
+            print(f"[保温支撑元件检查] 删除tab页后检查保温支撑元件完整性")
+            is_complete, missing, all_selected = check_insulation_support_completeness(product_id, element_id)
+            if is_complete:
+                print(f"[保温支撑元件检查] 所有必需元件已定义")
+                update_insulation_support_material_status(product_id, element_id, True)
+            else:
+                print(f"[保温支撑元件检查] 缺少必需元件: {missing}")
+                print(f"[保温支撑元件检查] 已选择元件: {all_selected}")
+                update_insulation_support_material_status(product_id, element_id, False)
+            updated = load_element_data_by_product_id(viewer_instance.product_id)
+            updated = move_guankou_to_first(updated)
+            viewer_instance.element_data = updated
+            viewer_instance.render_data_to_table(updated)
+        except Exception as e:
+            print(f"[保温支撑元件检查] 检查失败: {e}")
             import traceback
             traceback.print_exc()
 
@@ -8790,13 +8877,211 @@ def check_nameplate_component_completeness(product_id, element_id):
     
     # 必需的元件名称（不包括"铭牌垫板"）
     required_components = {"铭牌支架", "铭牌板", "铆钉"}
-    
-    # 检查是否包含所有必需元件
-    missing = required_components - all_selected
-    is_complete = len(missing) == 0
-    
-    return (is_complete, list(missing), all_selected)
 
+    rows = load_element_merged_para_product_data(product_id, element_id) or []
+
+    tab_to_names = {}
+    tab_to_materials = {}
+    for row in rows:
+        tab = (row.get("Tab分类") or "").strip()
+        pname = (row.get("参数名称") or "").strip()
+        pval = (row.get("参数值") or "").strip()
+        if pname == "元件名称":
+            names = []
+            if pval:
+                try:
+                    import json
+                    parsed = json.loads(pval)
+                    if isinstance(parsed, list):
+                        names = [str(x).strip() for x in parsed if str(x).strip()]
+                    else:
+                        names = [x.strip() for x in str(pval).split("、") if x.strip()]
+                except Exception:
+                    names = [x.strip() for x in pval.split("、") if x.strip()]
+            tab_to_names[tab] = set(names)
+        elif pname in {"材料类型", "材料牌号", "材料标准", "供货状态"}:
+            m = tab_to_materials.setdefault(tab, {})
+            m[pname] = pval
+
+    missing_or_incomplete = set()
+    for comp in required_components:
+        if comp not in all_selected:
+            missing_or_incomplete.add(comp)
+            continue
+        candidate_tabs = [t for t, names in tab_to_names.items() if comp in (names or set())]
+        has_complete_materials = False
+        for t in candidate_tabs:
+            mvals = tab_to_materials.get(t, {})
+            if (
+                (mvals.get("材料类型") or "").strip()
+                and (mvals.get("材料牌号") or "").strip()
+                and (mvals.get("材料标准") or "").strip()
+                and (mvals.get("供货状态") or "").strip()
+            ):
+                has_complete_materials = True
+                break
+        if not has_complete_materials:
+            missing_or_incomplete.add(comp)
+
+    is_complete = len(missing_or_incomplete) == 0
+    return (is_complete, list(missing_or_incomplete), all_selected)
+
+
+def update_insulation_support_material_status(product_id, element_id, is_complete):
+    """更新保温支撑元件的左侧材料表状态"""
+    try:
+        from modules.cailiaodingyi.db_cnt import get_connection
+        from modules.cailiaodingyi.funcs.funcs_pdf_change import db_config_1
+        define_status = "已定义" if is_complete else "未定义"
+        connection = get_connection(**db_config_1)
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                    UPDATE 产品设计活动表_元件材料表
+                    SET 定义状态 = %s
+                    WHERE 产品ID = %s AND 元件ID = %s
+                """
+                cursor.execute(sql, (define_status, product_id, element_id))
+                updated_count = cursor.rowcount
+                connection.commit()
+                print(f"[保温支撑状态更新] 产品{product_id} 保温支撑元件定义状态已更新为: {define_status} (更新了{updated_count}行)")
+        finally:
+            connection.close()
+    except Exception as e:
+        print(f"[保温支撑状态更新] 更新失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def check_insulation_support_completeness(product_id, element_id):
+    """检查保温支撑元件完整性"""
+    all_selected = get_all_component_names_from_tabs(product_id, element_id)
+    required_components = {"支撑板", "支撑环", "支撑条", "螺母", "螺柱"}
+    rows = load_element_merged_para_product_data(product_id, element_id) or []
+    tab_to_names = {}
+    tab_to_materials = {}
+    for row in rows:
+        tab = (row.get("Tab分类") or "").strip()
+        pname = (row.get("参数名称") or "").strip()
+        pval = (row.get("参数值") or "").strip()
+        if pname == "元件名称":
+            names = []
+            if pval:
+                try:
+                    import json
+                    parsed = json.loads(pval)
+                    if isinstance(parsed, list):
+                        names = [str(x).strip() for x in parsed if str(x).strip()]
+                    else:
+                        names = [x.strip() for x in str(pval).split("、") if x.strip()]
+                except Exception:
+                    names = [x.strip() for x in pval.split("、") if x.strip()]
+            tab_to_names[tab] = set(names)
+        elif pname in {"材料类型", "材料牌号", "材料标准", "供货状态"}:
+            m = tab_to_materials.setdefault(tab, {})
+            m[pname] = pval
+    missing_or_incomplete = set()
+    for comp in required_components:
+        if comp not in all_selected:
+            missing_or_incomplete.add(comp)
+            continue
+        candidate_tabs = [t for t, names in tab_to_names.items() if comp in (names or set())]
+        has_complete_materials = False
+        for t in candidate_tabs:
+            mvals = tab_to_materials.get(t, {})
+            if (
+                (mvals.get("材料类型") or "").strip()
+                and (mvals.get("材料牌号") or "").strip()
+                and (mvals.get("材料标准") or "").strip()
+                and (mvals.get("供货状态") or "").strip()
+            ):
+                has_complete_materials = True
+                break
+        if not has_complete_materials:
+            missing_or_incomplete.add(comp)
+    is_complete = len(missing_or_incomplete) == 0
+    return (is_complete, list(missing_or_incomplete), all_selected)
+
+def update_fixed_saddle_material_status(product_id, element_id, is_complete):
+    try:
+        from modules.cailiaodingyi.db_cnt import get_connection
+        from modules.cailiaodingyi.funcs.funcs_pdf_change import db_config_1
+        define_status = "已定义" if is_complete else "未定义"
+        connection = get_connection(**db_config_1)
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                    UPDATE 产品设计活动表_元件材料表
+                    SET 定义状态 = %s
+                    WHERE 产品ID = %s AND 元件ID = %s
+                """
+                cursor.execute(sql, (define_status, product_id, element_id))
+                updated_count = cursor.rowcount
+                connection.commit()
+                print(f"[支座状态更新] 产品{product_id} 支座元件定义状态已更新为: {define_status} (更新了{updated_count}行)")
+        finally:
+            connection.close()
+    except Exception as e:
+        print(f"[支座状态更新] 更新失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+def check_fixed_saddle_completeness(product_id, element_id):
+    all_selected = get_all_component_names_from_tabs(product_id, element_id)
+    rows = load_element_merged_para_product_data(product_id, element_id) or []
+    support_type = ""
+    tab_to_names = {}
+    tab_to_materials = {}
+    for row in rows:
+        tab = (row.get("Tab分类") or "").strip()
+        pname = (row.get("参数名称") or "").strip()
+        pval = (row.get("参数值") or "").strip()
+        if pname == "支座型式":
+            if (pval or "").strip():
+                support_type = (pval or "").strip()
+        elif pname == "元件名称":
+            names = []
+            if pval:
+                try:
+                    import json
+                    parsed = json.loads(pval)
+                    if isinstance(parsed, list):
+                        names = [str(x).strip() for x in parsed if str(x).strip()]
+                    else:
+                        names = [x.strip() for x in str(pval).split("、") if x.strip()]
+                except Exception:
+                    names = [x.strip() for x in pval.split("、") if x.strip()]
+            tab_to_names[tab] = set(names)
+        elif pname in {"材料类型", "材料牌号", "材料标准", "供货状态"}:
+            m = tab_to_materials.setdefault(tab, {})
+            m[pname] = pval
+    if support_type == "鞍式支座":
+        required_components = {"底板", "腹板", "筋板", "垫板"}
+    elif support_type == "耳式支座":
+        required_components = {"底板", "筋板", "垫板", "盖板"}
+    else:
+        return (False, ["支座型式"], all_selected)
+    missing_or_incomplete = set()
+    for comp in required_components:
+        if comp not in all_selected:
+            missing_or_incomplete.add(comp)
+            continue
+        candidate_tabs = [t for t, names in tab_to_names.items() if comp in (names or set())]
+        has_complete_materials = False
+        for t in candidate_tabs:
+            mvals = tab_to_materials.get(t, {})
+            if (
+                (mvals.get("材料类型") or "").strip()
+                and (mvals.get("材料牌号") or "").strip()
+                and (mvals.get("材料标准") or "").strip()
+                and (mvals.get("供货状态") or "").strip()
+            ):
+                has_complete_materials = True
+                break
+        if not has_complete_materials:
+            missing_or_incomplete.add(comp)
+    is_complete = len(missing_or_incomplete) == 0
+    return (is_complete, list(missing_or_incomplete), all_selected)
 
 def get_selected_component_names_from_other_tabs(table, support_type):
     """获取其他Tab页已选择的元件名称（用于过滤当前Tab页的选项）"""
