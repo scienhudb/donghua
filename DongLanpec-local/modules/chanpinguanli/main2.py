@@ -38,11 +38,7 @@ import modules.chanpinguanli.auto_edit_row as auto_edit_row
 class cpgl_Stats(QtWidgets.QWidget):
     def __init__(self,line_tip=None):
         super().__init__()
-        # 使用绝对路径加载UI文件，避免工作目录变化导致的问题
-        import os
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        ui_path = os.path.join(current_dir, "guanli.ui")
-        uic.loadUi(ui_path, self)
+        uic.loadUi("modules/chanpinguanli/guanli.ui", self)
         # 强制给整个界面设置字体
         font = QtWidgets.QApplication.font()
         self.setFont(font)
@@ -166,14 +162,12 @@ class cpgl_Stats(QtWidgets.QWidget):
         # 项目信息
         # 上面四个 加一个确认
         self.findChild(QtWidgets.QPushButton, "new_project_btn").clicked.connect(new_project_button.prepare_new_project)
-
         # self.findChild(QtWidgets.QPushButton, "confirm_project_btn").clicked.connect(project_confirm_btn.save_project_to_db)
         # lxy修改
         self.findChild(QtWidgets.QPushButton, "confirm_project_btn").clicked.connect(self._on_save_clicked)
 
         self.findChild(QtWidgets.QPushButton, "edit_project_btn").clicked.connect(modify_project.modify_project)
         self.findChild(QtWidgets.QPushButton, "open_project_btn").clicked.connect(open_project.open_project)
-        # 删除项目
         self.findChild(QtWidgets.QPushButton, "delete_project_btn").clicked.connect(project_confirm_btn.delete_project_and_related_data)
         # self.findChild(QtWidgets.QPushButton, "project_path_button").clicked.connect(main.select_project_path)
 
@@ -232,8 +226,6 @@ class cpgl_Stats(QtWidgets.QWidget):
         bianl.product_type_combo.showPopup = main.wrap_show_popup(bianl.product_type_combo.showPopup, main.load_product_types)
         bianl.product_form_combo.showPopup = main.wrap_show_popup(bianl.product_form_combo.showPopup, main.load_product_forms)
         bianl.product_type_combo.currentTextChanged.connect(main.load_product_forms)
-        # lxy101
-        bianl.product_type_combo.currentTextChanged.connect(main.on_product_type_changed)
 
         # 设计阶段 下拉框  改88
         # bianl.design_stage_combo.showPopup = main.wrap_show_popup(bianl.design_stage_combo.showPopup,
@@ -751,10 +743,9 @@ class cpgl_Stats(QtWidgets.QWidget):
                 print("【调试】项目信息已输入但未保存")
                 return False
             else:
-                print("【调试】项目信息为空，继续检查其他部分")
+                print("【调试】项目信息为空")
 
         # ---------------- 产品信息 ----------------
-        has_product_edit = False
         for row, status_dict in bianl.product_table_row_status.items():
             if not isinstance(status_dict, dict):
                 continue
@@ -763,70 +754,51 @@ class cpgl_Stats(QtWidgets.QWidget):
             if status == "view":
                 continue
 
-            has_product_edit = True
             for col in range(1, bianl.product_table.columnCount()):
                 item = bianl.product_table.item(row, col)
                 if item and item.text().strip():
                     print(f"【调试】第{row + 1}行产品信息有输入，未保存")
                     return False
 
-        if has_product_edit:
-            print("【调试】产品信息部分全部为空或为 view 状态")
-        else:
-            print("【调试】没有产品信息编辑状态")
+        print("【调试】产品信息部分全部为空或为 view 状态")
 
         # ----------------lxy 产品定义 + 工作信息 ----------------
-        # 关键修复：只有当当前有选中的产品时，才检查产品定义区域
-        current_product_id = getattr(bianl, "current_product_id", None)
-        if not current_product_id:
-            print("【调试】当前未选中产品，跳过产品定义检查")
-        else:
-            # 查找当前选中产品对应的行
-            current_row = None
-            for row, status_dict in bianl.product_table_row_status.items():
-                if isinstance(status_dict, dict) and status_dict.get("product_id") == current_product_id:
-                    current_row = row
-                    break
-            
-            if current_row is not None:
-                status_dict = bianl.product_table_row_status.get(current_row, {})
-                def_status = status_dict.get("definition_status", "view")
-                print(f"【调试】[产品定义] 当前产品行 {current_row + 1} definition_status = {def_status}")
+        for row, status_dict in bianl.product_table_row_status.items():
+            if not isinstance(status_dict, dict):
+                continue
 
-                if def_status == "edit":
-                    # 定义区
-                    definition_fields = {
-                        "产品类型": bianl.product_type_combo.currentText().strip(),
-                        "产品型式": bianl.product_form_combo.currentText().strip(),
-                        "产品型号": bianl.product_model_input.text().strip(),
-                        "图号前缀": bianl.drawing_prefix_input.text().strip(),
-                    }
-                    for label, value in definition_fields.items():
-                        print(f"【调试】{label} = '{value}'")
-                    if any(definition_fields.values()):
-                        print(f"【调试】当前产品定义字段有输入，未保存")
-                        return False
+            # ✅ 修正取键名
+            def_status = status_dict.get("definition_status", "view")
+            print(f"【调试】[产品定义] 第{row + 1}行 definition_status = {def_status}")
 
-                    # 工作信息区
-                    work_fields = {
-                        "设计": bianl.design_input.text().strip(),
-                        "校对": bianl.proofread_input.text().strip(),
-                        "审核": bianl.review_input.text().strip(),
-                        "标准化": bianl.standardization_input.text().strip(),
-                        "批准": bianl.approval_input.text().strip(),
-                        "会签": bianl.co_signature_input.text().strip(),
-                    }
-                    for label, value in work_fields.items():
-                        print(f"【调试】(工作信息) {label} = '{value}'")
-                    if any(work_fields.values()):
-                        print(f"【调试】当前产品工作信息有输入，未保存")
-                        return False
-                    
-                    print("【调试】当前产品定义和工作信息部分检查完成，无未保存数据")
-                else:
-                    print("【调试】当前产品不在编辑状态")
-            else:
-                print("【调试】未找到当前产品对应的行")
+            if def_status == "edit":
+                # 定义区
+                definition_fields = {
+                    "产品类型": bianl.product_type_combo.currentText().strip(),
+                    "产品形式": bianl.product_form_combo.currentText().strip(),
+                    "产品型号": bianl.product_model_input.text().strip(),
+                    "图号前缀": bianl.drawing_prefix_input.text().strip(),
+                }
+                for label, value in definition_fields.items():
+                    print(f"【调试】{label} = '{value}'")
+                if any(definition_fields.values()):
+                    print(f"【调试】第{row + 1}行产品定义字段有输入，未保存")
+                    return False
+
+                # 工作信息区
+                work_fields = {
+                    "设计": bianl.design_input.text().strip(),
+                    "校对": bianl.proofread_input.text().strip(),
+                    "审核": bianl.review_input.text().strip(),
+                    "标准化": bianl.standardization_input.text().strip(),
+                    "批准": bianl.approval_input.text().strip(),
+                    "会签": bianl.co_signature_input.text().strip(),
+                }
+                for label, value in work_fields.items():
+                    print(f"【调试】(工作信息) {label} = '{value}'")
+                if any(work_fields.values()):
+                    print(f"【调试】第{row + 1}行工作信息有输入，未保存")
+                    return False
 
         # # ---------------- 产品定义 ----------------改66definition_status
         # for row, status_dict in bianl.product_table_row_status.items():

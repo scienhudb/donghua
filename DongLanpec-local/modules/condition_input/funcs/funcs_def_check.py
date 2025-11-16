@@ -184,18 +184,14 @@ def check_work_temp_in(value, tip_widget, param_name, column_name, table_widget,
     if design_temp is not None:
         if design_temp > 0:
             if not (-269 < temp < design_temp):
-                if temp > design_temp:
+                if temp >= design_temp:
                     return "error", "工作温度（入口）应小于设计温度（最高）*，请核对后输入"
-                elif temp == design_temp:
-                    pass
                 else:
                     return "error", "工作温度（入口）应大于 -269℃，请核对后输入"
         elif design_temp < 0:
             if not (design_temp < temp < 0):
-                if temp < design_temp:
+                if temp <= design_temp:
                     return "error", "工作温度（入口）应大于设计温度（最高）*，请核对后输入"
-                elif temp == design_temp:
-                    pass
                 else:
                     return "error", "工作温度（入口）应小于 0℃，请核对后输入"
 
@@ -211,12 +207,9 @@ def check_work_temp_in(value, tip_widget, param_name, column_name, table_widget,
         if design_temp < current_work_max:
             return "warn", "设计温度应当不低于最高工作温度。不合规。"
         elif design_temp == current_work_max:
-            # return "warn", "设计温度应当不低于最高工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最高工作温度。"
         elif (design_temp - current_work_max) > 50:
             return "warn", "设计温度相对于工作温度的裕度较大。"
-        else:
-            pass
 
 
     return "ok", ""
@@ -265,18 +258,14 @@ def check_work_temp_out(value, tip_widget, param_name, column_name, table_widget
     if design_temp is not None:
         if design_temp > 0:
             if not (-269 < temp < design_temp):
-                if temp > design_temp:
+                if temp >= design_temp:
                     return "error", "工作温度（出口）应小于设计温度（最高）*，请核对后输入"
-                elif temp == design_temp:
-                    pass
                 else:
                     return "error", "工作温度（出口）应大于 -269℃，请核对后输入"
         elif design_temp < 0:
             if not (design_temp < temp):
-                if temp < design_temp:
+                if temp <= design_temp:
                     return "error", "工作温度（出口）应大于设计温度（最高）*，请核对后输入"
-                elif temp == design_temp:
-                    pass
                 else:
                     return "error", "工作温度（出口）应小于 0℃，请核对后输入"
         # # 校验最低设计温度
@@ -292,18 +281,14 @@ def check_work_temp_out(value, tip_widget, param_name, column_name, table_widget
     if design_temp_2 is not None:
         if design_temp_2 > 0:
             if not (-269 < temp < design_temp_2):
-                if temp > design_temp_2:
+                if temp >= design_temp_2:
                     return "error", "工作温度（出口）应小于设计温度2（设计工况2），请核对后输入"
-                elif temp == design_temp_2:
-                    pass
                 else:
                     return "error", "工作温度（出口）应大于 -269℃，请核对后输入"
         elif design_temp_2 < 0:
             if not (design_temp_2 < temp):
                 if temp <= design_temp_2:
                     return "error", "工作温度（出口）应大于设计温度2（设计工况2），请核对后输入"
-                elif temp == design_temp_2:
-                    pass
                 else:
                     return "error", "工作温度（出口）应小于 0℃，请核对后输入"
         # 差值超100警告保留
@@ -322,12 +307,9 @@ def check_work_temp_out(value, tip_widget, param_name, column_name, table_widget
         if design_temp < current_work_max:
             return "warn", "设计温度应当不低于最高工作温度。不合规。"
         elif design_temp == current_work_max:
-            # return "warn", "设计温度应当不低于最高工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最高工作温度。"
         elif (design_temp - current_work_max) > 50:
             return "warn", "设计温度相对于工作温度的裕度较大。"
-        else:
-            pass
 
     return "ok", ""
 
@@ -628,12 +610,9 @@ def check_design_temp_max(value, tip_widget, param_name, column_name, table_widg
         if temp < work_temp_max:
             return "warn", "设计温度应当不低于最高工作温度。不合规。"
         elif temp == work_temp_max:
-            # return "warn", "设计温度应当不低于最高工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最高工作温度。"
         elif (temp - work_temp_max) > 50:
             return "warn", "设计温度相对于工作温度的裕度较大。"
-        else:
-            pass
     return "ok", ""
 
 def check_design_temp_min(value, tip_widget, param_name, column_name, table_widget, col_index) -> Tuple[str, str]:
@@ -689,13 +668,12 @@ def check_design_temp_min(value, tip_widget, param_name, column_name, table_widg
 
     if work_min is not None:
         if temp > work_min:
-            return "warn", "最低设计温度应当不高于最低工作温度。"
+            return "warn", "设计温度应当不高于最低工作温度。"
         elif temp == work_min:
-            # return "warn", "设计温度应当不低于最低工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最低工作温度。"
         else:  # temp < work_min
             if (work_min - temp) > 50:
-                return "warn", "最低设计温度相对于工作温度的裕度较大。"
+                return "warn", "设计温度相对于工作温度的裕度较大。"
     return "ok", ""
     # 根据与最低工作温度的比较结果返回相应提示   已修改
     # if work_min is not None and temp >= work_min and work_min==work_in:
@@ -1034,186 +1012,4 @@ def check_trail_stand_pressure_type(value, tip_widget, param_name, column_name, 
     if not is_valid(trial_pressure_lying) or not is_valid(trial_pressure_stand):
         return "warn", "耐压实验类型和耐压试验压力不符合标准规定，请核对后输入"
 
-    return "ok", ""
-
-def check_pressure_test_temp(value: str, tip_widget, param_name: str, column_name: str, table_widget, col_index: int) -> Tuple[str, str]:
-    """
-    校验“耐压试验温度”参数。
-    规则：耐压试验温度不得高于“设计温度（最高）*”。
-    """
-    # 1. 基础校验：空值和数据类型
-    if value.strip() == "":
-        return "ok", ""  # 如果输入为空，则通过校验
-    try:
-        test_temp = float(value)
-    except (ValueError, TypeError):
-        return "error", "输入数据类型有误，请确认后输入"
-
-    # 2. 获取依赖参数：“设计温度（最高）*”
-    if not table_widget:
-        return "ok", ""  # 如果没有表格控件，则无法比较，直接通过
-
-    design_temp = None
-    for row in range(table_widget.rowCount()):
-        # 使用辅助函数获取该行的参数名
-        name = get_param_name(table_widget, row)
-        if name == "设计温度（最高）*":
-            val_item = table_widget.item(row, col_index)
-            # 确保item存在且内容不为空
-            if val_item and val_item.text().strip():
-                try:
-                    design_temp = float(val_item.text())
-                    # 找到了需要的参数，可以提前结束循环
-                    break
-                except (ValueError, TypeError):
-                    # 如果设计温度的值格式不正确，则无法进行比较，本次校验通过
-                    return "ok", ""
-            else:
-                # 如果设计温度为空，则无法比较，本次校验通过
-                return "ok", ""
-
-    # 3. 核心规则校验
-    # 仅当成功获取到 design_temp 的值后才进行比较
-    if design_temp is not None:
-        if test_temp > design_temp:
-            return "warn", "耐压试验温度不得高于设计温度（最高）*"
-
-    # 4. 所有校验通过
-    return "ok", ""
-
-
-def check_avg_tube_metal_temp(value: str, tip_widget, param_name: str, column_name: str, table_widget,
-                              col_index: int) -> Tuple[str, str]:
-    """
-    校验“沿长度平均的换热管金属温度*”的函数。
-    - 规则1 (参数范围): [-269, 900]
-    - 规则2 (参数关联):
-      - 若为正值，需小于 设计温度（最高）*
-      - 若为负值，需大于 最低设计温度
-    """
-    # 1. 基础校验：空值和数据类型
-    if not value.strip():
-        return "ok", ""  # 空值不校验，直接通过
-    try:
-        avg_metal_temp = float(value)
-    except ValueError:
-        return "error", "输入数据类型有误，请确认后输入"
-
-    # 2. 参数范围校验 (Requirement 2)
-    # 限制在 [-269, 900] 范围内
-    if not (-269 <= avg_metal_temp <= 900):
-        return "error", "输入数值已超过GB/T 150-2024适用范围，请核对后输入"
-
-    # 3. 参数关联校验 (Requirement 1)
-    # 如果没有表格控件，无法进行关联校验，直接返回成功
-    if not table_widget:
-        return "ok", ""
-
-    # 3.1 从表格中获取关联参数的值
-    design_temp_max = None
-    design_temp_min = None
-
-    for row in range(table_widget.rowCount()):
-        name = get_param_name(table_widget, row)
-        if not name:
-            continue
-
-        # 获取同一列（管程或壳程）的参数值
-        val_item = table_widget.item(row, col_index)
-        if not val_item or not val_item.text().strip():
-            continue
-
-        try:
-            # 找到并转换关联参数的值
-            if name == "设计温度（最高）*":
-                design_temp_max = float(val_item.text())
-            elif name == "最低设计温度":
-                design_temp_min = float(val_item.text())
-        except ValueError:
-            # 如果关联参数的值不是数字，则跳过，无法进行比较
-            continue
-
-    # 3.2 执行关联校验逻辑
-    # ① 当平均金属温度为正值时
-    if avg_metal_temp > 0:
-        if design_temp_max is not None:
-            # 要求：avg_metal_temp < design_temp_max
-            # 触发警告的条件：avg_metal_temp >= design_temp_max
-            if avg_metal_temp >= design_temp_max:
-                return "warn", "沿长度平均的换热管金属温度应小于设计温度（最高）*，请核对后输入"
-
-    # ② 当平均金属温度为负值时
-    elif avg_metal_temp < 0:
-        # 如果“最低设计温度”有值，则进行校验
-        if design_temp_min is not None:
-            # 要求：design_temp_min < avg_metal_temp
-            # 触发警告的条件：avg_metal_temp <= design_temp_min
-            if avg_metal_temp <= design_temp_min:
-                return "warn", "沿长度平均的换热管金属温度应大于最低设计温度，请核对后输入"
-
-    # 所有校验都通过
-    return "ok", ""
-
-
-def check_avg_shell_metal_temp(value: str, tip_widget, param_name: str, column_name: str, table_widget,
-                               col_index: int) -> Tuple[str, str]:
-    """
-    校验“沿长度平均的壳程圆筒金属温度*”的函数。
-    - 规则1 (参数范围): [-269, 900]
-    - 规则2 (参数关联):
-      - 若为正值，需小于 设计温度（最高）*
-      - 若为负值，需大于 最低设计温度
-    """
-    # 1. 基础校验：空值和数据类型
-    if not value.strip():
-        return "ok", ""  # 空值不校验，直接通过
-    try:
-        avg_metal_temp = float(value)
-    except ValueError:
-        return "error", "输入数据类型有误，请确认后输入"
-
-    # 2. 参数范围校验 (Requirement 2)
-    # 限制在 [-269, 900] 范围内
-    if not (-269 <= avg_metal_temp <= 900):
-        return "error", "输入数值已超过GB/T 150-2024适用范围，请核对后输入"
-
-    # 3. 参数关联校验 (Requirement 1)
-    if not table_widget:
-        return "ok", ""
-
-    # 3.1 从表格中获取关联参数的值
-    design_temp_max = None
-    design_temp_min = None
-
-    for row in range(table_widget.rowCount()):
-        name = get_param_name(table_widget, row)
-        if not name:
-            continue
-
-        val_item = table_widget.item(row, col_index)
-        if not val_item or not val_item.text().strip():
-            continue
-
-        try:
-            if name == "设计温度（最高）*":
-                design_temp_max = float(val_item.text())
-            elif name == "最低设计温度":
-                design_temp_min = float(val_item.text())
-        except ValueError:
-            continue
-
-    # 3.2 执行关联校验逻辑
-    # ① 当平均金属温度为正值时
-    if avg_metal_temp > 0:
-        if design_temp_max is not None:
-            if avg_metal_temp >= design_temp_max:
-                return "warn", "沿长度平均的壳程圆筒金属温度应小于设计温度（最高）*，请核对后输入"
-
-    # ② 当平均金属温度为负值时
-    elif avg_metal_temp < 0:
-        if design_temp_min is not None:
-            if avg_metal_temp <= design_temp_min:
-                return "warn", "沿长度平均的壳程圆筒金属温度应大于最低设计温度，请核对后输入"
-
-    # 所有校验都通过
     return "ok", ""

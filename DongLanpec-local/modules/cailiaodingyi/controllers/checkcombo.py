@@ -21,9 +21,8 @@ class CheckComboDelegate(QStyledItemDelegate):
         combo.setEditable(False)
         combo.setInsertPolicy(QComboBox.NoInsert)
 
-        # ★★改动点1：拿"最新候选"——优先从表属性读取，失败用构造时的options兜底
+        # ★★改动点1：拿“最新候选”——优先从表属性读取，失败用构造时的options兜底
         cands = self._get_candidates(option, index)
-        print(f"[CheckComboDelegate] createEditor: 最终使用的候选选项: {cands}")
 
         # 模型：第0行显示文本；1..n为可勾选项
         model = QStandardItemModel(combo)
@@ -133,10 +132,8 @@ class CheckComboDelegate(QStyledItemDelegate):
             cands = table.property("gk_code_candidates")
             if cands:
                 # 转为 list，确保可迭代
-                print(f"[CheckComboDelegate] 从table.property读取候选选项: {list(cands)}")
                 return list(cands)
         # 兜底：构造时传入的 options
-        print(f"[CheckComboDelegate] 使用构造时传入的选项: {list(self.options)}")
         return list(self.options)
 
 

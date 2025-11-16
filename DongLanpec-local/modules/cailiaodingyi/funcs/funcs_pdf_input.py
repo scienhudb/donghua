@@ -1160,7 +1160,15 @@ def load_guankou_param_structure_from_db() -> list:
     finally:
         connection.close()
 
-
+def get_fastener_param_structure_from_db() -> list:
+    connection = pymysql.connect(**db_config_2)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 参数名称, 显示结构, 控件类型, 字段前缀 FROM 设备法兰紧固件合并展示表 ORDER BY 参数ID")
+            results = cursor.fetchall()
+            return results
+    finally:
+        connection.close()
 
 
 
@@ -1395,20 +1403,11 @@ def init_buguan_defaults(product_id):
             if row and row["cnt"] > 0:
                 print(f"[布管参数] 产品 {product_id} 已有布管参数，跳过初始化")
                 return
-            cur1.execute("""
-                           SELECT 产品型式
-                           FROM 产品设计活动表
-                           WHERE 产品ID=%s
-                       """, (product_id,))
-            row = cur1.fetchone()
-            if row and (row["产品型式"] == "AEU" or row["产品型式"] == "BEU"):
 
-                # 2. 从元件库读取默认布管参数
-                cur2.execute("SELECT 参数名, 参数值, 单位 FROM 布管参数默认表_u型管")
-                defaults = cur2.fetchall()
-            else:
-                cur2.execute("SELECT 参数名, 参数值, 单位 FROM 布管参数默认表_浮头式")
-                defaults = cur2.fetchall()
+            # 2. 从元件库读取默认布管参数
+            cur2.execute("SELECT 参数名, 参数值, 单位 FROM 布管参数默认表")
+            defaults = cur2.fetchall()
+
             # 3. 插入到活动库
             for d in defaults:
                 cur1.execute("""
@@ -1429,7 +1428,6 @@ def init_buguan_defaults(product_id):
     finally:
         conn1.close()
         conn2.close()
-
 
 
 

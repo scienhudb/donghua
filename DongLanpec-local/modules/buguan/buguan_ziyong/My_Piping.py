@@ -29,9 +29,11 @@ from modules.buguan.buguan_ziyong.sheet_form_page import SheetFormPage
 from modules.buguan.buguan_ziyong.tube_sheet_connection import TubeSheetConnectionPage
 from modules.chanpinguanli.chanpinguanli_main import product_manager
 import modules.buguan.buguan_ziyong.qiaotineizhijing as qtzj
-from modules.condition_input.view import check_project_and_product
 
-product_id = None
+# product_id = 'PD2025092421444001'
+
+product_id = 'PD20250929'
+
 
 def on_product_id_changed(new_id):
     global product_id
@@ -472,18 +474,9 @@ def none_tube_centers(height_0_180, height_90_270, Di, do, centers):
 
 # TODO 此处初始化
 
+
 class TubeLayoutEditor(QMainWindow):
     def __init__(self, line_tip=None):
-        # 0903会议纪要 首先进行项目和产品检查
-        # 注意：必须在super().__init__()之前检查，避免创建不必要的窗口
-        print("准备检查项目和产品状态...")
-        can_open, msg = check_project_and_product()
-        if not can_open:
-            # 创建一个临时窗口来显示弹窗
-            super().__init__()
-            QMessageBox.information(self, "提示", msg)
-            self.close()
-            raise RuntimeError("项目或产品检查失败，无法创建管束设计界面")
         super().__init__()
 
         self.productID = product_id  # 产品ID
@@ -512,9 +505,9 @@ class TubeLayoutEditor(QMainWindow):
         self.coord_y_line1_4 = []
         self.coord_y_line2_4 = []
         self.coord_y_line3_4 = []
-        self.original_param_values = {}
-        self.modified_rows = set()
-        self.is_loading_data = False
+        self.original_param_values = {}  # 存储原始参数值 {(row, col): value}
+        self.modified_rows = set()  # 存储被修改的行索引
+        self.is_loading_data = False  # 防止初始化时误触发
         self.center_dangguan = []
         self.center_dangban = []
         self.side_dangban = []
@@ -529,35 +522,32 @@ class TubeLayoutEditor(QMainWindow):
         self.sheet_form_param_layout = QVBoxLayout()
         self.sheet_form_image_labels = []
         self._current_centers = []
-        self._selected_centers = []
-        self.selected_centers_changed_callbacks = []
         self.global_centers = []
         self.DN = None
-        self.slipway_centers = []
+        self.slipway_centers = []  # 滑道干涉的坐标
         self.block_thickness = 15
         self.sheet_form_current_images = None
         self.setWindowTitle("布管参数设计")
         self.setGeometry(200, 200, 1600, 900)  # TODO 窗格大小修改了一下，不改自动拉伸时会显得很局促
-        self.is_fullscreen = False
+        self.is_fullscreen = False  # 初始化全屏状态标志
         self.setup_ui()
-        self.connection_lines = []
+        self.connection_lines = []  # 用于存储所有绘制的连线
         self.r = 0
         self.isDi_change = False
         self.isDN_change = False
         self.center_dangban_length = 0
         self.mouse_x = 0
         self.mouse_y = 0
-        # self.selected_centers = []
+        self.selected_centers = []
         self.operations = []
         self.lagan = False
         self.tube_hole_data = []
-        self.baffle_lines = []
         self.tube_data = []
-        self.has_piped = False
+        self.has_piped = False  # 布管按钮点击状态
         self.tube_form_data = []
-        self.sorted_current_centers_up = []
-        self.sorted_current_centers_down = []
-        self.full_sorted_current_centers_up = []
+        self.sorted_current_centers_up = []  # 新增：初始化上半部分排序的中心坐标列表
+        self.sorted_current_centers_down = []  # 新增：初始化下半部分排序的中心坐标列表
+        self.full_sorted_current_centers_up = []  # 满布状态
         self.full_sorted_current_centers_down = []
         self.load_initial_data()
 
@@ -569,52 +559,13 @@ class TubeLayoutEditor(QMainWindow):
 
     @property
     def current_centers(self):
-        return self._current_centers
+        return self._current_centers  # 返回私有变量
 
     @current_centers.setter
     def current_centers(self, value):
-        self._current_centers = value
-        self.update_total_holes_count()
+        self._current_centers = value  # 更新私有变量
+        self.update_total_holes_count()  # 每次赋值后自动更新标签
         self.update_tube_nums()
-
-    @property
-    def selected_centers(self):
-        return self._selected_centers
-
-    @selected_centers.setter
-    def selected_centers(self, value):
-        if self._selected_centers != value:
-            self._selected_centers = value
-            self.show_distance()
-            for callback in self.selected_centers_changed_callbacks:
-                callback(value)
-
-    def register_selected_centers_callback(self, callback):
-        """注册 selected_centers 变化的回调函数"""
-        if callback not in self.selected_centers_changed_callbacks:
-            self.selected_centers_changed_callbacks.append(callback)
-
-    def unregister_selected_centers_callback(self, callback):
-        """取消注册回调函数"""
-        if callback in self.selected_centers_changed_callbacks:
-            self.selected_centers_changed_callbacks.remove(callback)
-
-    def show_distance(self):
-        if len(self.selected_centers) == 2:
-            distance = self.calculate_distance(self.selected_centers)
-            message = f"您选中的两个换热管孔的间距为 {distance: .4f} mm。"
-
-            try:
-                self.line_tip.setText(message)
-                self.line_tip.setVisible(True)
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(5000, lambda: self.line_tip.setText(""))
-            except AttributeError:
-                pass
-
-            print(message)
-        else:
-            print("选中的圆心不是两个")
 
     def setup_param_listeners(self):
         """为参数表格添加变化监听，实时更新参数列表"""
@@ -726,34 +677,29 @@ class TubeLayoutEditor(QMainWindow):
     def create_header(self):
         """创建选项卡标题"""
         self.header = QTabWidget()
-        self.header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.header.addTab(QWidget(), "管板形式")
-        self.header.addTab(QWidget(), "布管")  # 默认显示
+        # 设置选项卡自动扩展
+        self.header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # 新增
+        self.header.addTab(QWidget(), "布管")
         self.header.addTab(QWidget(), "管-板连接")
-        self.header.addTab(QWidget(), "轴向设计")
-
-        self.header.setCurrentIndex(1)
+        self.header.addTab(QWidget(), "管板形式")
         self.header.currentChanged.connect(self.switch_page)
         self.main_layout.addWidget(self.header)
 
     def create_body(self):
         """创建主体内容"""
         self.stacked_widget = QStackedWidget()
-
-        self.sheet_form_page = SheetFormPage(self)
-        self.stacked_widget.addWidget(self.sheet_form_page)
-
         self.create_tube_layout_page()
+        # self.create_tube_sheet_page()
         self.tube_sheet_page = TubeSheetConnectionPage(self)
         self.stacked_widget.addWidget(self.tube_sheet_page)
-        self.axial_design_page = QWidget()
-        self.stacked_widget.addWidget(self.axial_design_page)
-
-        self.stacked_widget.setCurrentIndex(1)
+        # self.create_sheet_form_page()
+        self.sheet_form_page = SheetFormPage(self)
+        self.stacked_widget.addWidget(self.sheet_form_page)
         self.main_layout.addWidget(self.stacked_widget)
 
-    # 布管页面
     def create_tube_layout_page(self):
+        """布管页面"""
+
         page = QWidget()
         self.main_tube_layout = QHBoxLayout(page)
         self.main_tube_layout.setContentsMargins(5, 5, 5, 5)
@@ -767,35 +713,17 @@ class TubeLayoutEditor(QMainWindow):
         self.param_table.setColumnCount(4)
         self.param_table.setHorizontalHeaderLabels(["序号", "参数名", "参数值", "单位"])
         self.param_table.verticalHeader().setVisible(False)
-
-        # 设置列宽自适应策略
         self.param_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.param_table.horizontalHeader().setDefaultSectionSize(100)
         self.param_table.horizontalHeader().setMinimumSectionSize(10)
-
-        # 为各列设置不同的调整策略
-        # 序号列：根据内容自适应，用户也可调整
         self.param_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
-        # 参数名：可拉伸，占据较多空间
-        self.param_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        # 参数值：交互式调整
+        self.param_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
         self.param_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
-        # 单位列：根据内容自适应
-        self.param_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-
-        # 设置初始列宽比例（在表格显示后自动调整）
-        def set_initial_column_widths():
-            total_width = self.param_table.viewport().width()
-            if total_width > 0:
-                # 设置合理的初始比例：序号10%，参数名55%，参数值25%，单位10%
-                self.param_table.setColumnWidth(0, int(total_width * 0.1))  # 序号
-                self.param_table.setColumnWidth(1, int(total_width * 0.55))  # 参数名
-                self.param_table.setColumnWidth(2, int(total_width * 0.25))  # 参数值
-                self.param_table.setColumnWidth(3, int(total_width * 0.1))  # 单位
-
-        # 在表格显示后设置初始列宽
-        self.param_table.showEvent = lambda event: set_initial_column_widths()
-
+        self.param_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
+        self.param_table.setColumnWidth(0, 50)
+        self.param_table.setColumnWidth(1, 320)
+        self.param_table.setColumnWidth(2, 120)
+        self.param_table.setColumnWidth(3, 50)
         param_layout.addWidget(self.param_table)
 
         self.center_frame = QFrame()
@@ -809,19 +737,17 @@ class TubeLayoutEditor(QMainWindow):
         self.toolbar_layout.setSpacing(10)
         toolbar_container = QWidget()
         toolbar_container.setLayout(self.toolbar_layout)
-        toolbar_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         center_layout.addWidget(toolbar_container)
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        image_path = os.path.join(current_dir, "static", "tab栏", "utils.png")
+        image_path = r"modules/buguan/buguan_ziyong/static/tab栏/utils.png"
         toolbar_label = QLabel()
         try:
             toolbar_pixmap = QPixmap(image_path)
             if not toolbar_pixmap.isNull():
-                scale_ratio = 0.8
                 scaled_pixmap = toolbar_pixmap.scaled(
-                    int(toolbar_pixmap.width() * scale_ratio),
-                    int(toolbar_pixmap.height() * scale_ratio),
+                    int(toolbar_pixmap.width() * 0.5),
+                    int(toolbar_pixmap.height() * 0.5),
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
                 )
@@ -836,7 +762,7 @@ class TubeLayoutEditor(QMainWindow):
                 self.toolbar_layout.addWidget(btn)
 
         self.toolbar_layout.addStretch()
-        # center_layout.addLayout(self.toolbar_layout)
+        center_layout.addLayout(self.toolbar_layout)
 
         # 图形视图容器
         self.graphics_container = QWidget()
@@ -892,11 +818,9 @@ class TubeLayoutEditor(QMainWindow):
 
         for name, row, col in buttons:
             btn = QPushButton()
-            btn.setFixedSize(35, 35)
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            icon_path = os.path.join(current_dir, "static", "按钮", f"{name}.png")
-            btn.setIcon(QIcon(icon_path))
-            btn.setIconSize(QSize(30, 30))
+            btn.setFixedSize(40, 40)
+            btn.setIcon(QIcon(f"modules/buguan/buguan_ziyong/static/按钮/{name}.png"))
+            btn.setIconSize(QSize(35, 35))
             btn.setStyleSheet("""
                 QPushButton {
                     border: 2px solid #8f8f91;
@@ -964,7 +888,7 @@ class TubeLayoutEditor(QMainWindow):
         self.action_bar = QHBoxLayout()
         self.action_bar.addStretch()
 
-        actions = ["布管", "交叉布管", "全屏", "操作记录"]
+        actions = ["布管", "交叉布管", "清屏", "全屏", "操作记录"]
         for action in actions:
             btn = QPushButton(action)
             btn.setStyleSheet("padding: 5px 10px;")
@@ -1031,9 +955,12 @@ class TubeLayoutEditor(QMainWindow):
         # ✅ 保留：表格左键选中事件（确保左键点击正常选中）
         self.hole_distribution_table.itemSelectionChanged.connect(self.on_row_selection_changed)
 
+        # ❌ 可选删除：表格单独的右键事件（避免与全局右键重复）
+        # 若之前添加过以下代码，建议删除
         # self.hole_distribution_table.setContextMenuPolicy(Qt.CustomContextMenu)
         # self.hole_distribution_table.customContextMenuRequested.connect(self.on_table_right_click)
 
+        # ---------------------- 布局比例设置（原有代码，无需修改） ----------------------
         self.main_tube_layout.addWidget(self.param_frame, 3)
         self.main_tube_layout.addWidget(self.center_frame, 4)
         self.main_tube_layout.addWidget(self.right_frame, 2)
@@ -1055,14 +982,6 @@ class TubeLayoutEditor(QMainWindow):
         page.mousePressEvent = handle_global_right_click
 
         return page
-
-    def _create_fallback_toolbar_buttons(self):
-        """创建备用工具栏按钮（当图片加载失败时使用）"""
-        tools = ["放大", "缩小", "平移", "测量", "导出"]
-        for tool in tools:
-            btn = QPushButton(tool)
-            btn.setFixedSize(80, 30)
-            self.toolbar_layout.addWidget(btn)
 
     def get_current_tube_hole_data(self):
         """TODO 获取布管界面管孔数量分布的当前数据列表"""
@@ -1306,11 +1225,10 @@ class TubeLayoutEditor(QMainWindow):
                     print(f"关闭交叉布管查询连接时出错：{str(close_e)}")
 
     def load_initial_data(self):
+        from PyQt5.QtWidgets import QMessageBox
         if self.productID is None:
             QMessageBox.information(self, "提示", "请先创建项目!")
-            return  # 关键修复：如果productID为None，直接返回，避免后续错误
         print("加载初始数据")
-
         self.isBlock = False
         self.heat_exchanger = None
         product_conn_for_type = None
@@ -1354,7 +1272,7 @@ class TubeLayoutEditor(QMainWindow):
             if product_conn_for_type and hasattr(product_conn_for_type, 'open') and product_conn_for_type.open:
                 try:
                     product_conn_for_type.close()
-                    # print("产品型式查询连接已关闭")
+                    print("产品型式查询连接已关闭")
                 except Exception as close_e:
                     print(f"关闭产品型式查询连接时出错: {str(close_e)}")
 
@@ -1392,9 +1310,6 @@ class TubeLayoutEditor(QMainWindow):
                     if product_params and isinstance(product_params, (list, tuple)):
                         # 处理公称直径DN等需要关联设计数据表的参数
                         processed_params = []
-                        # 新增：保存从布管参数表读取的原始Di值
-                        original_di_value = None
-
                         for param in product_params:
                             if isinstance(param, dict) and all(key in param for key in ['参数名', '参数值', '单位']):
                                 param_name = param['参数名']
@@ -1413,14 +1328,10 @@ class TubeLayoutEditor(QMainWindow):
                                 # 保存原始值，如果没有查询到新值则使用原始值
                                 final_value = param_value
 
-                                # 保存从布管参数表读取的原始Di值
-                                if param_name == "壳体内直径 Di":
-                                    original_di_value = param_value
-
                                 # 公称直径DN的个性化查询（仅产品库有设计数据表）
                                 if param_name == "公称直径 DN":
-                                    # print(param_value)
-                                    # print("公称直径原本的值")
+                                    print(param_value)
+                                    print("公称直径原本的值")
                                     try:
                                         # 从产品库的设计数据表查询（符合实际表结构）
                                         design_query = """
@@ -1434,8 +1345,8 @@ class TubeLayoutEditor(QMainWindow):
                                         if isinstance(design_data, dict) and '壳程数值' in design_data and design_data[
                                             '壳程数值']:
                                             final_value = design_data['壳程数值']
-                                            # print(final_value)
-                                            # print("从设计数据表中读取的新值")
+                                            print(final_value)
+                                            print("从设计数据表中读取的新值")
                                             if param_value != final_value:
                                                 try:
                                                     delete_query = """DELETE FROM 产品设计活动表_布管元件表 WHERE 产品ID = %s"""
@@ -1473,8 +1384,6 @@ class TubeLayoutEditor(QMainWindow):
                                         print(f"处理是否以外径为基准时出错: {str(e)}，使用原值: {param_value}")
 
                                 elif param_name == "壳体内直径 Di":
-                                    # 新增：保存从设计数据表读取前的原始值
-                                    design_di_value = None
                                     try:
                                         design_query = """
                                             SELECT 管程数值 
@@ -1483,13 +1392,12 @@ class TubeLayoutEditor(QMainWindow):
                                         """
                                         cursor.execute(design_query, (self.productID, "公称直径*"))
                                         design_data = cursor.fetchone()
-                                        # print(design_data)
-                                        # print("壳体内直径读了个寂寞读的是哪个？")
+                                        print(design_data)
+                                        print("壳体内直径读了个寂寞读的是哪个？")
 
                                         if isinstance(design_data, dict) and '管程数值' in design_data and design_data[
                                             '管程数值']:
-                                            design_di_value = design_data['管程数值']
-                                            final_value = design_di_value
+                                            final_value = design_data['管程数值']
                                             if param_value != final_value:
                                                 try:
                                                     delete_query = """DELETE FROM 产品设计活动表_布管元件表 WHERE 产品ID = %s"""
@@ -1574,93 +1482,62 @@ class TubeLayoutEditor(QMainWindow):
                             print(f"无法计算DL：壳体内直径 Di={Di}，换热管外径 do={do}（数值必须大于0）")
 
                         else:
-                            # 新增：只有当原始Di值和最终Di值不同时才计算DL
-                            should_calculate_dl = False
-                            if original_di_value is not None:
-                                try:
-                                    original_di_float = float(original_di_value)
-                                    # 比较原始值和最终值，如果不同则计算DL
-                                    if abs(original_di_float - Di) > 0.001:  # 使用小容差比较浮点数
-                                        should_calculate_dl = True
-                                        print(f"壳体内直径发生变化: {original_di_float} -> {Di}，需要重新计算DL")
-                                    else:
-                                        print(f"壳体内直径未变化: {Di}，使用原有DL值")
-                                except (ValueError, TypeError):
-                                    # 如果转换失败，默认需要计算DL
-                                    should_calculate_dl = True
-                                    print(f"壳体内直径值转换失败，默认计算DL")
+                            if not self.heat_exchanger:
+                                self.heat_exchanger = "AEU"
+                            # 根据换热器型号计算DL
+                            if self.heat_exchanger in ["AEU", "BEU", "BEM", "NEN"]:
+                                # 计算方式1: DL = Di - 2×b₃，其中b₃ = max(0.25×do, 8mm)
+                                b3 = max(0.25 * do, 8.0)  # 取两者较大值作为b3
+                                DL = Di - 2 * b3
+                                print(f"计算布管限定圆 DL（型号{self.heat_exchanger}）: "
+                                      f"{Di} - 2×max(0.25×{do}, 8.0) = {Di} - 2×{b3} = {DL:.1f}")
+
+                            elif self.heat_exchanger in ["AES", "BES"]:
+                                # 计算方式2: DL = Di - 2×(b₁ + b₂ + b)
+                                # 1. 确定b值（根据Di范围）
+                                if Di < 1000:
+                                    b = 4.0  # Di < 1000mm时的默认值
+                                else:  # 1000 ≤ Di ≤ 2600mm
+                                    b = 5.0  # 大直径壳程的默认值
+
+                                # 2. 确定b₁（第一圈管到壳体内壁距离）和bₙ（最外圈管到壳体内壁距离）
+                                if Di <= 700:
+                                    b_n = 10.0
+                                    b_1 = 3.0
+                                elif Di <= 1200:
+                                    b_n = 13.0
+                                    b_1 = 5.0
+                                elif Di <= 2000:
+                                    b_n = 16.0
+                                    b_1 = 6.0
+                                else:  # Di > 2000mm（最大到2600mm）
+                                    b_n = 20.0
+                                    b_1 = 7.0
+
+                                # 3. 计算b₂（第二圈管到第一圈管距离）
+                                b_2 = b_n + 1.5  # 固定公式
+
+                                # 4. 最终计算DL
+                                DL = Di - 2 * (b_1 + b_2 + b)
+                                print(f"计算布管限定圆 DL（型号{self.heat_exchanger}）: "
+                                      f"{Di} - 2×({b_1} + {b_2} + {b}) = {Di} - 2×{b_1 + b_2 + b} = {DL:.1f}")
+
                             else:
-                                # 如果没有原始值，默认需要计算DL
-                                should_calculate_dl = True
-                                print(f"未找到原始壳体内直径值，默认计算DL")
+                                # 未知型号处理：使用方式1的默认计算
+                                b3 = max(0.25 * do, 8.0)
+                                DL = Di - 2 * b3
+                                print(f"未知换热器型号{self.heat_exchanger}，使用默认公式计算DL: "
+                                      f"{Di} - 2×max(0.25×{do}, 8.0) = {DL:.1f}")
 
-                            if should_calculate_dl:
-                                if not self.heat_exchanger:
-                                    self.heat_exchanger = "AEU"
-                                # 根据换热器型号计算DL
-                                if self.heat_exchanger in ["AEU", "BEU", "BEM", "NEN"]:
-                                    # 计算方式1: DL = Di - 2×b₃，其中b₃ = max(0.25×do, 8mm)
-                                    b3 = max(0.25 * do, 8.0)  # 取两者较大值作为b3
-                                    DL = Di - 2 * b3
-                                    print(f"计算布管限定圆 DL（型号{self.heat_exchanger}）: "
-                                          f"{Di} - 2×max(0.25×{do}, 8.0) = {Di} - 2×{b3} = {DL:.1f}")
+                            # 验证DL合理性（必须小于壳体内直径Di）
+                            if DL >= Di:
+                                print(f"警告：计算的DL={DL:.1f} ≥ 壳体内直径Di={Di}，结果不合理")
+                                # 强制修正为Di的95%（避免无效值）
+                                DL = Di * 0.95
+                                print(f"已自动修正DL为壳体内直径的95%: {DL:.1f}")
 
-                                elif self.heat_exchanger in ["AES", "BES"]:
-                                    # 计算方式2: DL = Di - 2×(b₁ + b₂ + b)
-                                    # 1. 确定b值（根据Di范围）
-                                    if Di < 1000:
-                                        b = 4.0  # Di < 1000mm时的默认值
-                                    else:  # 1000 ≤ Di ≤ 2600mm
-                                        b = 5.0  # 大直径壳程的默认值
-
-                                    # 2. 确定b₁（第一圈管到壳体内壁距离）和bₙ（最外圈管到壳体内壁距离）
-                                    if Di <= 700:
-                                        b_n = 10.0
-                                        b_1 = 3.0
-                                    elif Di <= 1200:
-                                        b_n = 13.0
-                                        b_1 = 5.0
-                                    elif Di <= 2000:
-                                        b_n = 16.0
-                                        b_1 = 6.0
-                                    else:  # Di > 2000mm（最大到2600mm）
-                                        b_n = 20.0
-                                        b_1 = 7.0
-
-                                    # 3. 计算b₂（第二圈管到第一圈管距离）
-                                    b_2 = b_n + 1.5  # 固定公式
-
-                                    # 4. 最终计算DL
-                                    DL = Di - 2 * (b_1 + b_2 + b)
-                                    print(f"计算布管限定圆 DL（型号{self.heat_exchanger}）: "
-                                          f"{Di} - 2×({b_1} + {b_2} + {b}) = {Di} - 2×{b_1 + b_2 + b} = {DL:.1f}")
-
-                                else:
-                                    # 未知型号处理：使用方式1的默认计算
-                                    b3 = max(0.25 * do, 8.0)
-                                    DL = Di - 2 * b3
-                                    print(f"未知换热器型号{self.heat_exchanger}，使用默认公式计算DL: "
-                                          f"{Di} - 2×max(0.25×{do}, 8.0) = {DL:.1f}")
-
-                                # 验证DL合理性（必须小于壳体内直径Di）
-                                if DL >= Di:
-                                    print(f"警告：计算的DL={DL:.1f} ≥ 壳体内直径Di={Di}，结果不合理")
-                                    # 强制修正为Di的95%（避免无效值）
-                                    DL = Di * 0.95
-                                    print(f"已自动修正DL为壳体内直径的95%: {DL: .1f}")
-                            else:
-                                # 如果不需要计算DL，则从processed_params中查找现有的DL值
-                                for param in processed_params:
-                                    if param['参数名'] == "布管限定圆 DL" and param['参数值']:
-                                        try:
-                                            DL = float(param['参数值'])
-                                            print(f"使用原有布管限定圆 DL值: {DL: .1f}")
-                                            break
-                                        except (ValueError, TypeError):
-                                            pass
-
-                        # 强制更新/添加DL参数到processed_params（只有当计算了DL时才更新）
-                        if DL is not None and should_calculate_dl:
+                        # 强制更新/添加DL参数到processed_params
+                        if DL is not None:
                             dl_exists = False
                             # 检查是否已有DL参数，有则更新
                             for i, param in enumerate(processed_params):
@@ -1688,15 +1565,9 @@ class TubeLayoutEditor(QMainWindow):
                                     '参数值': f"{DL: .1f}",
                                     '单位': "mm"  # 假设单位为毫米，可根据实际场景调整
                                 })
-                            print(f"最终确定布管限定圆 DL值: {DL: .1f} mm")
-                        elif DL is None:
+                            print(f"最终确定布管限定圆 DL值: {DL:.1f} mm")
+                        else:
                             print("未计算出有效DL值，不更新参数")
-                        for i, param in enumerate(processed_params):
-                            if param['参数名'] == "旁路挡板宽度":
-                                self.side_dangban_length = processed_params[i]['参数值']
-                            if param['参数名'] == "拉杆直径":
-                                if processed_params[i]['参数值'] == "程序推荐":
-                                    processed_params[i]['参数值'] = "16"
 
                         if processed_params:
                             self.setup_parameters(processed_params, setup_listeners=False)
@@ -1783,8 +1654,8 @@ class TubeLayoutEditor(QMainWindow):
                                                         design_cursor.execute(design_query,
                                                                               (self.productID, "公称直径*"))
                                                         design_data = design_cursor.fetchone()
-                                                        # print(design_data)
-                                                        # print("壳体内直径读了个寂寞")
+                                                        print(design_data)
+                                                        print("壳体内直径读了个寂寞")
 
                                                         if isinstance(design_data,
                                                                       dict) and '壳程数值' in design_data and \
@@ -1945,10 +1816,10 @@ class TubeLayoutEditor(QMainWindow):
                                 if not dl_exists:
                                     processed_params.append({
                                         '参数名': "布管限定圆 DL",
-                                        '参数值': f"{DL: .1f}",
+                                        '参数值': f"{DL:.1f}",
                                         '单位': "mm"  # 假设单位为毫米，可根据实际场景调整
                                     })
-                                print(f"最终确定布管限定圆 DL值: {DL: .1f} mm")
+                                print(f"最终确定布管限定圆 DL值: {DL:.1f} mm")
                             else:
                                 print("未计算出有效DL值，不更新参数")
 
@@ -1972,12 +1843,6 @@ class TubeLayoutEditor(QMainWindow):
                     except Exception as e:
                         print(f"关闭组件数据库连接时出错: {str(e)}")
 
-        self.initial_operation()
-        # 初始使用数据库读到的数据填充右侧表格
-        self.load_initial_tube_num()
-        self.update_total_holes_count()
-
-    def initial_operation(self):
         # 后续计算和元素构建逻辑保持不变
         try:
             if self.heat_exchanger in ["AEU", "BEU"] and self.DN == "1200":
@@ -1985,11 +1850,11 @@ class TubeLayoutEditor(QMainWindow):
                 # self.set_baffle_cut_rate_to_25()
                 print("初始设置的值")
                 # self.set_tie_rod_diameter_to_16()
-            tube_result = self.calculate_piping_layout()
-            self.draw_baffle_plates()
+            self.calculate_piping_layout()
         except Exception as e:
             print(f"第一次计算布管布局出错: {str(e)}")
 
+        # 解析输入参数部分保持不变
         try:
             if not hasattr(self, 'input_json') or not isinstance(self.input_json, dict):
                 raise ValueError("self.input_json不存在或不是字典类型")
@@ -2043,10 +1908,10 @@ class TubeLayoutEditor(QMainWindow):
             if product_conn and hasattr(product_conn, 'open') and product_conn.open:
                 cursor = product_conn.cursor()
                 query = """
-                            SELECT 是否布置滑道 
-                            FROM 产品设计活动表_布管元件表 
-                            WHERE 产品ID = %s AND 元件类型 = 0
-                        """
+                    SELECT 是否布置滑道 
+                    FROM 产品设计活动表_布管元件表 
+                    WHERE 产品ID = %s AND 元件类型 = 0
+                """
                 cursor.execute(query, (self.productID,))
                 result = cursor.fetchone()
                 if result and isinstance(result, dict) and '是否布置滑道' in result:
@@ -2076,17 +1941,17 @@ class TubeLayoutEditor(QMainWindow):
         impingement_plate_1_centers = all_coords.get("impingement_plate_1_centers", "")
         impingement_plate_2_centers = all_coords.get("impingement_plate_2_centers", "")
         del_centers = all_coords.get("del_centers", [])
-        self.build_side_dangban(side_dangban_centers, self.side_dangban_length, side_dangban_thick)
 
-        self.build_side_lagan(side_centers)
         self.build_lagan(lagan_centers)
+        self.build_side_lagan(side_centers)
         if center_dangguan_centers:
             coords_list = eval(center_dangguan_centers)
 
-            for i in range(0, len(coords_list) - 1, 2):
+            for i in range(0, len(coords_list), 2):
                 pair = [coords_list[i], coords_list[i + 1]]
                 self.build_center_dangguan(pair)
 
+        self.build_side_dangban(side_dangban_centers, self.side_dangban_length, side_dangban_thick)
         try:
             if is_arranged_huadao == 1:
                 self.build_huadao("滑道与管板焊接", height, thickness, angle, 50, 15)
@@ -2132,7 +1997,6 @@ class TubeLayoutEditor(QMainWindow):
                     if i + 1 < len(centers_list):
                         pair = [centers_list[i], centers_list[i + 1]]
                         if isinstance(pair, list) and len(pair) == 2:
-                            # self.build_lagan(lagan_centers)
                             self.build_impingement_plate(
                                 pair, "平板形",
                                 baffle_thickness, baffle_angle,
@@ -2160,7 +2024,6 @@ class TubeLayoutEditor(QMainWindow):
                     if i + 1 < len(centers_list):
                         pair = [centers_list[i], centers_list[i + 1]]
                         if isinstance(pair, list) and len(pair) == 2:
-                            # self.build_lagan(lagan_centers)
                             self.build_impingement_plate(
                                 pair, "圆弧形",
                                 baffle_thickness, baffle_angle,
@@ -2173,12 +2036,6 @@ class TubeLayoutEditor(QMainWindow):
         except (SyntaxError, ValueError, TypeError) as e:
             print(f"处理折边式防冲板时出错: {str(e)}")
         self.delete_huanreguan(del_centers)
-        self.build_lagan(lagan_centers)
-
-        actual_del_centers = self.selected_to_current_coords(del_centers)
-        actual_lagan_centers = self.selected_to_current_coords(lagan_centers)
-        centers_to_remove = set(actual_del_centers + actual_lagan_centers)
-        self.current_centers = [center for center in self.current_centers if center not in centers_to_remove]
 
         # TODO 后续取消注释
         # self.line_tip.setText("请确认"壳体内径Di"是否正确！")
@@ -2190,6 +2047,7 @@ class TubeLayoutEditor(QMainWindow):
         self.find_cross_pipes_info()
         import ast
 
+        # 只转换字符串类型的属性，已为列表的保持不变
         if isinstance(self.coord_x_line1_2, str):
             self.coord_x_line1_2 = ast.literal_eval(self.coord_x_line1_2)
         if isinstance(self.coord_y_line1_2, str):
@@ -2264,12 +2122,6 @@ class TubeLayoutEditor(QMainWindow):
 
     def cal_di(self, user_Di, user_DN):
         # 调用接口获取壳体内直径数据
-        print(user_DN)
-        print("当前获取的公称直径")
-        print(self.isDN_change)
-        print("这是DN更新标志")
-        print(self.isDi_change)
-        print("这是Di更新标志")
         if self.heat_exchanger in ["AEU", "BEU"]:
             di_result = qtzj.cal_qiaotineizhijing_U(self.productID, self.isDi_change, self.isDN_change, user_Di,
                                                     user_DN)
@@ -2424,7 +2276,7 @@ class TubeLayoutEditor(QMainWindow):
         # 获取换热器型号
         heat_exchanger_type = self.heat_exchanger if hasattr(self, 'heat_exchanger') else ''
         if not heat_exchanger_type and self.productID:
-
+            # 如果没有换热器型号，从数据库获取
             conn = None
             try:
                 conn = create_product_connection()
@@ -2506,7 +2358,7 @@ class TubeLayoutEditor(QMainWindow):
             "折流板外径": ("LB_BaffleOD", None),
             "分程隔板两侧相邻管中心距（竖直）": ("LB_SN", None),
             "分程隔板两侧相邻管中心距（水平）": ("LB_SNH", None),
-            "隔条位置尺寸 W": ("LB_W", None),
+            "隔条位置尺寸 W": ("LB_SpacerPositionSize", None),
             "滑道厚度": ("LB_SlipWayThick", None),
             "滑道与竖直中心线夹角": ("LB_SlipWayAngle", None),
             "防冲板厚度": ("LB_BaffleThick", None),
@@ -2589,7 +2441,7 @@ class TubeLayoutEditor(QMainWindow):
         # 根据产品型式判断热交换器类型
         if product_type_str in ['AEU', 'BEU']:
             he_type = '2'  # U型管式
-        elif product_type_str == 'NEN':
+        elif product_type_str == 'NEM':
             he_type = '1'  # 固定管板式
         elif product_type_str in ['AES', 'BES']:
             he_type = '0'  # 浮头式
@@ -2610,7 +2462,7 @@ class TubeLayoutEditor(QMainWindow):
                             # 根据产品型式判断热交换器类型
                             if product_type_str in ['AEU', 'BEU']:
                                 he_type = '2'  # U型管式
-                            elif product_type_str == 'NEN':
+                            elif product_type_str == 'NEM':
                                 he_type = '1'  # 固定管板式
                             elif product_type_str in ['AES', 'BES']:
                                 he_type = '0'  # 浮头式
@@ -2638,6 +2490,7 @@ class TubeLayoutEditor(QMainWindow):
         if self.tube_pass_form_value == "4.1":
             input_json['LB_SNH'] = '0'
 
+        # ---------------- 新增：如果值为None或空字符串，则从布管默认参数表中取值 ----------------
         param_mapping2 = {
             "LB_IsRangeCenter": "换热管布置方式",
             "LB_BPBThick": "旁路挡板厚度",
@@ -2662,7 +2515,7 @@ class TubeLayoutEditor(QMainWindow):
             "LB_BaffleOD": "折流板外径",
             "LB_SN": "分程隔板两侧相邻管中心距（竖直）",
             "LB_SNH": "分程隔板两侧相邻管中心距（水平）",
-            "LB_W": "隔条位置尺寸 W",
+            "LB_SpacerPositionSize": "隔条位置尺寸 W",
             "LB_SlipWayThick": "滑道厚度",
             "LB_SlipWayAngle": "滑道与竖直中心线夹角",
             "LB_BaffleThick": "防冲板厚度",
@@ -2677,7 +2530,7 @@ class TubeLayoutEditor(QMainWindow):
         defaults = {}
         conn = None
         try:
-            conn = create_component_connection()
+            conn = create_component_connection()  # 元件库连接
             if conn:
                 with conn.cursor() as cursor:
                     if self.heat_exchanger in ["AEU", "BEU"]:
@@ -2712,6 +2565,7 @@ class TubeLayoutEditor(QMainWindow):
                 if cn_key in defaults:
                     input_json[eng_key] = defaults[cn_key]
         input_json["LB_TotalTubesCountNeed"] = 10000
+        # -----------------------------------------------------------------------------------
 
         self.input_json = input_json
         print(self.input_json)
@@ -2723,7 +2577,6 @@ class TubeLayoutEditor(QMainWindow):
                 json.dumps(input_json, indent=2, ensure_ascii=False)
             )
             self.output_data = json_str
-            # print(self.output_data)
             self.update_pipe_parameters()
             result = parse_heat_exchanger_json(json_str)
             self.save_layout_result(product_id, result)
@@ -2744,10 +2597,10 @@ class TubeLayoutEditor(QMainWindow):
 
             # 计算非布管区域
             current_centers = none_tube_centers(height_0_180, height_90_270, Di, do, centers)
-            # 给现有圆心赋值
             self.current_centers = current_centers
 
             # 更新管数量和绘制布局（确保小圆绘制在最上层）
+
             self.draw_layout(DN, Di, DL, do, result["centers"])
 
             # 重新创建场景并连接中心，确保层级正确
@@ -2758,7 +2611,7 @@ class TubeLayoutEditor(QMainWindow):
             self.global_centers = result["centers"]
             centers = self.global_centers
             self.none_tube(height_0_180, height_90_270, Di, do, centers)
-            # self.draw_baffle_plates()
+            self.draw_baffle_plates()
 
             # 强制刷新场景
             self.graphics_scene.update()
@@ -2784,11 +2637,11 @@ class TubeLayoutEditor(QMainWindow):
             # 如果找到按钮，根据产品型式设置可用状态
             if cross_pipe_btn is not None:
                 if product_type_str == 'BES' or product_type_str == 'AES':
-                    cross_pipe_btn.setEnabled(False)
-                    cross_pipe_btn.setToolTip("浮头式产品不支持交叉布管功能")
+                    cross_pipe_btn.setEnabled(False)  # BES 产品禁用按钮
+                    cross_pipe_btn.setToolTip("浮头式产品不支持交叉布管功能")  # 可选：添加提示
                 else:
-                    cross_pipe_btn.setEnabled(True)
-                    cross_pipe_btn.setToolTip("")
+                    cross_pipe_btn.setEnabled(True)  # 其他产品启用按钮
+                    cross_pipe_btn.setToolTip("")  # 清除提示
             else:
                 print("警告：未找到交叉布管按钮")
 
@@ -3635,12 +3488,13 @@ class TubeLayoutEditor(QMainWindow):
                     lg_diameter_widget.setText(f"{do_value}")
 
     def update_baffle_diameter(self):
-        # 1. 查找参数表中各关键参数的行索引（移除布管限定圆DL的行索引查找）
+        # 1. 查找参数表中各关键参数的行索引
         di_row = -1
         baffle_row = -1
         do_row = -1
+        dl_row = -1
         range_type_row = -1  # 换热管排列方式行索引
-        lg_row = -1  # 拉杆形式行索引
+        lg_row = -1  # 拉杆形式行索引（移除center_distance_row）
         row_count = self.param_table.rowCount()
 
         for row in range(row_count):
@@ -3655,9 +3509,11 @@ class TubeLayoutEditor(QMainWindow):
                 baffle_row = row
             elif param_name == "换热管外径 do":
                 do_row = row
+            elif param_name == "布管限定圆 DL":
+                dl_row = row
             elif param_name == "换热管排列方式":
                 range_type_row = row
-            elif param_name == "拉杆形式":
+            elif param_name == "拉杆形式":  # 移除换热管中心距S的行索引查找
                 lg_row = row
 
         # 2. 获取关键参数值
@@ -3693,7 +3549,7 @@ class TubeLayoutEditor(QMainWindow):
                         print("换热管外径 do 参数值格式错误")
                         return
 
-        # 2.3 换热管排列方式（仅用于参数完整性检查，支撑后续逻辑）
+        # 2.3 换热管排列方式
         range_type_value = None
         if range_type_row != -1:
             range_type_widget = self.param_table.cellWidget(range_type_row, 2)
@@ -3704,12 +3560,86 @@ class TubeLayoutEditor(QMainWindow):
                 if range_type_item and range_type_item.text().strip():
                     range_type_value = range_type_item.text()
 
-        # 检查必要参数是否存在（支撑折流板和拉杆更新逻辑）
+        # 检查必要参数是否存在（保留原依赖，用于布管限定圆和折流板计算）
         if di_value is None or do_value is None or range_type_value is None:
             print("缺少必要参数，无法进行计算")
             return
 
-        # 3. 更新折流板外径（逻辑完全保留）
+        # 3. 根据换热器型号计算布管限定圆 DL（逻辑完全保留）
+        if dl_row != -1:
+            # 获取换热器型号
+            heat_exchanger_type = self.heat_exchanger
+            if heat_exchanger_type is None:
+                heat_exchanger_type = "AEU"
+
+            # 根据型号选择不同的计算方式
+            if heat_exchanger_type in ["AEU", "BEU", "BEM", "NEN"]:
+                # 计算方式1: DL = Di - 2b₃, b₃ = max(0.25do, 8)
+                b3 = max(0.25 * do_value, 8.0)
+                dl_value = di_value - 2 * b3
+                print(
+                    f"计算布管限定圆 DL ({heat_exchanger_type}): {di_value} - 2 * max(0.25 * {do_value}, 8.0) = {dl_value:.1f}")
+
+            elif heat_exchanger_type in ["AES", "BES"]:
+                # 计算方式2: DL = Di - 2(b₁ + b₂ + b)
+                # 确定b的值
+                if di_value < 1000:
+                    b = 4.0  # 默认值
+                else:  # 1000 ≤ Di ≤ 2600
+                    b = 5.0  # 默认值
+
+                # 确定b₁和bₙ的值
+                if di_value <= 700:
+                    b_n = 10.0
+                    b_1 = 3.0
+                elif di_value <= 1200:
+                    b_n = 13.0
+                    b_1 = 5.0
+                elif di_value <= 2000:
+                    b_n = 16.0
+                    b_1 = 6.0
+                else:  # di_value ≤ 2600
+                    b_n = 20.0
+                    b_1 = 7.0
+
+                # 计算b₂
+                b_2 = b_n + 1.5
+
+                # 计算DL
+                dl_value = di_value - 2 * (b_1 + b_2 + b)
+                print(
+                    f"计算布管限定圆 DL ({heat_exchanger_type}): {di_value} - 2 * ({b_1} + {b_2} + {b}) = {dl_value:.1f}")
+
+            else:
+                print(f"未知的换热器型号: {heat_exchanger_type}")
+                return
+
+            # 临时断开信号避免循环触发（逻辑保留）
+            original_handler = None
+            if hasattr(self, 'handle_param_change'):
+                try:
+                    self.param_table.itemChanged.disconnect(self.handle_param_change)
+                    original_handler = self.handle_param_change
+                except:
+                    pass
+
+            # 更新布管限定圆 DL（逻辑保留）
+            dl_item = self.param_table.item(dl_row, 2)
+            if dl_item:
+                dl_item.setText(f"{dl_value:.1f}")
+            else:
+                self.param_table.setItem(dl_row, 2, QTableWidgetItem(f"{dl_value:.1f}"))
+            print(f"已更新布管限定圆 DL: {dl_value: .1f}")
+
+            # 重新连接信号（逻辑保留）
+            if original_handler:
+                try:
+                    self.param_table.itemChanged.connect(original_handler)
+                except:
+                    pass
+        print(self.heat_exchanger)
+
+        # 4. 更新折流板外径（逻辑完全保留，无修改）
         if di_value is not None and baffle_row != -1:
             # 假设壳体材料为钢管（实际应根据具体参数获取）
             shell_material_type = "钢管"
@@ -3746,7 +3676,7 @@ class TubeLayoutEditor(QMainWindow):
                 self._update_table_cell(baffle_row, 2, baffle_diameter)
                 print(f"已更新折流板外径: {baffle_diameter}")
 
-        # 4. 更新拉杆形式（逻辑完全保留）
+        # 5. 更新拉杆形式（逻辑完全保留，无修改）
         if lg_row != -1 and do_value is not None:
             # 获取当前拉杆形式的单元格部件
             lg_widget = self.param_table.cellWidget(lg_row, 2)
@@ -3778,152 +3708,6 @@ class TubeLayoutEditor(QMainWindow):
 
                 # 连接信号，允许用户手动更改
                 combo_box.currentTextChanged.connect(lambda: self.handle_param_change())
-
-    def update_tube_layout_circle_dl(self):
-        # 1. 查找参数表中布管限定圆计算所需的关键参数行索引
-        di_row = -1
-        do_row = -1
-        dl_row = -1
-        range_type_row = -1  # 换热管排列方式行索引（保留原依赖）
-        row_count = self.param_table.rowCount()
-
-        for row in range(row_count):
-            param_name_item = self.param_table.item(row, 1)
-            if not param_name_item:
-                continue
-            param_name = param_name_item.text()
-
-            if param_name == "壳体内直径 Di":
-                di_row = row
-            elif param_name == "换热管外径 do":
-                do_row = row
-            elif param_name == "布管限定圆 DL":
-                dl_row = row
-            elif param_name == "换热管排列方式":
-                range_type_row = row
-
-        # 2. 获取布管限定圆计算所需的关键参数值
-        # 2.1 壳体内直径 Di
-        di_value = None
-        if di_row != -1:
-            di_item = self.param_table.item(di_row, 2)
-            if di_item and di_item.text().strip():
-                try:
-                    di_value = float(di_item.text())
-                except ValueError:
-                    print("壳体内直径 Di 参数值格式错误")
-                    return
-
-        # 2.2 换热管外径 do
-        do_value = None
-        if do_row != -1:
-            do_widget = self.param_table.cellWidget(do_row, 2)
-            if isinstance(do_widget, QComboBox):
-                try:
-                    selected_text = do_widget.currentText()
-                    if selected_text.strip():
-                        do_value = float(selected_text)
-                except ValueError as e:
-                    print(f"换热管外径 do 转换错误: {e}")
-                    return
-            else:
-                do_item = self.param_table.item(do_row, 2)
-                if do_item and do_item.text().strip():
-                    try:
-                        do_value = float(do_item.text())
-                    except ValueError:
-                        print("换热管外径 do 参数值格式错误")
-                        return
-
-        # 2.3 换热管排列方式（保留原依赖检查）
-        range_type_value = None
-        if range_type_row != -1:
-            range_type_widget = self.param_table.cellWidget(range_type_row, 2)
-            if isinstance(range_type_widget, QComboBox):
-                range_type_value = range_type_widget.currentText()
-            else:
-                range_type_item = self.param_table.item(range_type_row, 2)
-                if range_type_item and range_type_item.text().strip():
-                    range_type_value = range_type_item.text()
-
-        # 检查必要参数是否存在（保留原依赖检查逻辑）
-        if di_value is None or do_value is None or range_type_value is None or dl_row == -1:
-            print("缺少布管限定圆计算所需参数，无法进行计算")
-            return
-
-        # 3. 根据换热器型号计算布管限定圆 DL（逻辑完全保留原代码）
-        # 获取换热器型号
-        heat_exchanger_type = self.heat_exchanger
-        if heat_exchanger_type is None:
-            heat_exchanger_type = "AEU"
-
-        # 根据型号选择不同的计算方式
-        if heat_exchanger_type in ["AEU", "BEU", "BEM", "NEN"]:
-            # 计算方式1: DL = Di - 2b₃, b₃ = max(0.25do, 8)
-            b3 = max(0.25 * do_value, 8.0)
-            dl_value = di_value - 2 * b3
-            print(
-                f"计算布管限定圆 DL ({heat_exchanger_type}): {di_value} - 2 * max(0.25 * {do_value}, 8.0) = {dl_value:.1f}")
-
-        elif heat_exchanger_type in ["AES", "BES"]:
-            # 计算方式2: DL = Di - 2(b₁ + b₂ + b)
-            # 确定b的值
-            if di_value < 1000:
-                b = 4.0  # 默认值
-            else:  # 1000 ≤ Di ≤ 2600
-                b = 5.0  # 默认值
-
-            # 确定b₁和bₙ的值
-            if di_value <= 700:
-                b_n = 10.0
-                b_1 = 3.0
-            elif di_value <= 1200:
-                b_n = 13.0
-                b_1 = 5.0
-            elif di_value <= 2000:
-                b_n = 16.0
-                b_1 = 6.0
-            else:  # di_value ≤ 2600
-                b_n = 20.0
-                b_1 = 7.0
-
-            # 计算b₂
-            b_2 = b_n + 1.5
-
-            # 计算DL
-            dl_value = di_value - 2 * (b_1 + b_2 + b)
-            print(
-                f"计算布管限定圆 DL ({heat_exchanger_type}): {di_value} - 2 * ({b_1} + {b_2} + {b}) = {dl_value:.1f}")
-
-        else:
-            print(f"未知的换热器型号: {heat_exchanger_type}")
-            return
-
-        # 4. 临时断开信号避免循环触发（逻辑保留原代码）
-        original_handler = None
-        if hasattr(self, 'handle_param_change'):
-            try:
-                self.param_table.itemChanged.disconnect(self.handle_param_change)
-                original_handler = self.handle_param_change
-            except:
-                pass
-
-        # 5. 更新布管限定圆 DL 到表格（逻辑保留原代码）
-        dl_item = self.param_table.item(dl_row, 2)
-        if dl_item:
-            dl_item.setText(f"{dl_value:.1f}")
-        else:
-            self.param_table.setItem(dl_row, 2, QTableWidgetItem(f"{dl_value:.1f}"))
-        print(f"已更新布管限定圆 DL: {dl_value: .1f}")
-
-        # 6. 重新连接信号（逻辑保留原代码）
-        if original_handler:
-            try:
-                self.param_table.itemChanged.connect(original_handler)
-            except:
-                pass
-
-        print(f"当前换热器型号: {self.heat_exchanger}")
 
     def update_tube_center_distance(self):
         # 1. 定位关键参数行（换热管外径、排列方式、中心距）
@@ -4510,7 +4294,7 @@ class TubeLayoutEditor(QMainWindow):
 
                     spacing_item = self.param_table.item(cut_spacing_row, 2)
                     if spacing_item:
-                        spacing_item.setText(f"{new_spacing: .1f}")
+                        spacing_item.setText(f"{new_spacing:.1f}")
 
                 elif cut_spacing is not None:
                     if not (0 <= cut_spacing <= baffle_radius):
@@ -4802,14 +4586,12 @@ class TubeLayoutEditor(QMainWindow):
                 if param_name in ["壳体内直径 Di", "换热管外径 do", "换热管排列方式"]:
                     self.update_baffle_diameter()
                     self.update_tube_center_distance()
-                    self.update_tube_layout_circle_dl()
 
                     self.isDi_change = True
                     # self.user_update_Di()
 
-                if param_name in ["折流板外径", "折流板切口与中心线间距", "折流板要求切口率 (%)", "折流板切口方向"]:
+                if param_name in ["折流板外径", "折流板切口与中心线间距", "折流板要求切口率 (%)"]:
                     self.update_baffle_parameters(param_name)
-                    self.draw_baffle_plates()
 
                 if param_name in ["拉杆形式", "换热管外径 do"]:
                     self.update_lagan()
@@ -4818,8 +4600,7 @@ class TubeLayoutEditor(QMainWindow):
                 if param_name == "管程程数":
                     # 管程程数变化：更新管程分程形式值及对应图片
                     self.tube_pass_form_value = {
-                        "1": "1.1",
-                        "2": "2.1",
+                        "2": "2",
                         "4": "4.1",
                         "6": "6.1"
                     }.get(param_value, self.tube_pass_form_value)  # 默认保留原 value
@@ -5176,6 +4957,7 @@ class TubeLayoutEditor(QMainWindow):
             try:
                 value = int(text)
                 if value <= 0:
+                    # 输入不合法，恢复原始值
                     original = self._original_values.get((row_idx, 2), "")
                     if original:
                         combo_box.setEditText(original)
@@ -5225,7 +5007,6 @@ class TubeLayoutEditor(QMainWindow):
             # 存储标识到用户数据中
             combo.setItemData(combo.count() - 1, identifier, Qt.UserRole)
 
-    # TODO 管程分程形式加载函数，目前没有1管程
     def load_tube_pass_images(self, combo, tube_pass):
         """加载管程分程形式的图片到下拉框，关联具体标识"""
         # 清空现有项
@@ -5252,7 +5033,7 @@ class TubeLayoutEditor(QMainWindow):
 
         # 根据管程程数加载对应图片，同时关联标识
         if tube_pass == "2":
-            self.add_image_to_combo(combo, base_path, "2.1.png", "2.1")
+            self.add_image_to_combo(combo, base_path, "2.png", "2")
         elif tube_pass == "4":
             if show_4_1:
                 self.add_image_to_combo(combo, base_path, "4.1.png", "4.1")
@@ -5269,7 +5050,7 @@ class TubeLayoutEditor(QMainWindow):
             self.add_image_to_combo(combo, base_path, "6.2.2.png", "6.2")
             # self.add_image_to_combo(combo, base_path, "6.3.png", "6.3")
         elif tube_pass == "1":
-            self.add_image_to_combo(combo, base_path, "1.1.png", "1.1")
+            self.add_image_to_combo(combo, base_path, "1.png", "1")
 
         else:
             combo.addItem("未选择")
@@ -5341,7 +5122,7 @@ class TubeLayoutEditor(QMainWindow):
     #         self.update_tube_center_distance()
     #         # self.update_lagan()
     #         self.update_partition_plate_center_distance()
-    # TODO 在load_initial函数后触发的监听事件，下拉框改变的触发事件
+    # TODO 在load_initial函数后触发的监听事件
     def on_combobox_changed(self, row, value):
         """处理下拉框类型参数的变更事件及内容变化处理"""
         # 首先执行原current_text版本的逻辑
@@ -5397,8 +5178,7 @@ class TubeLayoutEditor(QMainWindow):
         elif param_name == "管程程数":
             # 管程程数变化：更新管程分程形式值及对应图片
             self.tube_pass_form_value = {
-                "1": "1.1",
-                "2": "2.1",
+                "2": "2",
                 "4": "4.1",
                 "6": "6.1"
             }.get(value, self.tube_pass_form_value)  # 默认保留原 value
@@ -5421,12 +5201,6 @@ class TubeLayoutEditor(QMainWindow):
                 current_form = self.get_selected_tube_pass_form()
                 print(f"管程分程形式已更新为: {current_form}")
                 print(f"实时更新的tube_pass_form_value: {self.tube_pass_form_value}")
-        elif param_name == "折流板切口方向":
-            # 获取当前选中的值
-            do_widget = self.param_table.cellWidget(row, 2)
-            if isinstance(do_widget, QComboBox):
-                selected_value = do_widget.currentText()
-            self.draw_baffle_plates()
 
     def none_tube(self, height_0_180, height_90_270, Di, do, centers):
 
@@ -5463,124 +5237,40 @@ class TubeLayoutEditor(QMainWindow):
             self.delete_centers(none_tube_90_270)
 
     def delete_centers(self, centers):
-        """删除指定圆心坐标的圆并记录操作"""
-        if not centers:
-            return
-
+        """TODO 删除指定圆心坐标的圆并记录操作"""
         if not hasattr(self, 'operations'):
             self.operations = []
-
-        # 关键修改：使用纯白色实心圆，增加边框宽度，解决视觉叠加问题
-        white_pen = QPen(QColor(255, 255, 255))  # 白色边框
-        white_pen.setWidth(3)  # 增加边框宽度到3像素，减少抗锯齿影响
-        white_brush = QBrush(QColor(255, 255, 255))  # 白色实心填充
-        blue_tube_pen = QColor(0, 0, 80)
-
-        # 转换为要删除的绝对坐标集合
-        absolute_coords_to_remove = set((round(x, 2), round(y, 2)) for x, y in centers)
-
-        # 暂停场景更新以提高性能
-        if self.graphics_scene.views():
-            self.graphics_scene.views()[0].setUpdatesEnabled(False)
-
-        try:
-            # 预构建坐标映射表，避免重复计算
-            coord_to_items = {}
+        gray_pen = QPen(QColor(211, 211, 211))  # 浅灰色边框
+        gray_pen.setWidth(1)
+        gray_brush = QBrush(Qt.NoBrush)  # 空心圆
+        for x, y in centers:
+            # 找出所有圆心在 (x, y) 处的图元并移除（可能有多个图层）
             for item in self.graphics_scene.items():
                 if isinstance(item, QGraphicsEllipseItem):
                     rect = item.rect()
                     cx = item.scenePos().x() + rect.width() / 2
                     cy = item.scenePos().y() + rect.height() / 2
-                    coord_key = (round(cx, 2), round(cy, 2))
-                    if coord_key not in coord_to_items:
-                        coord_to_items[coord_key] = []
-                    coord_to_items[coord_key].append(item)
+                    if abs(cx - x) < 1e-2 and abs(cy - y) < 1e-2:
+                        self.graphics_scene.removeItem(item)
 
-            # 批量处理要移除和添加的图形项
-            items_to_remove = []
-            items_to_add = []
+            # 擦除当前圆内选中色
+            click_point = QPointF(x, y)
+            for item in self.graphics_scene.items(click_point):
+                if isinstance(item, QGraphicsEllipseItem):
+                    self.graphics_scene.removeItem(item)
+                    break
 
-            for x, y in centers:
-                coord_key = (round(x, 2), round(y, 2))
+            # 重新绘制浅灰色空心圆
+            self.graphics_scene.addEllipse(
+                x - self.r, y - self.r, 2 * self.r, 2 * self.r,
+                gray_pen, gray_brush
+            )
 
-                # 查找匹配的图形项
-                if coord_key in coord_to_items:
-                    for item in coord_to_items[coord_key]:
-                        if isinstance(item, QGraphicsEllipseItem):
-                            # 移除所有非白色实心圆的元素（包括蓝色换热管和旧的白色标记）
-                            current_color = item.pen().color()
-                            is_white_solid = (current_color == QColor(255, 255, 255) and
-                                              item.brush() != Qt.NoBrush)  # 实心白色
-
-                            if not is_white_solid:
-                                items_to_remove.append(item)
-
-                            # 检查是否为需要替换的圆（蓝色换热管或旧的白色空心圆）
-                            is_blue_tube = (current_color == blue_tube_pen)
-                            is_old_white = (current_color == QColor(255, 255, 255) and
-                                            item.brush() == Qt.NoBrush)  # 旧的白色空心圆
-
-                            if is_blue_tube or is_old_white:
-                                items_to_remove.append(item)
-                                # 添加白色实心覆盖圆 - 解决视觉叠加问题
-                                items_to_add.append((
-                                    x - self.r, y - self.r, 2 * self.r, 2 * self.r,
-                                    white_pen, white_brush
-                                ))
-                else:
-                    # 未找到对应圆时直接添加白色实心覆盖圆
-                    items_to_add.append((
-                        x - self.r, y - self.r, 2 * self.r, 2 * self.r,
-                        white_pen, white_brush
-                    ))
-
-            # 批量移除项目
-            for item in items_to_remove:
-                self.graphics_scene.removeItem(item)
-
-            # 批量添加新项目
-            for ellipse_params in items_to_add:
-                self.graphics_scene.addEllipse(*ellipse_params)
-
-        finally:
-            # 恢复场景更新
-            if self.graphics_scene.views():
-                self.graphics_scene.views()[0].setUpdatesEnabled(True)
-
-        # 更新当前圆心列表
-        if hasattr(self, 'current_centers'):
-            # 保存并重新绘制切线
-            saved_lines = []
-            if hasattr(self, 'connection_lines'):
-                saved_lines = [(line.line(), line.pen()) for line in self.connection_lines]
-                for line in self.connection_lines:
-                    self.graphics_scene.removeItem(line)
-
-            # 使用绝对坐标来过滤，确保删除所有目标坐标
-            self.current_centers = [
-                (cx, cy) for (cx, cy) in self.current_centers
-                if (round(cx, 2), round(cy, 2)) not in absolute_coords_to_remove
-            ]
-
-            if self.create_scene():
-                self.update_tube_nums()
-
-            if saved_lines and hasattr(self, 'connection_lines'):
-                self.connection_lines = []
-                for line_data, pen in saved_lines:
-                    new_line = self.graphics_scene.addLine(line_data, pen)
-                    self.connection_lines.append(new_line)
-
-        # 添加操作记录
-        for coord in centers:
-            self.operations.append({
-                "type": "del",
-                "coord": coord
-            })
-
-        # 清除选择高亮
-        if hasattr(self, 'clear_selection_highlight'):
-            self.clear_selection_highlight()
+            # 添加操作记录
+            # self.operations.append({
+            #     "type": "del",
+            #     "coord": (x, y)
+            # })
 
     def validate_input(self, item, row):
         """验证输入是否为合法浮点数"""
@@ -5706,30 +5396,30 @@ class TubeLayoutEditor(QMainWindow):
             save_btn.clicked.connect(self.save_data)  # 添加保存按钮点击事件
             self.footer_layout.addWidget(save_btn)
 
-    # TODO 三个页面的数据保存提示
+    # TODO 吾日三省吾身
     def save_data(self):
+        """TODO 保存数据，根据当前页面显示不同的保存成功提示"""
         current_page_index = self.header.currentIndex()
-        self.actual_save_operation(current_page_index)
 
         # 根据当前页面设置不同的提示信息
-        if current_page_index == 0 and self.has_piped:
+        if current_page_index == 0 and self.has_piped:  # 布管页面
             self.clear_modification_marks()
+            self.line_tip.setText(f"数据保存成功")
+            self.line_tip.setStyleSheet("color: black;")  # 设置文本颜色为黑色
             message = "数据保存成功！"
-        elif current_page_index == 1:
+        elif current_page_index == 1:  # 管-板连接页面
+            self.line_tip.setText(f"数据保存成功")
+            self.line_tip.setStyleSheet("color: black;")  # 设置文本颜色为黑色
             message = "数据保存成功！"
-        elif current_page_index == 0 and not self.has_piped:
+        elif current_page_index == 0 and not self.has_piped:  # 未点击布管状态
+            self.line_tip.setText(f"数据保存成功")
+            self.line_tip.setStyleSheet("color: black;")  # 设置文本颜色为黑色
             message = "数据保存成功！"
-        else:
+        else:  # 管板形式页面
             message = "数据保存成功！"
 
-        try:
-            self.line_tip.setText("数据保存成功")
-            self.line_tip.setStyleSheet("color: black;")
-            self.line_tip.setVisible(True)
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(5000, lambda: self.line_tip.setText(""))
-        except AttributeError:
-            print("数据保存成功")
+        self.line_tip.setText(f"数据保存成功")
+        self.actual_save_operation(current_page_index)  # 先保存后提示
 
     def build_sql_for_coordinate(self):
         current_centers_set = set(self.current_centers)
@@ -6383,7 +6073,7 @@ class TubeLayoutEditor(QMainWindow):
         return sql_statements
 
     def build_sql_for_cross_pipes(self):
-        import json
+        import json  # 导入JSON模块用于序列化列表
         table_name = "`产品设计活动表_布管交叉布管表`"
         product_id = self.productID
         sql_statements = []
@@ -6483,32 +6173,303 @@ class TubeLayoutEditor(QMainWindow):
             return None
 
         finally:
+            # 无论成功/失败，均关闭连接释放资源
+            if conn and conn.open:
+                conn.close()
+
+    def build_sql_for_tube(self, tube_data):
+        if not tube_data:
+            return None
+
+        table_name = "`产品设计活动表_布管参数表`"
+        component_table = "`产品设计活动表_元件附加参数表`"
+        productID = self.productID
+        sql_statements = []
+
+        def escape_str(value):
+            return value.replace("'", "''") if isinstance(value, str) else value
+
+        # 先清空本产品ID在布管参数表中的旧记录
+        safe_productID = escape_str(productID)
+        delete_sql = f"DELETE FROM {table_name} WHERE `产品ID` = '{safe_productID}'"
+        sql_statements.append(delete_sql)
+
+        # 管程=2 时把“分程隔板两侧相邻管中心距（水平）”置 0
+        is_tube_pass_two = any(
+            (data.get("参数名", "").strip() == "管程程数" and str(data.get("参数值", "")).strip() == "2")
+            for data in tube_data
+        )
+
+        # 初始化管程分程形式是否为4.1的标志
+        is_tube_pass_form_4_1 = False
+
+        # 需要跨表同步的参数（从布管参数表 -> 元件附加参数表 的映射）
+        cross_map = {
+            "换热管外径 do": "换热管外径",
+            "中间挡板厚度": "中间挡板厚度",
+            "中间挡板宽度": "中间挡板宽度",  # 新增中间挡板宽度的跨表映射
+            "拉杆形式": "拉杆型式",
+            "拉杆直径": "拉杆规格",
+            "旁路挡板厚度": "旁路挡板厚度",
+            "旁路挡板宽度": "旁路挡板宽度",  # 新增旁路挡板宽度的跨表映射
+            "防冲板形式": "防冲板形式",
+            "防冲板厚度": "防冲板厚度",
+            "滑道定位": "滑道定位",
+            "滑道高度": "滑道高度",
+            "滑道厚度": "滑道厚度",
+            "滑道与竖直中心线夹角": "滑道与竖直中心线夹角",
+            "切边长度 L1": "切边长度 L1",
+            "切边高度 h": "切边高度 h",
+        }
+
+        # 用于后面写设计数据表/元件附加参数表的值暂存
+        cross_params = {
+            "公称直径 DN": None,
+            "壳体内直径 Di": None,
+            "旁路挡板厚度": None,
+            "旁路挡板宽度": None,
+            "防冲板形式": None,
+            "防冲板厚度": None,
+            "滑道定位": None,
+            "滑道高度": None,
+            "滑道厚度": None,
+            "滑道与竖直中心线夹角": None,
+            "切边长度 L1": None,
+            "切边高度 h": None,
+            "管程分程形式": None,
+            "换热管外径 do": None,
+            "中间挡板厚度": None,
+            "中间挡板宽度": None,
+            "拉杆形式": None,
+            "拉杆直径": None,
+        }
+
+        # 遍历前端参数，落表到“布管参数表”，并收集 cross_params
+        for data in tube_data:
+            line_num = str(data.get("参数名", ""))
+            holes_up = str(data.get("参数值", ""))
+            holes_down = data.get("单位", "")
+
+            if line_num in cross_params:
+                cross_params[line_num] = holes_up
+
+            safe_line_num = escape_str(line_num)
+            safe_holes_up = escape_str(holes_up)
+            if holes_down is None or (isinstance(holes_down, str) and holes_down.strip() == ""):
+                safe_holes_down = "NULL"
+            else:
+                safe_holes_down = f"'{escape_str(str(holes_down))}'"
+
+            insert_sql = (
+                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
+                f"VALUES ('{productID}', '{safe_line_num}', '{safe_holes_up}', {safe_holes_down})"
+            )
+            sql_statements.append(insert_sql)
+
+        # 处理“中间挡板宽度”参数，包含单位mm
+        if hasattr(self, 'center_dangban_length') and self.center_dangban_length is not None:
+            param_name = "中间挡板宽度"
+            param_value = str(self.center_dangban_length)
+            unit = "mm"  # 设置单位为mm
+
+            safe_param_name = escape_str(param_name)
+            safe_param_value = escape_str(param_value)
+            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
+
+            # 先更新已有记录
+            sql_statements.append(
+                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
+            )
+            # 不存在则插入新记录
+            sql_statements.append(
+                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
+                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
+            )
+            # 存入cross_params用于跨表同步
+            cross_params[param_name] = param_value
+
+        # 处理“旁路挡板宽度”参数，包含单位mm
+        if hasattr(self, 'side_dangban_length') and self.side_dangban_length is not None:
+            param_name = "旁路挡板宽度"
+            param_value = str(self.side_dangban_length)
+            unit = "mm"  # 设置单位为mm
+
+            safe_param_name = escape_str(param_name)
+            safe_param_value = escape_str(param_value)
+            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
+
+            # 先更新已有记录
+            sql_statements.append(
+                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
+            )
+            # 不存在则插入新记录
+            sql_statements.append(
+                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
+                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
+            )
+            # 存入cross_params用于跨表同步
+            cross_params[param_name] = param_value
+
+        # 处理“管程分程形式”的图标选择值
+        if hasattr(self, 'tube_pass_form_value') and self.tube_pass_form_value:
+            param_name = "管程分程形式"
+            param_value = self.tube_pass_form_value
+            unit = ""
+            safe_param_name = escape_str(param_name)
+            safe_param_value = escape_str(param_value)
+            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
+
+            # 检查管程分程形式是否为4.1
+            if param_value == "4.1":
+                is_tube_pass_form_4_1 = True
+
+            # upsert 到布管参数表
+            sql_statements.append(
+                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
+            )
+            sql_statements.append(
+                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
+                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
+            )
+
+            # 存入cross_params用于跨表同步
+            cross_params[param_name] = param_value
+
+        # 如果管程=2 或者管程分程形式=4.1，把"分程隔板两侧相邻管中心距（水平）"置 0
+        if is_tube_pass_two or is_tube_pass_form_4_1:
+            param_name = "分程隔板两侧相邻管中心距（水平）"
+            param_value = "0"
+            unit = ""
+            safe_param_name = escape_str(param_name)
+            safe_param_value = escape_str(param_value)
+            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
+
+            # 更新布管参数表中的该参数
+            sql_statements.append(
+                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
+            )
+            # 如果不存在则插入
+            sql_statements.append(
+                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
+                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
+            )
+
+        # # 把 self.output_data['TieRodD'] 写到"拉杆直径"
+        # tie_rod_d = self.output_data.get('TieRodD')
+        # if tie_rod_d is not None:
+        #     cross_params["拉杆直径"] = str(tie_rod_d)
+        #     param_name = "拉杆直径"
+        #     param_value = str(tie_rod_d)
+        #     safe_param_name = escape_str(param_name)
+        #     safe_param_value = escape_str(param_value)
+        #     sql_statements.append(
+        #         f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = NULL "
+        #         f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
+        #     )
+        #     sql_statements.append(
+        #         f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
+        #         f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', NULL "
+        #         f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
+        #         f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
+        #     )
+
+        # 公称直径写回“设计数据表”
+        if cross_params["公称直径 DN"] is not None:
+            design_table = "`产品设计活动表_设计数据表`"
+            safe_dn_value = escape_str(cross_params["公称直径 DN"])
+            sql_statements.append(
+                f"UPDATE {design_table} SET `壳程数值` = '{safe_dn_value}' "
+                f"WHERE `产品ID` = '{productID}' AND `参数名称` LIKE '公称直径%'"
+            )
+        if cross_params["壳体内直径 Di"] is not None:
+            design_table = "`产品设计活动表_设计数据表`"
+            safe_dn_value = escape_str(cross_params["壳体内直径 Di"])
+            sql_statements.append(
+                f"UPDATE {design_table} SET `管程数值` = '{safe_dn_value}' "
+                f"WHERE `产品ID` = '{productID}' AND `参数名称` LIKE '公称直径%'"
+            )
+
+        # 把映射参数写回/更新到【产品设计活动表_元件附加参数表】
+        for tube_name, comp_name in cross_map.items():
+            val = cross_params.get(tube_name)
+            if val is None or str(val).strip() == "":
+                continue
+            safe_comp_name = escape_str(comp_name)
+            safe_val = escape_str(str(val))
+
+            # UPDATE
+            sql_statements.append(
+                f"UPDATE {component_table} SET `参数值` = '{safe_val}' "
+                f"WHERE `产品ID` = '{productID}' AND `参数名称` = '{safe_comp_name}'"
+            )
+            # INSERT IF NOT EXISTS
+            sql_statements.append(
+                f"INSERT INTO {component_table} (`产品ID`, `参数名称`, `参数值`) "
+                f"SELECT '{productID}', '{safe_comp_name}', '{safe_val}' "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {component_table} "
+                f"WHERE `产品ID` = '{productID}' AND `参数名称` = '{safe_comp_name}')"
+            )
+
+        # 执行所有 SQL
+        conn = create_product_connection()
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as cursor:
+                for sql in sql_statements:
+                    cursor.execute(sql)
+            conn.commit()
+            return sql_statements
+        except pymysql.Error as e:
+            conn.rollback()
+            return None
+        finally:
             if conn and conn.open:
                 conn.close()
 
     def build_sql_for_tube_sheet_connection(self):
         # 从管板连接页面获取参数
         page_data = self.tube_sheet_page.get_current_parameters()
-        if not page_data:
+        if not page_data:  # page_data是包含参数的列表
             return None
+
         table_name = "`产品设计活动表_管板连接表`"
 
+        # 统一处理字符串转义，同时确保路径分隔符正确
         def escape_str(value):
             if isinstance(value, str):
+                # 先替换单引号，处理SQL注入
                 escaped = value.replace("'", "''")
-                escaped = escaped.replace('\\', '\\\\')
-                return escaped
-            return str(value) if value is not None else ""
+                # 统一路径分隔符为反斜杠，确保绝对路径格式正确
+                escaped = escaped.replace('/', '\\')
+                # 转换为双反斜杠存储（数据库显示为单反斜杠）
+                return escaped.replace('\\', '\\\\')
+            return value
 
         # 获取选中图片的绝对路径
         connection_diagram = ""
         for label in self.tube_sheet_page.image_labels:
             if label.property("selected"):
+                # 获取图片的绝对路径（假设image_path已为绝对路径，若不是可通过os.path.abspath转换）
                 connection_diagram = getattr(label, 'image_path', '')
+                # 确保路径为绝对路径
                 if connection_diagram:
                     connection_diagram = os.path.abspath(connection_diagram)
                 break
 
+        # 提取连接方式和管板类型（仅用于字段赋值，不作为参数存入）
         connection_type = ""
         tube_sheet_type_str = ""
         for param in page_data:
@@ -6517,132 +6478,42 @@ class TubeLayoutEditor(QMainWindow):
             elif param['参数名'] == "管板类型":
                 tube_sheet_type_str = param['参数值']
 
-        # 定义管板类型映射关系
-        tube_sheet_mapping = {
-            "整体管板": "1",
-            "复合管板": "0",
-            "a类型": "a",
-            "b类型": "b",
-            "c类型": "c",
-            "d类型": "d"
-        }
+        # 转换管板类型为整数（1为整体管板，0为复合管板）
+        tube_sheet_type = 1 if tube_sheet_type_str == "整体管板" else 0 if tube_sheet_type_str == "复合管板" else ""
 
-        tube_sheet_type = tube_sheet_mapping.get(tube_sheet_type_str, "")
-
+        # 过滤前两条数据（换热管与管板连接方式、管板类型），只保留后续参数
+        # 从索引2开始截取列表（跳过前两条）
         filtered_params = page_data[2:] if len(page_data) >= 2 else []
         if not filtered_params:
             return None
 
-        # 生成SQL语句列表
-        sql_statements = []
+        # 生成插入语句列表
+        insert_statements = []
         product_id = escape_str(self.productID)
         safe_connection_type = escape_str(connection_type)
-        safe_tube_sheet_type = escape_str(tube_sheet_type)
+        safe_tube_sheet_type = tube_sheet_type  # 整数类型无需转义
         safe_diagram = escape_str(connection_diagram)
 
-        # 创建数据库连接（在循环外创建，避免重复创建连接）
-        try:
-            from modules.buguan.buguan_ziyong.database_utils import create_connection
-            connection = create_connection()
-            cursor = connection.cursor()
+        for param in filtered_params:
+            param_name = param['参数名']
+            param_value = param['参数值']
 
-            for param in filtered_params:
-                param_name = param['参数名']
-                param_value = param['参数值']
+            safe_param_name = escape_str(param_name)
+            safe_param_value = escape_str(param_value)
 
-                safe_param_name = escape_str(param_name)
-                safe_param_value = escape_str(param_value)
+            # 构建插入语句，管板连接ID为自增主键，无需手动插入
+            insert_sql = (
+                f"INSERT INTO {table_name} ("
+                f"`产品ID`, `参数名`, `参数值`, `管板连接示意图`, "
+                f"`管板连接方式`, `管板类型`"
+                f") VALUES ("
+                f"'{product_id}', '{safe_param_name}', '{safe_param_value}', '{safe_diagram}', "
+                f"'{safe_connection_type}', {safe_tube_sheet_type}"
+                f");"
+            )
+            insert_statements.append(insert_sql)
 
-                # 首先查询是否存在记录
-                select_sql = (
-                    f"SELECT COUNT(*) as count FROM {table_name} WHERE "
-                    f"`产品ID` = '{product_id}' AND "
-                    f"`参数名` = '{safe_param_name}' AND "
-                    f"`管板连接方式` = '{safe_connection_type}' AND "
-                    f"`管板类型` = '{safe_tube_sheet_type}';"
-                )
-
-                # 根据查询结果决定更改状态
-                change_status = "0"  # 默认未更改
-
-                try:
-                    cursor.execute(select_sql)
-                    result = cursor.fetchone()
-                    if isinstance(result, dict):
-                        record_exists = result.get('count', 0) > 0
-                    elif isinstance(result, (tuple, list)):
-                        record_exists = result[0] > 0 if result else False
-                    else:
-                        record_exists = False
-
-                    if record_exists:
-                        delete_sql = (
-                            f"DELETE FROM {table_name} WHERE "
-                            f"`产品ID` = '{product_id}' AND "
-                            f"`参数名` = '{safe_param_name}' AND "
-                            f"`管板连接方式` = '{safe_connection_type}' AND "
-                            f"`管板类型` = '{safe_tube_sheet_type}';"
-                        )
-                        sql_statements.append(delete_sql)
-                        change_status = "1"
-                        print(f"检测到已存在记录，将执行删除操作")
-
-                    # 构建插入语句
-                    insert_sql = (
-                        f"INSERT INTO {table_name} ("
-                        f"`产品ID`, `参数名`, `参数值`, `管板连接示意图`, "
-                        f"`管板连接方式`, `管板类型`, `管板连接更改状态`"
-                        f") VALUES ("
-                        f"'{product_id}', '{safe_param_name}', '{safe_param_value}', '{safe_diagram}', "
-                        f"'{safe_connection_type}', '{safe_tube_sheet_type}', '{change_status}'"
-                        f");"
-                    )
-                    sql_statements.append(insert_sql)
-
-                except Exception as e:
-                    print(f"查询数据库时出错: {str(e)}")
-                    import traceback
-                    traceback.print_exc()  # 打印完整堆栈信息
-                    # 如果查询失败，按新增记录处理
-                    insert_sql = (
-                        f"INSERT INTO {table_name} ("
-                        f"`产品ID`, `参数名`, `参数值`, `管板连接示意图`, "
-                        f"`管板连接方式`, `管板类型`, `管板连接更改状态`"
-                        f") VALUES ("
-                        f"'{product_id}', '{safe_param_name}', '{safe_param_value}', '{safe_diagram}', "
-                        f"'{safe_connection_type}', '{safe_tube_sheet_type}', '0'"
-                        f");"
-                    )
-                    sql_statements.append(insert_sql)
-
-            # 关闭数据库连接
-            if connection:
-                connection.close()
-
-        except Exception as e:
-            print(f"创建数据库连接时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            # 如果连接失败，按新增记录处理所有参数
-            for param in filtered_params:
-                param_name = param['参数名']
-                param_value = param['参数值']
-
-                safe_param_name = escape_str(param_name)
-                safe_param_value = escape_str(param_value)
-
-                insert_sql = (
-                    f"INSERT INTO {table_name} ("
-                    f"`产品ID`, `参数名`, `参数值`, `管板连接示意图`, "
-                    f"`管板连接方式`, `管板类型`, `管板连接更改状态`"
-                    f") VALUES ("
-                    f"'{product_id}', '{safe_param_name}', '{safe_param_value}', '{safe_diagram}', "
-                    f"'{safe_connection_type}', '{safe_tube_sheet_type}', '0'"
-                    f");"
-                )
-                sql_statements.append(insert_sql)
-
-        return "; ".join(sql_statements) if sql_statements else None
+        return "; ".join(insert_statements) if insert_statements else None
 
     def build_sql_for_tube_hole(self, tube_hole_data):
         if not tube_hole_data:
@@ -6746,7 +6617,7 @@ class TubeLayoutEditor(QMainWindow):
         return "; ".join(insert_statements) if insert_statements else None
 
     def actual_save_operation(self, page_index):
-        if page_index == 1:  # 布管页面
+        if page_index == 0:  # 布管页面
             if not self.has_piped:
                 QMessageBox.warning(self, "提示", "还未布管", QMessageBox.Ok)
             else:
@@ -6787,7 +6658,7 @@ class TubeLayoutEditor(QMainWindow):
                             self.execute_sql(statement)
 
             pass
-        elif page_index == 2:  # 管-板连接页面
+        elif page_index == 1:  # 管-板连接页面
             # 构建SQL语句
             sql_list = self.build_sql_for_tube_sheet_connection()
             if sql_list:
@@ -6958,7 +6829,7 @@ class TubeLayoutEditor(QMainWindow):
             connection.commit()
             # QMessageBox.information(self, "成功", "数据保存成功！")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存数据时出错:\n{str(e)}")
+            # QMessageBox.critical(self, "错误", f"保存数据时出错:\n{str(e)}")
             print("保存数据时出错")
 
     def switch_page(self, index):
@@ -7034,14 +6905,15 @@ class TubeLayoutEditor(QMainWindow):
 
                         # 图片：根据current_tube_partition匹配对应文件
                         if current_tube_partition and os.path.exists(tube_pattern_base_path):
+                            # 定义图片文件名的映射关系（与load_tube_pass_images保持一致）
                             image_file_map = {
-                                "2.1": "2.1.png",
+                                "2": "2.png",
                                 "4.1": "4.1.png",
-                                "4.2": "4.2.1.png",
-                                "4.3": "4.3.1.png",
-                                "6.1": "6.1.1.png",
-                                "6.2": "6.2.1.png",
-                                "1.1": "1.1.png"
+                                "4.2": "4.2.1.png",  # 使用第一个图片作为代表
+                                "4.3": "4.3.1.png",  # 使用第一个图片作为代表
+                                "6.1": "6.1.1.png",  # 使用第一个图片作为代表
+                                "6.2": "6.2.1.png",  # 使用第一个图片作为代表
+                                "1": "1.png"
                             }
 
                             # 获取对应的图片文件名
@@ -7157,7 +7029,7 @@ class TubeLayoutEditor(QMainWindow):
             text_item.setPos(x, y)
             text_item.setFlag(QGraphicsItem.ItemIgnoresTransformations)  # 关键：忽略缩放
 
-    # TODO 圆心连线
+    # TODO 连接中心
     def connect_center(self, scene, centers: List[Tuple[float, float]], do: float):
         """
         根据换热管排列方式，连接相邻圆心
@@ -7251,11 +7123,9 @@ class TubeLayoutEditor(QMainWindow):
                     key = tuple(sorted((idx0, idx1)))
                     if key not in connected:
                         connected.add(key)
-                        # 创建连线
-                        line = QGraphicsLineItem(x0, y0, x1, y1)
-                        line.setPen(pen)
-                        # 设置ZValue为10（足够大以覆盖其他元素），确保连线在最上层
-                        # line.setZValue(10)
+                        # 创建连线（修正参数错误）
+                        line = QGraphicsLineItem(x0, y0, x1, y1)  # 移除pen参数
+                        line.setPen(pen)  # 单独设置画笔
                         scene.addItem(line)
                         # 如果有存储连线的列表，添加进去
                         if hasattr(self, 'connection_lines'):
@@ -7310,18 +7180,14 @@ class TubeLayoutEditor(QMainWindow):
     from typing import List, Tuple
     from collections import defaultdict
 
-    # 绘制折流板
     def draw_baffle_plates(self):
+        """根据折流板要求切口率参数绘制折流板线段，并存储折流板位置信息"""
         from PyQt5.QtGui import QPen, QColor
         from PyQt5.QtWidgets import QMessageBox
         import math
 
-        # 擦除前一次绘制的折流板信息，目前只有这个方法不闪退
-        # self.baffle_lines = []
-        # print(self.baffle_lines)
-        if len(self.baffle_lines) != 0:
-            self.clear_baffle_plates()
-            self.baffle_lines = []
+        # 清空之前的折流板信息
+        self.baffle_lines = []
 
         # 获取折流板相关参数
         cut_direction = None  # 折流板切口方向
@@ -7369,10 +7235,10 @@ class TubeLayoutEditor(QMainWindow):
             # QMessageBox.warning(self, "参数错误", "折流板要求切口率必须在0%到50%范围内")
             return
 
-        # 计算壳体半径 - 保持您的原有逻辑
+        # 计算壳体半径
         shell_radius = shell_inner_diameter
 
-        # 根据您的公式计算折流板到圆心的距离
+        # 根据新公式计算折流板到圆心的距离
         # 距离圆心 = 壳体内直径 × 0.5 × (0.5 - 切口率/100)
         # 0.5 × 壳体内直径 等于 壳体半径，所以可简化为：
         distance_from_center = shell_radius * (0.5 - cut_rate / 100)
@@ -7386,137 +7252,94 @@ class TubeLayoutEditor(QMainWindow):
         pen = QPen(QColor(204, 204, 0))  # 黄色
         pen.setWidth(3)
 
-        try:
-            if cut_direction == "水平上下":
-                # 计算弦长的一半 - 保持您的原有计算公式
-                chord_half_length = math.sqrt((shell_radius / 2) ** 2 - distance_from_center ** 2)
+        if cut_direction == "水平上下":
+            # 计算弦长的一半
+            chord_half_length = math.sqrt((shell_radius / 2) ** 2 - distance_from_center ** 2)
 
-                # 上侧线段（y=distance_from_center）并存储信息
-                upper_line = self.graphics_scene.addLine(
-                    -chord_half_length, distance_from_center,
-                    chord_half_length, distance_from_center,
-                    pen
-                )
-                self.baffle_lines.append({
-                    'type': 'horizontal',
-                    'y_level': distance_from_center,
-                    'x_range': (-chord_half_length, chord_half_length),
-                    'line_item': upper_line
-                })
+            # 上侧线段（y=distance_from_center）并存储信息
+            upper_line = self.graphics_scene.addLine(
+                -chord_half_length, distance_from_center,
+                chord_half_length, distance_from_center,
+                pen
+            )
+            self.baffle_lines.append({
+                'type': 'horizontal',
+                'y_level': distance_from_center,
+                'x_range': (-chord_half_length, chord_half_length),
+                'line_item': upper_line
+            })
 
-                # 下侧线段（y=-distance_from_center）并存储信息
-                lower_line = self.graphics_scene.addLine(
-                    -chord_half_length, -distance_from_center,
-                    chord_half_length, -distance_from_center,
-                    pen
-                )
-                self.baffle_lines.append({
-                    'type': 'horizontal',
-                    'y_level': -distance_from_center,
-                    'x_range': (-chord_half_length, chord_half_length),
-                    'line_item': lower_line
-                })
+            # 下侧线段（y=-distance_from_center）并存储信息
+            lower_line = self.graphics_scene.addLine(
+                -chord_half_length, -distance_from_center,
+                chord_half_length, -distance_from_center,
+                pen
+            )
+            self.baffle_lines.append({
+                'type': 'horizontal',
+                'y_level': -distance_from_center,
+                'x_range': (-chord_half_length, chord_half_length),
+                'line_item': lower_line
+            })
 
-                # 记录操作
-                self.operations.append({
-                    "type": "baffle_plate",
-                    "direction": "horizontal",
-                    "cut_rate": cut_rate,
-                    "distance_from_center": distance_from_center,
-                    "length": chord_half_length * 2
-                })
+            # 记录操作
+            self.operations.append({
+                "type": "baffle_plate",
+                "direction": "horizontal",
+                "cut_rate": cut_rate,
+                "distance_from_center": distance_from_center,
+                "length": chord_half_length * 2
+            })
 
-            elif cut_direction == "垂直左右":
+        elif cut_direction == "垂直左右":
+            # 计算弦长的一半
+            chord_half_length = math.sqrt(shell_radius ** 2 - distance_from_center ** 2)
 
-                chord_half_length = math.sqrt((shell_radius / 2) ** 2 - distance_from_center ** 2)
+            # 右侧线段（x=distance_from_center）并存储信息
+            right_line = self.graphics_scene.addLine(
+                distance_from_center, -chord_half_length,
+                distance_from_center, chord_half_length,
+                pen
+            )
+            self.baffle_lines.append({
+                'type': 'vertical',
+                'x_level': distance_from_center,
+                'y_range': (-chord_half_length, chord_half_length),
+                'line_item': right_line
+            })
 
-                # 右侧线段（x=distance_from_center）并存储信息
-                right_line = self.graphics_scene.addLine(
-                    distance_from_center, -chord_half_length,
-                    distance_from_center, chord_half_length,
-                    pen
-                )
-                self.baffle_lines.append({
-                    'type': 'vertical',
-                    'x_level': distance_from_center,
-                    'y_range': (-chord_half_length, chord_half_length),
-                    'line_item': right_line
-                })
+            # 左侧线段（x=-distance_from_center）并存储信息
+            left_line = self.graphics_scene.addLine(
+                -distance_from_center, -chord_half_length,
+                -distance_from_center, chord_half_length,
+                pen
+            )
+            self.baffle_lines.append({
+                'type': 'vertical',
+                'x_level': -distance_from_center,
+                'y_range': (-chord_half_length, chord_half_length),
+                'line_item': left_line
+            })
 
-                # 左侧线段（x=-distance_from_center）并存储信息
-                left_line = self.graphics_scene.addLine(
-                    -distance_from_center, -chord_half_length,
-                    -distance_from_center, chord_half_length,
-                    pen
-                )
-                self.baffle_lines.append({
-                    'type': 'vertical',
-                    'x_level': -distance_from_center,
-                    'y_range': (-chord_half_length, chord_half_length),
-                    'line_item': left_line
-                })
+            # 记录操作
+            self.operations.append({
+                "type": "baffle_plate",
+                "direction": "vertical",
+                "cut_rate": cut_rate,
+                "distance_from_center": distance_from_center,
+                "length": chord_half_length * 2
+            })
 
-                # 记录操作
-                self.operations.append({
-                    "type": "baffle_plate",
-                    "direction": "vertical",
-                    "cut_rate": cut_rate,
-                    "distance_from_center": distance_from_center,
-                    "length": chord_half_length * 2
-                })
-
-        except Exception as e:
-            print(f"绘制折流板时出错: {e}")
-            # 如果绘制过程中出错，确保清除已创建的内容
-            self.clear_baffle_plates()
-
-    def clear_baffle_plates(self):
-        """安全地清除所有折流板线段"""
-        # 确保baffle_lines列表存在
-        if not hasattr(self, 'baffle_lines'):
-            self.baffle_lines = []
-            return
-
-        try:
-            # 首先从操作记录中移除折流板相关的操作
-            if hasattr(self, 'operations'):
-                self.operations = [op for op in self.operations if op.get("type") != "baffle_plate"]
-
-            # 然后从图形场景中移除所有折流板线段
-            # 先收集所有要移除的项，避免在迭代中操作
-            items_to_remove = []
-            for baffle_info in self.baffle_lines:
-                line_item = baffle_info.get('line_item')
-                if line_item and self.graphics_scene:
-                    items_to_remove.append(line_item)
-
-            # 批量移除项目
-            if self.graphics_scene:
-                for item in items_to_remove:
-                    try:
-                        # 更安全的检查方式
-                        if item and item in self.graphics_scene.items():
-                            self.graphics_scene.removeItem(item)
-                    except RuntimeError as e:
-                        print(f"移除折流板线段时发生运行时错误: {e}")
-                    except Exception as e:
-                        print(f"移除折流板线段时出错: {e}")
-
-            # 最后清空列表
-            self.baffle_lines = []
-
-        except Exception as e:
-            print(f"清除折流板时出错: {e}")
-            # 如果出错，重新初始化列表
-            self.baffle_lines = []
+        # else:
+        #     QMessageBox.warning(self, "参数错误", f"未知的折流板切口方向: {cut_direction}")
 
     def create_scene(self):
         """
         创建场景并设置相关参数，通过类属性存储scene和small_D
         返回值：布尔值，表示场景是否创建成功
         """
-        self.left_data_list = []
-        self.left_data_pd = None
+        self.left_data_list = []  # 保持列表形式（字典列表）
+        self.left_data_pd = None  # 用于存储DataFrame
 
         # 初始化参数
         DL = None
@@ -7528,7 +7351,7 @@ class TubeLayoutEditor(QMainWindow):
 
         # 读取参数并填充
         for row in range(table.rowCount()):
-            param_name = table.item(row, 1).text()
+            param_name = table.item(row, 1).text()  # 获取参数名
             param_value_widget = table.cellWidget(row, 2)
 
             # 根据控件类型获取参数值
@@ -7683,32 +7506,21 @@ class TubeLayoutEditor(QMainWindow):
                     break
 
     def on_buguan_bt_click(self):
-        try:
-            result = self.calculate_piping_layout()
-            self.draw_baffle_plates()
-            if result and hasattr(self, 'global_centers') and self.global_centers:
-                self.full_sorted_current_centers_up, self.full_sorted_current_centers_down = self.group_centers_by_y(
-                    self.global_centers)
+        self.calculate_piping_layout()
+        self.full_sorted_current_centers_up, self.full_sorted_current_centers_down = self.group_centers_by_y(
+            self.global_centers)
 
-            self.selected_centers = []
-            self.lagan_info = []
-            self.red_dangban = []
-            self.center_dangban = []
-            self.center_dangguan = []
-            self.del_centers = []
-            self.side_dangban = []
-            self.impingement_plate_1 = []
-            self.impingement_plate_2 = []
-            self.isHuadao = False
-            self.slide_selected_centers = []
-            self.interfering_tubes1 = []
-            self.interfering_tubes2 = []
-
-        except Exception as e:
-            print(f"布管按钮点击时发生错误: {e}")
-            import traceback
-            traceback.print_exc()
-            # QMessageBox.critical(self, "错误", f"布管过程中发生错误: {str(e)}")
+        # 布管后初始化
+        self.selected_centers = []
+        self.lagan_info = []  # 拉杆
+        self.red_dangban = []  # 最左最右拉杆
+        self.center_dangban = []  # 中间挡板
+        self.center_dangguan = []  # 中间挡管
+        self.del_centers = []  # 删除的圆心
+        self.side_dangban = []  # 旁路挡板
+        self.impingement_plate_1 = []  # 平板式防冲板
+        self.impingement_plate_2 = []  # 折边式防冲板
+        self.isHuadao = False
 
     def find_nearest_circle_index(self, sorted_centers_up: List[List[Tuple[float, float]]],
                                   sorted_centers_down: List[List[Tuple[float, float]]],
@@ -8019,9 +7831,6 @@ class TubeLayoutEditor(QMainWindow):
                         self.selected_centers.append(((row + 1), col_num))
 
     def clear_selection_highlight(self):
-        from PyQt5.QtCore import QPointF
-        from PyQt5.QtWidgets import QGraphicsEllipseItem
-
         if not hasattr(self, 'selected_centers') or not self.selected_centers:
             return
 
@@ -8050,8 +7859,8 @@ class TubeLayoutEditor(QMainWindow):
                     self.graphics_scene.removeItem(item)
                     break
 
-        # 清空选中记录（使用属性赋值方式）
-        self.selected_centers = []
+        # 清空选中记录
+        self.selected_centers.clear()
 
     def on_show_operations_click(self):
         if not hasattr(self, 'operations') or not self.operations:
@@ -8462,7 +8271,7 @@ class TubeLayoutEditor(QMainWindow):
         else:
             # QMessageBox.warning(self, "选择错误", "该管程程数交叉布管尚未开发")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
         # 返回计算得到的两个序列
         return pair_x_info_up, pair_x_info_down
 
@@ -8591,7 +8400,7 @@ class TubeLayoutEditor(QMainWindow):
         else:
             # QMessageBox.warning(self, "选择错误", "该管程程数交叉布管尚未开发")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         # 返回计算得到的两个序列
         return pair_y_info_left, pair_y_info_right
@@ -8603,14 +8412,14 @@ class TubeLayoutEditor(QMainWindow):
             # 参照管孔不能为同一位置
             QMessageBox.warning(self, "选择错误", "参照管孔之间的连线应为倾斜线")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
             return
 
         elif abs(result['up_number'] - result['down_number']) > 3:
             # 参照管孔间隔不能大于3个
             QMessageBox.warning(self, "选择错误", "参照管孔间隔不能大于3个换热管孔")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
         else:
             self.get_x_2_number_sequences(result, print_cross_x_up)
             up_seq, down_seq = self.get_x_2_number_sequences(result, print_cross_x_up)
@@ -8667,14 +8476,14 @@ class TubeLayoutEditor(QMainWindow):
         if result['left_number'] == result['right_number']:
             QMessageBox.warning(self, "选择错误", "参照管孔之间的连线应为倾斜线")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
             return
 
         # 校验2：参照管孔间隔不能大于3个换热管孔
         elif abs(result['left_number'] - result['right_number']) > 3:
             QMessageBox.warning(self, "选择错误", "参照管孔间隔不能大于3个换热管孔")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         # 校验通过：生成序列并构建交叉管道
         else:
@@ -8753,7 +8562,7 @@ class TubeLayoutEditor(QMainWindow):
             if abs(result['up_numbers'][0] - result['up_numbers'][1]) > 3:
                 QMessageBox.warning(self, "选择错误", "参照管孔间隔不能大于3个换热管孔")
                 self.clear_selection_highlight()
-                self.selected_centers = []
+                self.selected_centers.clear()
             else:
                 # self.get_x_4_number_sequences(result, print_cross_x_up)
                 tube_num = self.get_tube_pass_count()
@@ -8804,11 +8613,11 @@ class TubeLayoutEditor(QMainWindow):
                 else:
                     QMessageBox.warning(self, "功能提示", "该管程程数交叉布管尚未开发")
                     self.clear_selection_highlight()
-                    self.selected_centers = []
+                    self.selected_centers.clear()
 
         else:
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
     def get_x_4_number_sequences(self, result, print_cross_x_up):
         pair_x_info_up = []
@@ -8854,7 +8663,7 @@ class TubeLayoutEditor(QMainWindow):
         else:
             QMessageBox.warning(self, "功能提示", "该管程程数交叉布管尚未开发")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         return pair_x_info_up, pair_x_info_down
 
@@ -8972,7 +8781,7 @@ class TubeLayoutEditor(QMainWindow):
         else:
             QMessageBox.warning(self, "功能提示", "该管程程数交叉布管尚未开发")
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         return pair_x_info_up, pair_x_info_down
 
@@ -8985,7 +8794,7 @@ class TubeLayoutEditor(QMainWindow):
             if abs(result['up_numbers'][0] - result['up_numbers'][1]) > 3:
                 QMessageBox.warning(self, "选择错误", "参照管孔间隔不能大于3个换热管孔")
                 self.clear_selection_highlight()
-                self.selected_centers = []
+                self.selected_centers.clear()
             else:
                 # self.get_x_4_number_sequences(result, print_cross_x_up)
                 up_seq, down_seq = self.get_y_4_number_sequences(result, print_cross_y_left)
@@ -9040,7 +8849,7 @@ class TubeLayoutEditor(QMainWindow):
 
         else:
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
     import math
 
@@ -9067,8 +8876,7 @@ class TubeLayoutEditor(QMainWindow):
         return distance
 
     def on_del_cross_pipes_click(self):
-        tube_result = self.calculate_piping_layout()
-        self.draw_baffle_plates()
+        self.calculate_piping_layout()
         self.full_sorted_current_centers_up, self.full_sorted_current_centers_down = self.group_centers_by_y(
             self.global_centers)
 
@@ -9236,7 +9044,7 @@ class TubeLayoutEditor(QMainWindow):
                     if distance < required_rmin:
                         QMessageBox.warning(self, "距离不足", "参照管孔之间倾斜线的距离不满足U形换热管的最小弯曲半径。")
                         self.clear_selection_highlight()
-                        self.selected_centers = []
+                        self.selected_centers.clear()
                         # 不继续执行后续逻辑
                         return
 
@@ -9295,7 +9103,7 @@ class TubeLayoutEditor(QMainWindow):
                         else:
                             QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                             self.clear_selection_highlight()
-                            self.selected_centers = []
+                            self.selected_centers.clear()
                     # y轴第二排
                     elif (coord7_in_left and coord8_in_right) or (coord7_in_right and coord8_in_left):
                         if self.is_y_line1:
@@ -9306,7 +9114,7 @@ class TubeLayoutEditor(QMainWindow):
                         else:
                             QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                             self.clear_selection_highlight()
-                            self.selected_centers = []
+                            self.selected_centers.clear()
                     # x轴第三排
                     elif (coord9_in_up and coord10_in_down) or (coord9_in_down and coord10_in_up):
                         if self.is_x_line1 and self.is_x_line2:
@@ -9317,7 +9125,7 @@ class TubeLayoutEditor(QMainWindow):
                         else:
                             QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                             self.clear_selection_highlight()
-                            self.selected_centers = []
+                            self.selected_centers.clear()
                     # y轴第三排
                     elif (coord11_in_left and coord12_in_right) or (coord11_in_right and coord12_in_left):
                         if self.is_y_line1 and self.is_y_line2:
@@ -9328,10 +9136,10 @@ class TubeLayoutEditor(QMainWindow):
                         else:
                             QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                             self.clear_selection_highlight()
-                            self.selected_centers = []
+                            self.selected_centers.clear()
                     else:
                         self.clear_selection_highlight()
-                        self.selected_centers = []
+                        self.selected_centers.clear()
                     # 管孔数量为4个
             elif len(self.selected_centers) == 4:
 
@@ -9385,7 +9193,7 @@ class TubeLayoutEditor(QMainWindow):
                     else:
                         QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                         self.clear_selection_highlight()
-                        self.selected_centers = []
+                        self.selected_centers.clear()
                 # y轴第二排
                 elif y_left_count_line2 == 2 and y_right_count_line2 == 2:
                     if self.is_y_line1:
@@ -9396,7 +9204,7 @@ class TubeLayoutEditor(QMainWindow):
                     else:
                         QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                         self.clear_selection_highlight()
-                        self.selected_centers = []
+                        self.selected_centers.clear()
                 # x轴第三排
                 elif x_up_count_line3 == 2 and x_down_count_line3 == 2:
                     if self.is_x_line1 and self.is_x_line2:
@@ -9407,7 +9215,7 @@ class TubeLayoutEditor(QMainWindow):
                     else:
                         QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                         self.clear_selection_highlight()
-                        self.selected_centers = []
+                        self.selected_centers.clear()
                 # y轴第三排
                 elif y_left_count_line3 == 2 and y_right_count_line3 == 2:
                     if self.is_y_line1 and self.is_y_line2:
@@ -9418,7 +9226,7 @@ class TubeLayoutEditor(QMainWindow):
                     else:
                         QMessageBox.warning(self, "选择错误", "请从第1排（行）依次完成交叉布管")
                         self.clear_selection_highlight()
-                        self.selected_centers = []
+                        self.selected_centers.clear()
 
                 else:
                     QMessageBox.warning(self, "选择错误", "参照管孔位置不正确")
@@ -9502,7 +9310,7 @@ class TubeLayoutEditor(QMainWindow):
 
         # 清空选择
         if hasattr(self, 'selected_centers'):
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         self.graphics_scene.update()
         QApplication.processEvents()
@@ -9600,6 +9408,8 @@ class TubeLayoutEditor(QMainWindow):
         # 更新当前中心点
         self.current_centers = updated_centers
         self.clear_selection_highlight()
+        print(self.selected_centers)
+        print("调用拉杆后的选中圆心数量")
 
         # # 清除选中状态及淡蓝色涂层
         # if hasattr(self, 'selected_centers') and self.selected_centers:
@@ -9622,270 +9432,99 @@ class TubeLayoutEditor(QMainWindow):
         #                     self.graphics_scene.removeItem(item)
         #                     break
         #
-        #     self.selected_centers = []
+        #     self.selected_centers.clear()
 
-    def build_sql_for_tube(self, tube_data):
-        if not tube_data:
-            return None
+    def build_lagan(self, selected_centers):
+        if not selected_centers:
+            return []
 
-        table_name = "`产品设计活动表_布管参数表`"
-        component_table = "`产品设计活动表_元件附加参数表`"
-        productID = self.productID
-        sql_statements = []
+        import ast
+        selected_centers_list = []
+        if isinstance(selected_centers, list):
+            selected_centers_list = [item for item in selected_centers
+                                     if isinstance(item, tuple)
+                                     and len(item) == 2
+                                     and all(isinstance(x, (int, float)) for x in item)]
+        elif isinstance(selected_centers, str):
+            try:
+                parsed_list = ast.literal_eval(selected_centers)
+                if isinstance(parsed_list, list):
+                    selected_centers_list = [item for item in parsed_list
+                                             if isinstance(item, tuple)
+                                             and len(item) == 2
+                                             and all(isinstance(x, (int, float)) for x in item)]
+            except (SyntaxError, ValueError, TypeError) as e:
+                print("字符串解析错误:", e)
+                selected_centers_list = []
+        else:
 
-        def escape_str(value):
-            return value.replace("'", "''") if isinstance(value, str) else value
+            selected_centers_list = []
+        combined = []
+        seen = set()
+        for coord in self.lagan_info:
+            # if coord not in seen:
+            seen.add(coord)
+            combined.append(coord)
+        for coord in selected_centers_list:
+            # if coord not in seen:
+            seen.add(coord)
+            combined.append(coord)
+        self.lagan_info = combined
+        current_coords = self.selected_to_current_coords(selected_centers)
+        if current_coords:
+            red_pen = QPen(Qt.red)
+            red_pen.setWidth(2)
+            red_brush = QBrush(Qt.red)
+            msg_lines = []
 
-        # 先清空本产品ID在布管参数表中的旧记录
-        safe_productID = escape_str(productID)
-        delete_sql = f"DELETE FROM {table_name} WHERE `产品ID` = '{safe_productID}'"
-        sql_statements.append(delete_sql)
+            # 初始化操作记录列表（如果不存在）
+            if not hasattr(self, 'operations'):
+                self.operations = []
+            if isinstance(selected_centers, str):
+                try:
+                    import ast
+                    selected_centers = ast.literal_eval(selected_centers)
+                except (SyntaxError, ValueError) as e:
+                    print(f"字符串转换失败: {e}")
+                    return current_coords
+            if selected_centers:
+                for row_label, col_label in selected_centers:
+                    # 计算行/列索引（基于绝对值）
+                    row_idx = abs(row_label) - 1
+                    col_idx = abs(col_label) - 1
 
-        # 管程=2 时把“分程隔板两侧相邻管中心距（水平）”置 0
-        is_tube_pass_two = any(
-            (data.get("参数名", "").strip() == "管程程数" and str(data.get("参数值", "")).strip() == "2")
-            for data in tube_data
-        )
+                    # 根据行号正负获取原始坐标
+                    if row_label > 0:
+                        x, y = self.full_sorted_current_centers_up[row_idx][col_idx]
+                    else:
+                        x, y = self.full_sorted_current_centers_down[row_idx][col_idx]
 
-        # 初始化管程分程形式是否为4.1的标志
-        is_tube_pass_form_4_1 = False
+                    # 绘制红色圆圈标记拉杆
+                    self.graphics_scene.addEllipse(
+                        x - self.r, y - self.r, 2 * self.r, 2 * self.r, red_pen, red_brush
+                    )
 
-        # 需要跨表同步的参数（从布管参数表 -> 元件附加参数表 的映射）
-        cross_map = {
-            "换热管外径 do": "换热管外径",
-            "中间挡板厚度": "中间挡板厚度",
-            "中间挡板宽度": "中间挡板宽度",
-            "拉杆形式": "拉杆型式",
-            "拉杆直径": "拉杆规格",
-            "旁路挡板厚度": "旁路挡板厚度",
-            "旁路挡板宽度": "旁路挡板宽度",
-            "防冲板折边角度": "防冲板折边角度",
-            "防冲板形式": "防冲板形式",
-            "防冲板厚度": "防冲板厚度",
-            "滑道定位": "滑道定位",
-            "滑道高度": "滑道高度",
-            "滑道厚度": "滑道厚度",
-            "滑道与竖直中心线夹角": "滑道与竖直中心线夹角",
-            "切边长度 L1": "切边长度 L1",
-            "切边高度 h": "切边高度 h",
-        }
+                    # 记录日志信息
+                    msg_lines.append(f"第 {row_label} 行, 第 {col_label} 列")
 
-        # 用于后面写设计数据表/元件附加参数表的值暂存
-        cross_params = {
-            "公称直径 DN": None,
-            "壳体内直径 Di": None,
-            "旁路挡板厚度": None,
-            "旁路挡板宽度": None,
-            "防冲板形式": None,
-            "防冲板厚度": None,
-            "防冲板折边角度": None,
-            "滑道定位": None,
-            "滑道高度": None,
-            "滑道厚度": None,
-            "滑道与竖直中心线夹角": None,
-            "切边长度 L1": None,
-            "切边高度 h": None,
-            "管程分程形式": None,
-            "换热管外径 do": None,
-            "中间挡板厚度": None,
-            "中间挡板宽度": None,
-            "拉杆形式": None,
-            "拉杆直径": None,
-        }
+                    # 添加操作记录
+                    self.operations.append({
+                        "type": "lagan",
+                        "row": row_label,
+                        "col": col_label,
+                        "coord": (x, y)
+                    })
 
-        for data in tube_data:
-            line_num = str(data.get("参数名", ""))
-            holes_up = str(data.get("参数值", ""))
-            holes_down = data.get("单位", "")
+            # # 显示绘制结果
+            # QMessageBox.information(self, "已绘制", "绘制圆心:\n" + "\n".join(msg_lines))
+            self.clear_selection_highlight()
+            self.selected_centers.clear()
 
-            if line_num in cross_params:
-                cross_params[line_num] = holes_up
-
-            safe_line_num = escape_str(line_num)
-            safe_holes_up = escape_str(holes_up)
-            if holes_down is None or (isinstance(holes_down, str) and holes_down.strip() == ""):
-                safe_holes_down = "NULL"
-            else:
-                safe_holes_down = f"'{escape_str(str(holes_down))}'"
-
-            insert_sql = (
-                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
-                f"VALUES ('{productID}', '{safe_line_num}', '{safe_holes_up}', {safe_holes_down})"
-            )
-            sql_statements.append(insert_sql)
-
-        # 处理“中间挡板宽度”参数，包含单位mm
-        if hasattr(self, 'center_dangban_length') and self.center_dangban_length is not None:
-            param_name = "中间挡板宽度"
-            param_value = str(self.center_dangban_length)
-            unit = "mm"  # 设置单位为mm
-
-            safe_param_name = escape_str(param_name)
-            safe_param_value = escape_str(param_value)
-            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
-
-            # 先更新已有记录
-            sql_statements.append(
-                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
-            )
-            # 不存在则插入新记录
-            sql_statements.append(
-                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
-                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
-                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
-            )
-            # 存入cross_params用于跨表同步
-            cross_params[param_name] = param_value
-
-        # 处理“旁路挡板宽度”参数，包含单位mm
-        if hasattr(self, 'side_dangban_length') and self.side_dangban_length is not None:
-            param_name = "旁路挡板宽度"
-            param_value = str(self.side_dangban_length)
-            unit = "mm"  # 设置单位为mm
-
-            safe_param_name = escape_str(param_name)
-            safe_param_value = escape_str(param_value)
-            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
-
-            # 先更新已有记录
-            sql_statements.append(
-                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
-            )
-            # 不存在则插入新记录
-            sql_statements.append(
-                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
-                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
-                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
-            )
-            # 存入cross_params用于跨表同步
-            cross_params[param_name] = param_value
-
-        # 处理“管程分程形式”的图标选择值
-        if hasattr(self, 'tube_pass_form_value') and self.tube_pass_form_value:
-            param_name = "管程分程形式"
-            param_value = self.tube_pass_form_value
-            unit = ""
-            safe_param_name = escape_str(param_name)
-            safe_param_value = escape_str(param_value)
-            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
-
-            # 检查管程分程形式是否为4.1
-            if param_value == "4.1":
-                is_tube_pass_form_4_1 = True
-
-            # upsert 到布管参数表
-            sql_statements.append(
-                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
-            )
-            sql_statements.append(
-                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
-                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
-                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
-            )
-
-            # 存入cross_params用于跨表同步
-            cross_params[param_name] = param_value
-
-        # 如果管程=2 或者管程分程形式=4.1，把"分程隔板两侧相邻管中心距（水平）"置 0
-        if is_tube_pass_two or is_tube_pass_form_4_1:
-            param_name = "分程隔板两侧相邻管中心距（水平）"
-            param_value = "0"
-            unit = ""
-            safe_param_name = escape_str(param_name)
-            safe_param_value = escape_str(param_value)
-            safe_unit = "NULL" if unit.strip() == "" else f"'{escape_str(unit)}'"
-
-            # 更新布管参数表中的该参数
-            sql_statements.append(
-                f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = {safe_unit} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
-            )
-            # 如果不存在则插入
-            sql_statements.append(
-                f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
-                f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', {safe_unit} "
-                f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
-            )
-
-        # # 把 self.output_data['TieRodD'] 写到"拉杆直径"
-        # tie_rod_d = self.output_data.get('TieRodD')
-        # if tie_rod_d is not None:
-        #     cross_params["拉杆直径"] = str(tie_rod_d)
-        #     param_name = "拉杆直径"
-        #     param_value = str(tie_rod_d)
-        #     safe_param_name = escape_str(param_name)
-        #     safe_param_value = escape_str(param_value)
-        #     sql_statements.append(
-        #         f"UPDATE {table_name} SET `参数值` = '{safe_param_value}', `单位` = NULL "
-        #         f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}'"
-        #     )
-        #     sql_statements.append(
-        #         f"INSERT INTO {table_name} (`产品ID`, `参数名`, `参数值`, `单位`) "
-        #         f"SELECT '{productID}', '{safe_param_name}', '{safe_param_value}', NULL "
-        #         f"WHERE NOT EXISTS (SELECT 1 FROM {table_name} "
-        #         f"WHERE `产品ID` = '{productID}' AND `参数名` = '{safe_param_name}')"
-        #     )
-
-        # 公称直径写回“设计数据表”
-        if cross_params["公称直径 DN"] is not None:
-            design_table = "`产品设计活动表_设计数据表`"
-            safe_dn_value = escape_str(cross_params["公称直径 DN"])
-            sql_statements.append(
-                f"UPDATE {design_table} SET `壳程数值` = '{safe_dn_value}' "
-                f"WHERE `产品ID` = '{productID}' AND `参数名称` LIKE '公称直径%'"
-            )
-        if cross_params["壳体内直径 Di"] is not None:
-            design_table = "`产品设计活动表_设计数据表`"
-            safe_dn_value = escape_str(cross_params["壳体内直径 Di"])
-            sql_statements.append(
-                f"UPDATE {design_table} SET `管程数值` = '{safe_dn_value}' "
-                f"WHERE `产品ID` = '{productID}' AND `参数名称` LIKE '公称直径%'"
-            )
-
-        # 把映射参数写回/更新到【产品设计活动表_元件附加参数表】
-        for tube_name, comp_name in cross_map.items():
-            val = cross_params.get(tube_name)
-            if val is None or str(val).strip() == "":
-                continue
-            safe_comp_name = escape_str(comp_name)
-            safe_val = escape_str(str(val))
-
-            # UPDATE
-            sql_statements.append(
-                f"UPDATE {component_table} SET `参数值` = '{safe_val}' "
-                f"WHERE `产品ID` = '{productID}' AND `参数名称` = '{safe_comp_name}'"
-            )
-            # INSERT IF NOT EXISTS
-            sql_statements.append(
-                f"INSERT INTO {component_table} (`产品ID`, `参数名称`, `参数值`) "
-                f"SELECT '{productID}', '{safe_comp_name}', '{safe_val}' "
-                f"WHERE NOT EXISTS (SELECT 1 FROM {component_table} "
-                f"WHERE `产品ID` = '{productID}' AND `参数名称` = '{safe_comp_name}')"
-            )
-
-        # 执行所有 SQL
-        conn = create_product_connection()
-        if not conn:
-            return None
-        try:
-            with conn.cursor() as cursor:
-                for sql in sql_statements:
-                    cursor.execute(sql)
-            conn.commit()
-            return sql_statements
-        except pymysql.Error as e:
-            conn.rollback()
-            return None
-        finally:
-            if conn and conn.open:
-                conn.close()
+        # 返回移除已绘制拉杆后的中心坐标列表
+        return [
+            center for center in self.current_centers
+            if center not in set(current_coords)
+        ]
 
     def build_sql_for_component(self):
         conn = create_product_connection()
@@ -10003,81 +9642,6 @@ class TubeLayoutEditor(QMainWindow):
             up_item.setTextAlignment(Qt.AlignCenter)
             right_table.setItem(i, 2, up_item)
 
-    def load_initial_tube_num(self):
-        """从产品设计活动库的布管数量表加载初始管孔数量数据"""
-        # 检查产品ID是否有效
-        if not self.productID:
-            print("产品ID为空，无法查询布管数量数据")
-            return
-
-        conn = None
-        try:
-            # 创建产品设计活动库连接
-            conn = create_product_connection()
-            if not conn:
-                print("创建产品数据库连接失败，无法查询布管数量数据")
-                return
-
-            with conn.cursor() as cursor:
-                # 查询布管数量表数据，按行号排序
-                query = """
-                    SELECT 至水平中心线行号, 管孔数量（上）, 管孔数量（下）
-                    FROM 产品设计活动表_布管数量表 
-                    WHERE 产品ID = %s
-                    ORDER BY CAST(至水平中心线行号 AS UNSIGNED)
-                """
-                cursor.execute(query, (self.productID,))
-                tube_num_data = cursor.fetchall()
-
-                # 如果查询到数据，更新右侧表格
-                if tube_num_data and isinstance(tube_num_data, (list, tuple)):
-                    # print(f"成功查询到{len(tube_num_data)}行布管数量数据")
-
-                    # 获取右侧表格
-                    right_table = self.hole_distribution_table
-
-                    # 清空表格内容（保留表头）
-                    right_table.clearContents()
-
-                    # 设置行数
-                    right_table.setRowCount(len(tube_num_data))
-
-                    # 填充表格数据
-                    for row, data in enumerate(tube_num_data):
-                        if isinstance(data, dict) and all(
-                                key in data for key in ['至水平中心线行号', '管孔数量（上）', '管孔数量（下）']):
-                            # 行号
-                            line_num = data['至水平中心线行号']
-                            line_num_item = QTableWidgetItem(str(line_num))
-                            line_num_item.setTextAlignment(Qt.AlignCenter)
-                            right_table.setItem(row, 0, line_num_item)
-
-                            # 上行管孔数量
-                            holes_up = data['管孔数量（上）']
-                            holes_up_item = QTableWidgetItem(str(holes_up))
-                            holes_up_item.setTextAlignment(Qt.AlignCenter)
-                            right_table.setItem(row, 1, holes_up_item)
-
-                            # 下行管孔数量
-                            holes_down = data['管孔数量（下）']
-                            holes_down_item = QTableWidgetItem(str(holes_down))
-                            holes_down_item.setTextAlignment(Qt.AlignCenter)
-                            right_table.setItem(row, 2, holes_down_item)
-
-                    # print("已从数据库加载布管数量数据到右侧表格")
-                else:
-                    print(f"未查询到产品ID为{self.productID}的布管数量数据，保持表格原状")
-
-        except Exception as e:
-            print(f"查询布管数量数据时发生错误: {str(e)}")
-        finally:
-            # 确保关闭数据库连接
-            if conn and hasattr(conn, 'open') and conn.open:
-                try:
-                    conn.close()
-                except Exception as close_e:
-                    print(f"关闭数据库连接时出错: {str(close_e)}")
-
     def find_strange_tube_row_numbers(self):
         """
         确定self.full_sorted_current_centers_up中所有管子的行数，
@@ -10184,6 +9748,7 @@ class TubeLayoutEditor(QMainWindow):
 
     # 删除换热管
     def on_del_click(self):
+        print("开始了吗")
         try:
             # 处理侧边块删除
             if hasattr(self, 'selected_side_blocks') and self.selected_side_blocks:
@@ -10227,7 +9792,7 @@ class TubeLayoutEditor(QMainWindow):
                 # for center in selected_centers:
                 #     self.delete_huanreguan(center)
                 self.delete_huanreguan(selected_centers)
-                self.selected_centers = []
+                self.selected_centers.clear()
 
         except Exception:
             return
@@ -10271,193 +9836,8 @@ class TubeLayoutEditor(QMainWindow):
         if tubes_to_restore:
             self.build_huanreguan(tubes_to_restore)
 
-    def build_huanreguan(self, selected_centers):
-        """
-        换热管实际构建函数：处理选中中心校验、绘图、属性更新等核心逻辑
-        :param selected_centers: 经过对称处理后的选中中心坐标（相对坐标）
-        """
-        from PyQt5.QtGui import QPen, QBrush, QColor
-        from PyQt5.QtWidgets import QGraphicsEllipseItem
-        from PyQt5.QtCore import Qt, QPointF
-        import math
-
-        # 检查是否有选中的中心（相对坐标）
-        if not selected_centers:
-            return
-
-        # 初始化必要的属性（若未定义则创建）
-        if not hasattr(self, 'huanreguan'):
-            self.huanreguan = []
-        if not hasattr(self, 'current_centers'):
-            self.current_centers = []
-        if not hasattr(self, 'operations'):
-            self.operations = []
-
-        # 定义新绘制的深蓝色空心圆样式
-        pen_t = QPen(QColor(0, 0, 80))  # 深蓝色
-        pen_t.setWidth(1)
-        brush_t = QBrush(Qt.NoBrush)
-        added_count = 0
-
-        # 颜色定义
-        target_brush_color = QColor(173, 216, 230)  # 淡蓝色画刷
-        white_cover_color = QColor(255, 255, 255)  # 白色覆盖圆颜色
-        red_lagan_color = QColor(255, 0, 0)  # 红色拉杆颜色
-
-        # 暂停场景更新以提高性能
-        if self.graphics_scene.views():
-            self.graphics_scene.views()[0].setUpdatesEnabled(False)
-
-        try:
-            # 1. 精确计算selected_centers对应的绝对坐标（保留9位小数，与图形系统精度匹配）
-            target_abs_coords = set()
-            for row_label, col_label in selected_centers:
-                try:
-                    # 基于相对坐标获取绝对坐标（与拉杆绘制逻辑完全一致）
-                    if row_label > 0:
-                        centers_list = self.full_sorted_current_centers_up
-                        row_idx = row_label - 1
-                    else:
-                        centers_list = self.full_sorted_current_centers_down
-                        row_idx = -row_label - 1
-                    col_idx = abs(col_label) - 1
-
-                    # 获取原始坐标并精确计算
-                    x, y = centers_list[row_idx][col_idx]
-                    # 保留9位小数，匹配Qt图形系统的浮点数精度
-                    precise_coord = (round(x, 9), round(y, 9))
-                    target_abs_coords.add(precise_coord)
-
-                except (IndexError, Exception) as e:
-                    print(f"计算目标坐标时出错: {e}，坐标：({row_label}, {col_label})")
-                    continue
-
-            # 2. 精准移除目标位置的红色拉杆及其他无关图形
-            items_to_remove = []
-            for item in self.graphics_scene.items():
-                if not isinstance(item, QGraphicsEllipseItem):
-                    continue  # 只处理椭圆图形
-
-                # 处理淡蓝色和白色覆盖圆（全部移除）
-                item_brush_color = item.brush().color()
-                if item_brush_color == target_brush_color or item_brush_color == white_cover_color:
-                    items_to_remove.append(item)
-                    continue
-
-                # 精准处理红色拉杆：检查颜色和坐标双重匹配
-                if item_brush_color == red_lagan_color:
-                    # 精确计算图形中心坐标（考虑场景位置和自身矩形）
-                    item_pos = item.scenePos()  # 图形在场景中的位置
-                    item_rect = item.rect()  # 图形自身的矩形（相对位置）
-
-                    # 计算中心绝对坐标（scenePos + 矩形中心偏移）
-                    center_x = item_pos.x() + item_rect.center().x()
-                    center_y = item_pos.y() + item_rect.center().y()
-                    item_center = (round(center_x, 9), round(center_y, 9))
-
-                    # 检查是否在目标坐标集合中（允许极小误差）
-                    if item_center in target_abs_coords:
-                        items_to_remove.append(item)
-                        # 同时从拉杆数据记录中移除
-                        if hasattr(self, 'lagan_info'):
-                            # 遍历拉杆记录，移除匹配坐标
-                            self.lagan_info = [
-                                (lx, ly) for (lx, ly) in self.lagan_info
-                                if not (math.isclose(lx, center_x, abs_tol=1e-9) and
-                                        math.isclose(ly, center_y, abs_tol=1e-9))
-                            ]
-
-            # 执行移除操作
-            for item in items_to_remove:
-                self.graphics_scene.removeItem(item)
-
-            # 3. 预构建现有图形的坐标映射
-            existing_items_map = {}
-            for item in self.graphics_scene.items():
-                if isinstance(item, QGraphicsEllipseItem):
-                    item_pos = item.scenePos()
-                    item_rect = item.rect()
-                    center_x = item_pos.x() + item_rect.center().x()
-                    center_y = item_pos.y() + item_rect.center().y()
-                    coord_key = (round(center_x, 9), round(center_y, 9))
-                    existing_items_map[coord_key] = item
-
-            # 4. 收集并处理目标坐标
-            target_coords = []
-            items_to_remove_batch = []
-            circles_to_add = []
-
-            for row_label, col_label in selected_centers:
-                try:
-                    if row_label > 0:
-                        centers_list = self.full_sorted_current_centers_up
-                        row_idx = row_label - 1
-                    else:
-                        centers_list = self.full_sorted_current_centers_down
-                        row_idx = -row_label - 1
-                    col_idx = abs(col_label) - 1
-
-                    x, y = centers_list[row_idx][col_idx]
-                    actual_abs_coord = (x, y)
-
-                    if actual_abs_coord in self.current_centers:
-                        continue
-
-                    target_coords.append((x, y, row_label, col_label, actual_abs_coord))
-                    coord_key = (round(x, 9), round(y, 9))
-                    if coord_key in existing_items_map:
-                        items_to_remove_batch.append(existing_items_map[coord_key])
-
-                except IndexError as e:
-                    print(f"索引错误: 行{row_label}（{row_idx}）、列{col_label}（{col_idx}），{e}")
-                    continue
-                except Exception as e:
-                    print(f"处理坐标错误: {e}，({row_label}, {col_label})")
-                    continue
-
-            # 5. 批量移除现有图形项
-            for item in set(items_to_remove_batch):
-                self.graphics_scene.removeItem(item)
-
-            # 6. 批量添加新的深蓝色空心圆
-            for x, y, row_label, col_label, actual_abs_coord in target_coords:
-                if x is None or y is None:
-                    continue
-
-                ellipse_params = (x - self.r, y - self.r, 2 * self.r, 2 * self.r, pen_t, brush_t)
-                circles_to_add.append((ellipse_params, row_label, col_label, actual_abs_coord))
-
-            for ellipse_params, row_label, col_label, actual_abs_coord in circles_to_add:
-                new_circle = self.graphics_scene.addEllipse(*ellipse_params)
-
-                self.huanreguan.append((row_label, col_label))
-                if actual_abs_coord not in self.current_centers:
-                    self.current_centers.append(actual_abs_coord)
-                self.operations.append({
-                    "type": "add_tube",
-                    "relative_coord": (row_label, col_label),
-                    "absolute_coord": actual_abs_coord,
-                    "draw_coord": (x, y)
-                })
-                added_count += 1
-
-        finally:
-            # 恢复场景更新
-            if self.graphics_scene.views():
-                self.graphics_scene.views()[0].setUpdatesEnabled(True)
-
-        # 更新状态信息
-        self.del_centers = [coord for coord in self.del_centers if coord not in selected_centers]
-        self.selected_centers = []
-        self.update_total_holes_count()
-        self.sorted_current_centers_up, self.sorted_current_centers_down = self.group_centers_by_y(self.current_centers)
-        self.update_tube_nums()
-
-        if added_count == 0:
-            return
-        self.clear_selection_highlight()
-
     def delete_huanreguan(self, selected_centers):
+
         if not selected_centers:
             return []
 
@@ -10466,214 +9846,45 @@ class TubeLayoutEditor(QMainWindow):
             self.global_centers)
 
         import ast
-        from PyQt5.QtGui import QPen, QBrush, QColor
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtWidgets import QGraphicsEllipseItem
-
         selected_centers_list = []
         if isinstance(selected_centers, list):
-            # 处理相对坐标（转换为绝对坐标）
+            # 检查是否为相对坐标 (行号, 列号) 格式
             if selected_centers and all(isinstance(item, (list, tuple)) and len(item) == 2
                                         and isinstance(item[0], (int, float)) and isinstance(item[1], (int, float))
                                         for item in selected_centers):
+                # 这是相对坐标格式，需要转换为绝对坐标
                 absolute_coords_to_remove = set()
+
                 for row_label, col_label in selected_centers:
                     row_idx = abs(row_label) - 1
-                    col_idx = abs(col_label) - 1
 
-                    # 选择对应的中心点组
-                    centers_group = self.full_sorted_current_centers_up if row_label > 0 else self.full_sorted_current_centers_down
+                    # 修复列索引计算逻辑：区分正负列号
+                    if col_label < 0:
+                        # 负列号：-1 对应 0，-2 对应 1，依此类推
+                        col_idx = abs(col_label) - 1
+                    else:
+                        # 正列号：5 对应 4，6 对应 5，依此类推（因为5是第5列，索引从0开始是4）
+                        col_idx = col_label - 1
 
-                    if 0 <= row_idx < len(centers_group) and 0 <= col_idx < len(centers_group[row_idx]):
+                    # 获取原始坐标
+                    if row_label > 0:
+                        centers_group = self.full_sorted_current_centers_up
+                    else:
+                        centers_group = self.full_sorted_current_centers_down
+
+                    # 检查索引有效性
+                    if (0 <= row_idx < len(centers_group) and
+                            0 <= col_idx < len(centers_group[row_idx])):
                         x, y = centers_group[row_idx][col_idx]
-                        absolute_coords_to_remove.add((x, y))
+                        absolute_coords_to_remove.add((round(x, 2), round(y, 2)))
 
                 selected_centers_list = list(absolute_coords_to_remove)
             else:
-                # 处理绝对坐标
-                selected_centers_list = [
-                    (x, y) for item in selected_centers
-                    if isinstance(item, tuple) and len(item) == 2
-                       and all(isinstance(coord, (int, float)) for coord in item)
-                    for x, y in [item]
-                ]
-        elif isinstance(selected_centers, str):
-            try:
-                parsed_list = ast.literal_eval(selected_centers)
-                if isinstance(parsed_list, list):
-                    selected_centers_list = [
-                        (x, y) for item in parsed_list
-                        if isinstance(item, tuple) and len(item) == 2
-                           and all(isinstance(coord, (int, float)) for coord in item)
-                        for x, y in [item]
-                    ]
-            except (SyntaxError, ValueError, TypeError) as e:
-                print("字符串解析错误:", e)
-                selected_centers_list = []
-        else:
-            selected_centers_list = []
-
-        # 合并并去重删除列表
-        combined = []
-        seen = set()
-        for coord in self.del_centers:
-            key = (coord[0], coord[1])
-            if key not in seen:
-                seen.add(key)
-                combined.append(coord)
-        for coord in selected_centers_list:
-            key = (coord[0], coord[1])
-            if key not in seen:
-                seen.add(key)
-                combined.append(coord)
-        self.del_centers = combined
-
-        absolute_coords_to_remove = set(selected_centers_list)
-        centers_to_remove = list(absolute_coords_to_remove)
-
-        # 定义删除用的白色覆盖圆样式
-        white_pen = QPen(QColor(255, 255, 255))
-        white_pen.setWidth(3)
-        white_brush = QBrush(QColor(255, 255, 255))
-        # 换热管样式匹配
-        huanreguan_pen_color = QColor(0, 0, 80)
-        huanreguan_pen_width = 1
-        huanreguan_brush = QBrush(Qt.NoBrush)
-
-        # 暂停场景更新
-        view = self.graphics_scene.views()[0] if self.graphics_scene.views() else None
-        if view:
-            view.setUpdatesEnabled(False)
-
-        try:
-            all_items = self.graphics_scene.items()
-            items_to_remove = []
-            items_to_add = []
-
-            for x, y in centers_to_remove:
-                target_rect = (x - self.r, y - self.r, 2 * self.r, 2 * self.r)
-                found = False
-
-                # 查找并移除同位置的换热管（无论ZValue如何）
-                for item in all_items:
-                    if not isinstance(item, QGraphicsEllipseItem):
-                        continue
-
-                    item_rect = item.rect()
-                    item_pos = item.scenePos()
-                    item_x = item_pos.x()
-                    item_y = item_pos.y()
-                    item_width = item_rect.width()
-                    item_height = item_rect.height()
-
-                    # 精确匹配位置和大小
-                    is_same_position = (
-                            abs(item_x - target_rect[0]) < 1e-6 and
-                            abs(item_y - target_rect[1]) < 1e-6 and
-                            abs(item_width - target_rect[2]) < 1e-6 and
-                            abs(item_height - target_rect[3]) < 1e-6
-                    )
-                    if not is_same_position:
-                        continue
-
-                    # 匹配换热管样式
-                    pen = item.pen()
-                    is_huanreguan = (
-                            pen.color() == huanreguan_pen_color and
-                            pen.width() == huanreguan_pen_width and
-                            item.brush() == huanreguan_brush
-                    )
-
-                    # 匹配其他需要删除的图形
-                    is_old_white = (
-                            pen.color() == QColor(255, 255, 255) and
-                            item.brush() == Qt.NoBrush
-                    )
-                    is_non_white_solid = not (
-                            pen.color() == QColor(255, 255, 255) and
-                            pen.width() == 3 and
-                            item.brush() == white_brush
-                    )
-
-                    if is_huanreguan or is_old_white or is_non_white_solid:
-                        items_to_remove.append(item)
-                        found = True
-
-                # 添加白色覆盖圆（设置当前操作最高优先级，但仍低于连线的10）
-                items_to_add.append(
-                    (target_rect[0], target_rect[1], target_rect[2], target_rect[3], white_pen, white_brush))
-
-            # 执行删除（去重避免重复删除）
-            unique_items_to_remove = list(set(items_to_remove))
-            for item in unique_items_to_remove:
-                if item in self.graphics_scene.items():
-                    self.graphics_scene.removeItem(item)
-
-            # 添加白色覆盖圆（ZValue=4，低于连线的10，确保连线在上方）
-            for params in items_to_add:
-                ellipse = self.graphics_scene.addEllipse(*params)
-                # ellipse.setZValue(4)
-
-        finally:
-            # 恢复场景更新
-            if view:
-                view.setUpdatesEnabled(True)
-                view.viewport().update()
-
-        # 更新当前圆心列表
-        if hasattr(self, 'current_centers'):
-            saved_lines = []
-            if hasattr(self, 'connection_lines'):
-                # 保存现有连线数据（以备重建后恢复）
-                saved_lines = [(line.line(), line.pen()) for line in self.connection_lines]
-                # 清除现有连线（后续会重新绘制，避免重复）
-                for line in self.connection_lines:
-                    self.graphics_scene.removeItem(line)
-
-            # 过滤已删除的坐标
-            self.current_centers = [
-                (cx, cy) for (cx, cy) in self.current_centers
-                if (cx, cy) not in absolute_coords_to_remove
-            ]
-
-            # 重建场景后，重新绘制连线（核心修复：补充连线绘制步骤）
-            if self.create_scene():
-                self.update_tube_nums()
-                # 重新调用connect_center，基于最新的global_centers绘制连线
-                if hasattr(self, 'global_centers') and hasattr(self, 'do'):
-                    self.connect_center(self.graphics_scene, self.global_centers, self.do)
-
-            # 兼容旧逻辑：若有保存的连线数据，补充添加（优先用connect_center重建）
-            if saved_lines and hasattr(self, 'connection_lines'):
-                self.connection_lines = []
-                for line_data, pen in saved_lines:
-                    new_line = self.graphics_scene.addLine(line_data, pen)
-                    # new_line.setZValue(10)  # 确保连线优先级最高
-                    self.connection_lines.append(new_line)
-
-        # 记录操作
-        if not hasattr(self, 'operations'):
-            self.operations = []
-        for coord in centers_to_remove:
-            self.operations.append({"type": "del", "coord": coord})
-
-        # 清除高亮
-        if hasattr(self, 'clear_selection_highlight'):
-            self.clear_selection_highlight()
-
-        return centers_to_remove
-
-    def build_lagan(self, selected_centers):
-        if not selected_centers:
-            return []
-
-        import ast
-        selected_centers_list = []
-        if isinstance(selected_centers, list):
-            selected_centers_list = [item for item in selected_centers
-                                     if isinstance(item, tuple)
-                                     and len(item) == 2
-                                     and all(isinstance(x, (int, float)) for x in item)]
+                # 已经是绝对坐标格式
+                selected_centers_list = [item for item in selected_centers
+                                         if isinstance(item, tuple)
+                                         and len(item) == 2
+                                         and all(isinstance(x, (int, float)) for x in item)]
         elif isinstance(selected_centers, str):
             try:
                 parsed_list = ast.literal_eval(selected_centers)
@@ -10686,11 +9897,12 @@ class TubeLayoutEditor(QMainWindow):
                 print("字符串解析错误:", e)
                 selected_centers_list = []
         else:
-
             selected_centers_list = []
+
+        # 合并并去重中心点
         combined = []
         seen = set()
-        for coord in self.lagan_info:
+        for coord in self.del_centers:
             # if coord not in seen:
             seen.add(coord)
             combined.append(coord)
@@ -10698,62 +9910,97 @@ class TubeLayoutEditor(QMainWindow):
             # if coord not in seen:
             seen.add(coord)
             combined.append(coord)
-        self.lagan_info = combined
-        current_coords = self.selected_to_current_coords(selected_centers)
-        if current_coords:
-            red_pen = QPen(Qt.red)
-            red_pen.setWidth(2)
-            red_brush = QBrush(Qt.red)
-            msg_lines = []
+        self.del_centers = combined
 
-            # 初始化操作记录列表（如果不存在）
-            if not hasattr(self, 'operations'):
-                self.operations = []
-            if isinstance(selected_centers, str):
-                try:
-                    import ast
-                    selected_centers = ast.literal_eval(selected_centers)
-                except (SyntaxError, ValueError) as e:
-                    print(f"字符串转换失败: {e}")
-                    return current_coords
-            if selected_centers:
-                for row_label, col_label in selected_centers:
-                    # 计算行/列索引（基于绝对值）
-                    row_idx = abs(row_label) - 1
-                    col_idx = abs(col_label) - 1
+        # 使用绝对坐标来处理删除
+        absolute_coords_to_remove = set(selected_centers_list)
 
-                    # 根据行号正负获取原始坐标
-                    if row_label > 0:
-                        x, y = self.full_sorted_current_centers_up[row_idx][col_idx]
-                    else:
-                        x, y = self.full_sorted_current_centers_down[row_idx][col_idx]
+        # 定义删除样式（浅灰色空心圆）
+        gray_pen = QPen(QColor(255, 255, 255))
+        gray_pen.setWidth(1)
+        gray_brush = QBrush(Qt.NoBrush)  # 空心圆
+        blue_tube_pen = QColor(0, 0, 80)
 
-                    # 绘制红色圆圈标记拉杆
-                    self.graphics_scene.addEllipse(
-                        x - self.r, y - self.r, 2 * self.r, 2 * self.r, red_pen, red_brush
-                    )
+        # 删除所有目标坐标对应的圆
+        centers_to_remove = list(absolute_coords_to_remove)
+        for x, y in centers_to_remove:
+            # 1. 先擦除选中色（包括普通圆和深蓝色换热管的高亮）
+            click_point = QPointF(x, y)
+            items_to_remove = []
+            for item in self.graphics_scene.items(click_point):
+                if isinstance(item, QGraphicsEllipseItem):
+                    # 移除所有非灰色空心圆的元素（选中色）
+                    if item.brush() != gray_brush:
+                        items_to_remove.append(item)
 
-                    # 记录日志信息
-                    msg_lines.append(f"第 {row_label} 行, 第 {col_label} 列")
+            # 批量移除项目，避免在迭代中修改场景
+            for item in items_to_remove:
+                self.graphics_scene.removeItem(item)
 
-                    # 添加操作记录
-                    self.operations.append({
-                        "type": "lagan",
-                        "row": row_label,
-                        "col": col_label,
-                        "coord": (x, y)
-                    })
+            # 2. 绘制浅灰色空心圆覆盖
+            found = False
+            for item in self.graphics_scene.items():
+                if isinstance(item, QGraphicsEllipseItem):
+                    rect = item.rect()
+                    cx = item.scenePos().x() + rect.width() / 2
+                    cy = item.scenePos().y() + rect.height() / 2
+                    # 匹配条件：坐标接近且是深蓝色换热管或普通圆
+                    is_blue_tube = (item.pen().color() == blue_tube_pen)
+                    if abs(cx - x) < 1e-2 and abs(cy - y) < 1e-2 and (
+                            is_blue_tube or item.brush() == gray_brush):
+                        # 先移除原有圆
+                        self.graphics_scene.removeItem(item)
+                        # 再绘制灰色覆盖圆
+                        self.graphics_scene.addEllipse(
+                            x - self.r, y - self.r, 2 * self.r, 2 * self.r,
+                            gray_pen, gray_brush
+                        )
+                        found = True
+                        break
 
-            # # 显示绘制结果
-            # QMessageBox.information(self, "已绘制", "绘制圆心:\n" + "\n".join(msg_lines))
-            self.clear_selection_highlight()
-            self.selected_centers = []
+            # 未找到对应圆时直接绘制灰色覆盖圆
+            if not found:
+                self.graphics_scene.addEllipse(
+                    x - self.r, y - self.r, 2 * self.r, 2 * self.r,
+                    gray_pen, gray_brush
+                )
 
-        # 返回移除已绘制拉杆后的中心坐标列表
-        return [
-            center for center in self.current_centers
-            if center not in set(current_coords)
-        ]
+        # 更新当前圆心列表
+        if hasattr(self, 'current_centers'):
+            # 保存并重新绘制切线
+            saved_lines = []
+            if hasattr(self, 'connection_lines'):
+                saved_lines = [(line.line(), line.pen()) for line in self.connection_lines]
+                for line in self.connection_lines:
+                    self.graphics_scene.removeItem(line)
+
+            # 使用绝对坐标来过滤，确保删除所有目标坐标
+            self.current_centers = [
+                (cx, cy) for (cx, cy) in self.current_centers
+                if (round(cx, 2), round(cy, 2)) not in absolute_coords_to_remove
+            ]
+
+            if self.create_scene():
+                # self.connect_center(self.scene, self.current_centers, self.small_D)
+                self.update_tube_nums()
+
+            if saved_lines and hasattr(self, 'connection_lines'):
+                self.connection_lines = []
+                for line_data, pen in saved_lines:
+                    new_line = self.graphics_scene.addLine(line_data, pen)
+                    self.connection_lines.append(new_line)
+
+        # 添加操作记录
+        if not hasattr(self, 'operations'):
+            self.operations = []
+
+        for coord in centers_to_remove:
+            self.operations.append({
+                "type": "del",
+                "coord": coord
+            })
+
+        return centers_to_remove
 
     def judge_linkage(self, selected_centers):
         linkage_centers = []
@@ -10924,6 +10171,141 @@ class TubeLayoutEditor(QMainWindow):
         # 调用实际执行换热管构建逻辑的函数
         self.build_huanreguan(selected_centers)
 
+    def build_huanreguan(self, selected_centers):
+        """
+        换热管实际构建函数：处理选中中心校验、绘图、属性更新等核心逻辑
+        :param selected_centers: 经过对称处理后的选中中心坐标（相对坐标）
+        """
+        from PyQt5.QtGui import QPen, QBrush, QColor
+        from PyQt5.QtWidgets import QGraphicsEllipseItem, QMessageBox
+        from PyQt5.QtCore import Qt
+        print("间距")
+        distance = self.calculate_distance(selected_centers)
+        print(distance)
+
+        # 检查是否有选中的中心（相对坐标）
+        if selected_centers:
+            # 初始化必要的属性（若未定义则创建）
+            if not hasattr(self, 'huanreguan'):
+                self.huanreguan = []
+            if not hasattr(self, 'current_centers'):
+                self.current_centers = []
+            if not hasattr(self, 'operations'):
+                self.operations = []
+
+            # 定义新绘制的深蓝色空心圆样式
+            pen_t = QPen(QColor(0, 0, 80))  # 深蓝色
+            pen_t.setWidth(1)  # 增加线宽以便更明显
+            brush_t = QBrush(Qt.NoBrush)
+            added_count = 0
+
+            # 淡蓝色画刷颜色定义（用于筛选待删除的圆）
+            target_brush_color = QColor(173, 216, 230)
+            items_to_remove = []
+
+            # 遍历场景中所有椭圆项，筛选出符合特征的淡蓝色圆
+            for item in self.graphics_scene.items():
+                if isinstance(item, QGraphicsEllipseItem):
+                    if item.brush().color() == target_brush_color:
+                        items_to_remove.append(item)
+
+            # 移除筛选出的淡蓝色圆
+            for item in items_to_remove:
+                self.graphics_scene.removeItem(item)
+
+            # 收集并处理目标坐标（基于相对坐标直接索引绝对坐标）
+            target_coords = []
+            for row_label, col_label in selected_centers:
+                try:
+                    # 基于相对坐标的行标签选择数据源（上/下半轴）
+                    if row_label > 0:
+                        centers_list = self.full_sorted_current_centers_up
+                        row_idx = row_label - 1  # 正数行标签转换为索引（从0开始）
+                    else:
+                        centers_list = self.full_sorted_current_centers_down
+                        row_idx = -row_label - 1  # 负数行标签取绝对值后转换为索引（从0开始）
+
+                    # 基于相对坐标的列标签获取列索引（处理正负，保持与原逻辑一致）
+                    col_idx = abs(col_label) - 1
+
+                    # 通过相对坐标索引直接获取绝对坐标（核心转换逻辑）
+                    x, y = centers_list[row_idx][col_idx]
+                    actual_abs_coord = (x, y)
+
+                    # 跳过已存在的绝对坐标（避免重复绘制）
+                    if actual_abs_coord in self.current_centers:
+                        continue
+
+                    # 收集有效坐标及关联信息（用于后续绘图和记录）
+                    target_coords.append((x, y, row_label, col_label, actual_abs_coord))
+
+                except IndexError as e:
+                    # 捕获索引超出范围异常（坐标标签对应的数据不存在）
+                    print(
+                        f"相对坐标索引错误: 行标签{row_label}（索引{row_idx}）、列标签{col_label}（索引{col_idx}）超出范围，错误：{e}")
+                    continue
+                except Exception as e:
+                    # 捕获其他未知异常
+                    print(f"处理相对坐标时出错: {e}，坐标：({row_label}, {col_label})")
+                    continue
+
+            # 绘制深蓝色空心圆（使用相对坐标索引得到的绝对坐标）
+            for x, y, row_label, col_label, actual_abs_coord in target_coords:
+                # 跳过无效坐标（x或y为None的情况）
+                if x is None or y is None:
+                    continue
+
+                # 关键修改：清除同一位置上已有的任何图形元素（包括可能的红色拉杆）
+                # 遍历场景中所有椭圆项，检查是否与当前坐标位置重合
+                for item in self.graphics_scene.items():
+                    if isinstance(item, QGraphicsEllipseItem):
+                        # 计算现有椭圆的中心坐标
+                        item_rect = item.rect()
+                        item_center_x = item_rect.x() + item_rect.width() / 2
+                        item_center_y = item_rect.y() + item_rect.height() / 2
+
+                        # 检查是否为同一位置（考虑浮点数精度误差）
+                        if abs(item_center_x - x) < 1e-6 and abs(item_center_y - y) < 1e-6:
+                            self.graphics_scene.removeItem(item)
+
+                # 在图形场景中添加椭圆（空心圆，基于绝对坐标计算左上角位置）
+                new_circle = self.graphics_scene.addEllipse(
+                    x - self.r,  # 椭圆左上角x坐标（绝对坐标 - 半径 = 左上角位置）
+                    y - self.r,  # 椭圆左上角y坐标（绝对坐标 - 半径 = 左上角位置）
+                    2 * self.r,  # 椭圆宽度（直径）
+                    2 * self.r,  # 椭圆高度（直径）
+                    pen_t,  # 画笔（深蓝色，线宽1）
+                    brush_t  # 画刷（无填充，空心）
+                )
+                new_circle.setZValue(2)  # 设置图层优先级，确保空心圆在顶层显示
+
+                # 记录当前操作及坐标信息（用于后续回溯、统计等）
+                self.huanreguan.append((row_label, col_label))
+                if actual_abs_coord not in self.current_centers:
+                    self.current_centers.append(actual_abs_coord)
+                self.operations.append({
+                    "type": "add_tube",
+                    "relative_coord": (row_label, col_label),
+                    "absolute_coord": actual_abs_coord,
+                    "draw_coord": (x, y)
+                })
+                added_count += 1
+
+            # 更新删除列表（移除已选中的相对坐标，避免重复删除）
+            self.del_centers = [coord for coord in self.del_centers if coord not in selected_centers]
+            # 清空选中状态（避免后续操作重复处理）
+            self.selected_centers.clear()
+            # 更新界面相关统计信息和坐标分组
+            self.update_total_holes_count()
+            self.sorted_current_centers_up, self.sorted_current_centers_down = self.group_centers_by_y(
+                self.current_centers)
+            self.update_tube_nums()
+
+            # 若未成功添加任何换热管，弹出警告
+            if added_count == 0:
+                # QMessageBox.warning(self, "警告", "未成功添加任何换热管，请检查坐标选择")
+                return
+
     # 最左最右拉杆
     def on_small_block_click(self):
         from PyQt5.QtGui import QColor
@@ -10966,7 +10348,7 @@ class TubeLayoutEditor(QMainWindow):
                 print(f"擦除淡蓝色圆心失败: {e}，坐标: ({row_label}, {col_label})")
                 continue
 
-        self.selected_centers = []
+        self.selected_centers.clear()
 
     def delete_selected_side_rods(self):
         """删除选中的最左最右拉杆"""
@@ -11101,7 +10483,7 @@ class TubeLayoutEditor(QMainWindow):
                     left_rod.setBrush(red_brush)
                     left_rod.original_pen = red_pen
                     left_rod.original_selected_center = (row_label, col_label)
-                    # left_rod.setZValue(10)
+                    left_rod.setZValue(10)
                     self.graphics_scene.addItem(left_rod)
 
                     # 创建右侧拉杆（使用ClickableCircleItem）
@@ -11111,7 +10493,7 @@ class TubeLayoutEditor(QMainWindow):
                     right_rod.setBrush(red_brush)
                     right_rod.original_pen = red_pen
                     right_rod.original_selected_center = (row_label, col_label)
-                    # right_rod.setZValue(10)
+                    right_rod.setZValue(10)
                     self.graphics_scene.addItem(right_rod)
 
                     # 双向绑定配对拉杆
@@ -11224,76 +10606,49 @@ class TubeLayoutEditor(QMainWindow):
                             break
 
         if selected_centers and len(points) == 2:
+            # 计算X轴中点，Y轴固定为0（坐标轴上）
+            x_mid = (points[0][0] + points[1][0]) / 2
+            y_mid = 0  # 固定在坐标轴上
+
+            # 创建中间挡管图形项（使用ClickableRectItem）
+            pen = QPen(QColor(128, 0, 128))  # 紫色
+            pen.setWidth(3)
+            brush = QBrush(Qt.NoBrush)  # 空心圆样式
+
+            # 创建圆形路径
+            path = QPainterPath()
+            path.addEllipse(x_mid - self.r, y_mid - self.r, 2 * self.r, 2 * self.r)
+
+            # 使用ClickableRectItem创建可选中中间挡管
+            center_dangguan_item = ClickableRectItem(
+                path=path,
+                is_center_dangguan=True,
+                editor=self
+            )
+            center_dangguan_item.setPen(pen)
+            center_dangguan_item.setBrush(brush)  # 设置为空心
+            center_dangguan_item.original_pen = pen
+            center_dangguan_item.original_selected_center = selected_centers[0]  # 存储原始选中坐标
+            center_dangguan_item.setZValue(10)
+            self.graphics_scene.addItem(center_dangguan_item)
+
             # 初始化选中列表
             if not hasattr(self, 'selected_center_dangguan'):
                 self.selected_center_dangguan = []
 
-            # 定义创建挡管的函数，避免重复代码
-            def create_dangguan(x, y):
-                pen = QPen(QColor(128, 0, 128))  # 紫色
-                pen.setWidth(3)
-                brush = QBrush(Qt.NoBrush)  # 空心圆样式
+            # 关键修复：将新创建的挡管添加到选中列表
+            # 确保不会重复添加同一挡管
+            if center_dangguan_item not in self.selected_center_dangguan:
+                self.selected_center_dangguan.append(center_dangguan_item)
 
-                # 创建圆形路径
-                path = QPainterPath()
-                path.addEllipse(x - self.r, y - self.r, 2 * self.r, 2 * self.r)
-
-                # 使用ClickableRectItem创建可选中中间挡管
-                center_dangguan_item = ClickableRectItem(
-                    path=path,
-                    is_center_dangguan=True,
-                    editor=self
-                )
-                center_dangguan_item.setPen(pen)
-                center_dangguan_item.setBrush(brush)  # 设置为空心
-                center_dangguan_item.original_pen = pen
-                center_dangguan_item.original_selected_center = selected_centers[0]  # 存储原始选中坐标
-                center_dangguan_item.setZValue(10)
-                self.graphics_scene.addItem(center_dangguan_item)
-
-                # 确保不会重复添加同一挡管
-                if center_dangguan_item not in self.selected_center_dangguan:
-                    self.selected_center_dangguan.append(center_dangguan_item)
-
-                # 记录操作
-                if not hasattr(self, 'operations'):
-                    self.operations = []
-                self.operations.append({
-                    "type": "center_block",
-                    "coord": (x, y),
-                    "from": points
-                })
-
-            x1, y1 = points[0]
-            x2, y2 = points[1]
-
-            # X坐标相等时，绘制原位置和关于y轴对称的挡管（原正确逻辑保留）
-            if x1 == x2:
-                # 原位置挡管（Y轴中点）
-                y_mid = (y1 + y2) / 2
-                create_dangguan(x1, y_mid)
-                # 关于y轴对称的挡管
-                create_dangguan(-x1, y_mid)
-            # Y坐标相等时，绘制原位置和关于x轴对称的挡管（新增对称逻辑）
-            elif y1 == y2:
-                # 原位置挡管（X轴中点）
-                x_mid = (x1 + x2) / 2
-                create_dangguan(x_mid, y1)
-                # 关于x轴对称的挡管
-                create_dangguan(x_mid, -y1)
-            # 其他情况根据管程数量确定挡管位置
-            else:
-                tube_num = self.get_tube_pass_count()
-                if tube_num == '2':
-                    # 管程数为2时，x为两点x中点，y为0，同时创建Y轴对称挡管
-                    x_mid = (x1 + x2) / 2
-                    create_dangguan(x_mid, 0)
-                    create_dangguan(-x_mid, 0)
-                else:
-                    # 其他管程数时，y为两点y中点，x为0，同时创建X轴对称挡管
-                    y_mid = (y1 + y2) / 2
-                    create_dangguan(0, y_mid)
-                    create_dangguan(0, -y_mid)
+            # 记录操作
+            if not hasattr(self, 'operations'):
+                self.operations = []
+            self.operations.append({
+                "type": "center_block",
+                "coord": (x_mid, y_mid),
+                "from": points
+            })
 
         return current_coords
 
@@ -11557,7 +10912,7 @@ class TubeLayoutEditor(QMainWindow):
                                 self.graphics_scene.removeItem(item)
                                 break
 
-                self.selected_centers = []
+                self.selected_centers.clear()
                 dialog.close()
 
         def on_close():
@@ -11648,6 +11003,7 @@ class TubeLayoutEditor(QMainWindow):
             # 去重（避免同一根管子被多次检测）
             return list(set(interfering_tubes))
 
+        # -------------------------- 2. 原逻辑：解析选中中心点 --------------------------
         selected_centers_list = []
         if isinstance(selected_centers, list):
             selected_centers_list = [
@@ -11703,6 +11059,7 @@ class TubeLayoutEditor(QMainWindow):
                 print(f"字符串转换失败: {e}")
                 return current_coords
 
+        # -------------------------- 3. 新增：读取换热管外径（关键参数） --------------------------
         do = None  # 换热管外径
         for row in range(self.param_table.rowCount()):
             param_name = self.param_table.item(row, 1).text()
@@ -11722,6 +11079,7 @@ class TubeLayoutEditor(QMainWindow):
             # QMessageBox.warning(self, "参数缺失", "未找到换热管外径 do，请先配置参数表")
             return 0
 
+        # -------------------------- 4. 关键修改：获取折流板外径并计算半径 --------------------------
         baffle_diameter = self.get_baffle_diameter()
         if baffle_diameter is None:
             # QMessageBox.warning(self, "参数错误", "未找到折流板外径参数")
@@ -11730,6 +11088,7 @@ class TubeLayoutEditor(QMainWindow):
         # 计算折流板半径（用于确定挡板边界）
         R_baffle = baffle_diameter / 2.0
 
+        # -------------------------- 5. 修正逻辑：绘制挡板（贴紧折流板圆边缘）+ 新增干涉处理 --------------------------
         if selected_centers:
             for selected_center in selected_centers:
                 row_label, col_label = selected_center
@@ -11779,7 +11138,7 @@ class TubeLayoutEditor(QMainWindow):
                 left_block.setPen(pen)
                 left_block.setBrush(brush)
                 left_block.original_pen = pen
-                # left_block.setZValue(12)
+                left_block.setZValue(10)
                 left_block.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
                 left_block.setFlag(QGraphicsRectItem.ItemSendsGeometryChanges, True)
                 self.graphics_scene.addItem(left_block)
@@ -11801,7 +11160,7 @@ class TubeLayoutEditor(QMainWindow):
                 right_block.setPen(pen)
                 right_block.setBrush(brush)
                 right_block.original_pen = pen
-                # right_block.setZValue(11)
+                right_block.setZValue(10)
                 right_block.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
                 right_block.setFlag(QGraphicsRectItem.ItemSendsGeometryChanges, True)
                 self.graphics_scene.addItem(right_block)
@@ -11878,137 +11237,68 @@ class TubeLayoutEditor(QMainWindow):
         return added_count
 
     def delete_selected_side_blocks(self):
-        """删除选中的旁路挡板，支持对称模式下删除所有相关挡板"""
-        try:
-            if not hasattr(self, 'selected_side_blocks') or not self.selected_side_blocks:
-                print("没有选中的旁路挡板可删除")
-                return
 
-            # 收集要恢复的换热管坐标
-            tubes_to_restore = []
-            blocks_to_remove_info = []  # 存储要删除的挡板信息
+        if not hasattr(self, 'selected_side_blocks') or not self.selected_side_blocks:
+            return
 
-            # 找出选中挡板对应的绘制坐标信息
-            for block in self.selected_side_blocks:
-                if hasattr(block, 'original_selected_center'):
-                    block_info = block.original_selected_center
-                    blocks_to_remove_info.append(block_info)
+        # 收集要恢复的换热管坐标
+        tubes_to_restore = []
+        blocks_to_remove_info = []  # 存储要删除的挡板信息
 
-            # 去重
-            blocks_to_remove_info = list(set(blocks_to_remove_info))
+        # 找出选中挡板对应的绘制坐标信息
+        for block in self.selected_side_blocks:
+            if hasattr(block, 'original_selected_center'):
+                block_info = block.original_selected_center
+                blocks_to_remove_info.append(block_info)
 
-            if not blocks_to_remove_info:
-                print("未找到有效的挡板坐标信息")
-                return
+        # 去重
+        blocks_to_remove_info = list(set(blocks_to_remove_info))
 
-            print(f"找到 {len(blocks_to_remove_info)} 个挡板坐标准备删除")
+        # 存储要从self.side_dangban中删除的坐标
+        to_remove_from_side_dangban = []
 
-            # 如果是对称模式，获取所有对称坐标
-            if self.isSymmetry:
-                try:
-                    # 使用 judge_linkage 获取所有对称坐标
-                    all_symmetric_coords = self.judge_linkage(blocks_to_remove_info)
-                    print(f"对称模式：找到 {len(all_symmetric_coords)} 个对称坐标")
-                    blocks_to_remove_info = all_symmetric_coords
-                except Exception as e:
-                    print(f"获取对称坐标时出错: {str(e)}")
-                    # 出错时继续使用原始坐标，不中断删除操作
+        # 根据绘制坐标找到对应的干涉管信息
+        for block_info in blocks_to_remove_info:
+            for i, dangban_entry in enumerate(self.sdangban_selected_centers):
+                if dangban_entry and dangban_entry[0] == block_info:
+                    # 第一个是绘制坐标，后面的是干涉管坐标
+                    if len(dangban_entry) > 1:
+                        tubes_to_restore.extend(dangban_entry[1:])
+                    # 记录要从self.side_dangban中删除的坐标
+                    to_remove_from_side_dangban.append(dangban_entry[0])
+                    # 从存储中移除这个条目
+                    self.sdangban_selected_centers.pop(i)
+                    break
 
-            # 存储要从 self.side_dangban 中删除的坐标
-            to_remove_from_side_dangban = []
+        # 更新self.side_dangban，移除对应的坐标
+        self.side_dangban = [coord for coord in self.side_dangban if coord not in to_remove_from_side_dangban]
 
-            # 根据绘制坐标找到对应的干涉管信息
-            for block_info in blocks_to_remove_info:
-                found = False
-                # 需要遍历所有条目，因为可能有多个条目包含相同的坐标
-                for i in range(len(self.sdangban_selected_centers) - 1, -1, -1):
-                    if i < len(self.sdangban_selected_centers) and self.sdangban_selected_centers[i]:
-                        dangban_entry = self.sdangban_selected_centers[i]
-                        if dangban_entry and dangban_entry[0] == block_info:
-                            # 第一个是绘制坐标，后面的是干涉管坐标
-                            if len(dangban_entry) > 1:
-                                tubes_to_restore.extend(dangban_entry[1:])
-                                print(f"找到干涉管坐标: {dangban_entry[1:]}")
-                            # 记录要从 self.side_dangban 中删除的坐标
-                            to_remove_from_side_dangban.append(dangban_entry[0])
-                            # 从存储中移除这个条目
-                            self.sdangban_selected_centers.pop(i)
-                            found = True
-                            break
+        # 恢复干涉换热管
+        if tubes_to_restore:
+            print(f"恢复干涉换热管: {tubes_to_restore}")
+            self.build_huanreguan(tubes_to_restore)
 
-                if not found:
-                    print(f"警告：未找到坐标 {block_info} 对应的挡板条目")
+        # 复制选中列表避免迭代中修改列表导致错误
+        blocks_to_remove = list(self.selected_side_blocks)
+        removed_blocks = set()
 
-            # 更新 self.side_dangban，移除对应的坐标
-            original_count = len(self.side_dangban)
-            self.side_dangban = [coord for coord in self.side_dangban if coord not in to_remove_from_side_dangban]
-            removed_count = original_count - len(self.side_dangban)
-            print(f"从 side_dangban 中移除了 {removed_count} 个坐标")
+        for block in blocks_to_remove:
+            if block in removed_blocks:
+                continue
 
-            # 恢复干涉换热管
-            if tubes_to_restore:
-                print(f"恢复 {len(tubes_to_restore)} 个干涉换热管")
-                try:
-                    self.build_huanreguan(tubes_to_restore)
-                except Exception as e:
-                    print(f"恢复换热管时出错: {str(e)}")
+            # 移除自身
+            if block.scene() == self.graphics_scene:  # 确认在当前场景中
+                self.graphics_scene.removeItem(block)
+            removed_blocks.add(block)
 
-            # 复制选中列表避免迭代中修改列表导致错误
-            blocks_to_remove = list(self.selected_side_blocks)
-            removed_blocks = set()
+            # 移除配对挡板
+            if block.paired_block and block.paired_block not in removed_blocks:
+                if block.paired_block.scene() == self.graphics_scene:
+                    self.graphics_scene.removeItem(block.paired_block)
+                removed_blocks.add(block.paired_block)
 
-            # 收集所有需要删除的挡板（包括对称的）
-            all_blocks_to_remove = set(blocks_to_remove)
-
-            # 如果是对称模式，找到所有相关的挡板
-            if self.isSymmetry and blocks_to_remove:
-                try:
-                    # 通过场景中所有挡板项来查找对称的挡板
-                    for item in self.graphics_scene.items():
-                        if (isinstance(item, ClickableRectItem) and
-                                item.is_side_block and
-                                hasattr(item, 'original_selected_center')):
-
-                            item_coord = item.original_selected_center
-                            # 检查这个挡板坐标是否在要删除的坐标列表中
-                            if item_coord in blocks_to_remove_info:
-                                all_blocks_to_remove.add(item)
-                                # 同时添加其配对挡板
-                                if hasattr(item, 'paired_block') and item.paired_block:
-                                    all_blocks_to_remove.add(item.paired_block)
-                except Exception as e:
-                    print(f"查找对称挡板时出错: {str(e)}")
-
-            print(f"准备删除 {len(all_blocks_to_remove)} 个挡板图形项")
-
-            # 删除所有相关的挡板图形项
-            for block in all_blocks_to_remove:
-                if block in removed_blocks:
-                    continue
-
-                # 移除自身
-                if block.scene() == self.graphics_scene:  # 确认在当前场景中
-                    self.graphics_scene.removeItem(block)
-                removed_blocks.add(block)
-
-                # 移除配对挡板（如果存在且尚未被移除）
-                if (hasattr(block, 'paired_block') and
-                        block.paired_block and
-                        block.paired_block not in removed_blocks):
-
-                    if block.paired_block.scene() == self.graphics_scene:
-                        self.graphics_scene.removeItem(block.paired_block)
-                    removed_blocks.add(block.paired_block)
-
-            # 清空选中列表
-            self.selected_side_blocks = []
-
-            print(f"成功删除了 {len(removed_blocks)} 个挡板图形项")
-
-        except Exception as e:
-            print(f"删除旁路挡板时发生错误: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        # 清空选中列表
+        self.selected_side_blocks = []
 
     # TODO 这个删除圆心连线的方法一直不正确，没有删除成功
     def clear_connection_lines(self, scene):
@@ -12050,6 +11340,8 @@ class TubeLayoutEditor(QMainWindow):
                 widget = self.param_table.cellWidget(row, 2)
                 if isinstance(widget, QComboBox):
                     default_values[param_name] = widget.currentText()
+
+
                 else:
                     item = self.param_table.item(row, 2)
                     default_values[param_name] = item.text() if item else ""
@@ -12086,25 +11378,6 @@ class TubeLayoutEditor(QMainWindow):
         ok_btn = QPushButton("确定")
 
         def on_ok_clicked():
-            # 验证滑道与竖直中心线夹角的范围
-            angle_text = input_widgets["滑道与竖直中心线夹角"].text()
-            try:
-                angle = float(angle_text)
-                # 检查角度是否在15°到25°之间
-                if angle < 15 or angle > 25:
-                    # 弹出确认对话框
-                    reply = QMessageBox.question(
-                        dialog,
-                        "角度范围提示",
-                        "滑道与竖直中心线夹角宜在15°至25°之间，是否继续？",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No
-                    )
-                    if reply == QMessageBox.No:
-                        return
-            except ValueError:
-                pass
-
             if temp_centers is not None:
                 self.current_centers = temp_centers.copy()
 
@@ -12149,21 +11422,18 @@ class TubeLayoutEditor(QMainWindow):
         button_layout.addWidget(close_btn)
 
         layout.addLayout(button_layout)
-        # 确保导入QMessageBox
-        from PyQt5.QtWidgets import QMessageBox
         dialog.exec_()
 
     def delete_selected_slides(self):
 
         if not hasattr(self, 'selected_slides') or not self.selected_slides:
             return
-        # for coord in self.interfering_tubes1:
-        #     processed_coord1 = self.actual_to_selected_coords(coord)
-        #     self.build_huanreguan([processed_coord1])
-        # for coord in self.interfering_tubes2:
-        #     processed_coord2 = self.actual_to_selected_coords(coord)
-        #     self.build_huanreguan([processed_coord2])
-        self.build_huanreguan(self.slide_selected_centers)
+        for coord in self.interfering_tubes1:
+            processed_coord1 = self.actual_to_selected_coords(coord)
+            self.build_huanreguan([processed_coord1])
+        for coord in self.interfering_tubes1:
+            processed_coord2 = self.actual_to_selected_coords(coord)
+            self.build_huanreguan([processed_coord2])
 
         self.interfering_tubes1 = []
         self.interfering_tubes2 = []
@@ -12226,7 +11496,6 @@ class TubeLayoutEditor(QMainWindow):
         # 更新管数显示
         self.update_total_holes_count()
         self.update_tube_nums()
-        self.slide_selected_centers = []
 
         # 如果没有滑道了，重置标志
         if not self.green_slide_items:
@@ -12235,6 +11504,7 @@ class TubeLayoutEditor(QMainWindow):
             # QMessageBox.information(self, "提示", "所有滑道已删除")
 
     def build_huadao(self, location, height, thickness, angle, cut_length, cut_height):
+        """构建滑道并支持选中功能（增加干涉记录存储）"""
         if self.slide_selected_centers:
             self.build_huanreguan(self.slide_selected_centers)
             self.slide_selected_centers = []
@@ -12248,6 +11518,7 @@ class TubeLayoutEditor(QMainWindow):
             # 初始化滑道选中列表和干涉记录
             if not hasattr(self, 'selected_slides'):
                 self.selected_slides = []
+            # 新增：滑道干涉记录存储结构 [滑道参数, 干涉管坐标列表]
             if not hasattr(self, 'slide_interference_records'):
                 self.slide_interference_records = []
 
@@ -12256,329 +11527,18 @@ class TubeLayoutEditor(QMainWindow):
         except ValueError as e:
             QMessageBox.warning(self, "参数错误", f"请输入有效的数值参数: {str(e)}")
 
-    # def draw_slide_with_params(self, height, thickness, angle):
-    #     try:
-    #         if hasattr(self, "green_slide_items"):
-    #             for item in list(self.green_slide_items):
-    #                 try:
-    #                     self.graphics_scene.removeItem(item)
-    #                 except RuntimeError:
-    #                     pass
-    #             # 清空列表，彻底移除无效引用
-    #             self.green_slide_items.clear()
-    #         self.green_slide_items = []
-    #
-    #         # 参数验证
-    #         slide_length = float(height)
-    #         slide_thickness = float(thickness)
-    #         theta_deg = float(angle)
-    #
-    #         # 获取其他必要参数
-    #         DL = DN = do = None
-    #         for row in range(self.param_table.rowCount()):
-    #             param_name = self.param_table.item(row, 1).text()
-    #             widget = self.param_table.cellWidget(row, 2)
-    #             if isinstance(widget, QComboBox):
-    #                 param_value = widget.currentText()
-    #             else:
-    #                 item = self.param_table.item(row, 2)
-    #                 param_value = item.text() if item else ""
-    #
-    #             if param_name == "壳体内直径 Di":
-    #                 DL = float(param_value)
-    #             elif param_name == "公称直径 DN":
-    #                 DN = float(param_value)
-    #             elif param_name == "换热管外径 do":
-    #                 do = float(param_value)
-    #                 self.r = do / 2
-    #
-    #         if None in (DL, do):
-    #             QMessageBox.warning(self, "提示", "缺少必要参数：壳体内直径 Di 或换热管外径 do")
-    #             return
-    #
-    #         DN = DN or DL
-    #
-    #         # 初始化滑道中心列表
-    #         self.slipway_centers = []
-    #         all_interfering_y_coords = set()  # 收集所有存在干涉的y坐标
-    #
-    #         outer_radius = DN / 2
-    #         center_x, center_y = 0, 0
-    #         theta_rad = math.radians(theta_deg)
-    #         center_angle = math.radians(90)  # Qt坐标系向下方向
-    #
-    #         left_angle = center_angle + theta_rad
-    #         right_angle = center_angle - theta_rad
-    #
-    #         base_left_x = outer_radius * math.cos(left_angle)
-    #         base_left_y = outer_radius * math.sin(left_angle)
-    #         base_right_x = outer_radius * math.cos(right_angle)
-    #         base_right_y = outer_radius * math.sin(right_angle)
-    #
-    #         def perp_offset(dx, dy):
-    #             length = math.hypot(dx, dy)
-    #             return (dy / length, -dx / length) if length != 0 else (0, 0)
-    #
-    #         dir_left_x = center_x - base_left_x
-    #         dir_left_y = center_y - base_left_y
-    #         offset_left_x, offset_left_y = perp_offset(dir_left_x, dir_left_y)
-    #
-    #         dir_right_x = center_x - base_right_x
-    #         dir_right_y = center_y - base_right_y
-    #         offset_right_x, offset_right_y = perp_offset(dir_right_x, dir_right_y)
-    #
-    #         base1_x = base_left_x + (slide_thickness / 2) * offset_left_x
-    #         base1_y = base_left_y + (slide_thickness / 2) * offset_left_y
-    #         base2_x = base_right_x - (slide_thickness / 2) * offset_right_x
-    #         base2_y = base_right_y - (slide_thickness / 2) * offset_right_y
-    #
-    #         def unit_vector(dx, dy):
-    #             length = math.hypot(dx, dy)
-    #             return (dx / length, dy / length) if length != 0 else (0, 0)
-    #
-    #         u1_x, u1_y = unit_vector(center_x - base1_x, center_y - base1_y)
-    #         u2_x, u2_y = unit_vector(center_x - base2_x, center_y - base2_y)
-    #
-    #         def is_point_in_rectangle(point, rect_points):
-    #             """判断点是否在矩形内（包括边界）"""
-    #             x, y = point
-    #             # 提取矩形的四个顶点坐标
-    #             (x1, y1), (x2, y2), (x3, y3), (x4, y4) = rect_points
-    #
-    #             # 计算矩形的最小和最大x、y坐标（轴对齐边界框）
-    #             min_x = min(x1, x2, x3, x4)
-    #             max_x = max(x1, x2, x3, x4)
-    #             min_y = min(y1, y2, y3, y4)
-    #             max_y = max(y1, y2, y3, y4)
-    #
-    #             # 检查点是否在边界框内
-    #             if not (min_x - 1e-8 <= x <= max_x + 1e-8 and min_y - 1e-8 <= y <= max_y + 1e-8):
-    #                 return False
-    #
-    #             # 计算向量
-    #             def cross(o, a, b):
-    #                 return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-    #
-    #             # 检查点是否在矩形内部
-    #             c1 = cross(rect_points[0], rect_points[1], point)
-    #             c2 = cross(rect_points[1], rect_points[2], point)
-    #             c3 = cross(rect_points[2], rect_points[3], point)
-    #             c4 = cross(rect_points[3], rect_points[0], point)
-    #
-    #             # 所有叉积同号（或为0），表示点在矩形内
-    #             has_neg = (c1 < -1e-8) or (c2 < -1e-8) or (c3 < -1e-8) or (c4 < -1e-8)
-    #             has_pos = (c1 > 1e-8) or (c2 > 1e-8) or (c3 > 1e-8) or (c4 > 1e-8)
-    #
-    #             return not (has_neg and has_pos)
-    #
-    #         def point_to_line_distance(point, line_start, line_end):
-    #             """计算点到线段的最短距离"""
-    #             x, y = point
-    #             x1, y1 = line_start
-    #             x2, y2 = line_end
-    #
-    #             # 线段的向量
-    #             dx = x2 - x1
-    #             dy = y2 - y1
-    #             # 如果线段长度为0，返回点到端点的距离
-    #             if dx == 0 and dy == 0:
-    #                 return math.hypot(x - x1, y - y1)
-    #             # 计算投影比例
-    #             t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)
-    #             t = max(0, min(1, t))  # 限制在[0,1]范围内
-    #             # 投影点
-    #             proj_x = x1 + t * dx
-    #             proj_y = y1 + t * dy
-    #
-    #             # 计算距离
-    #             return math.hypot(x - proj_x, y - proj_y)
-    #
-    #         def check_tube_slide_interference(slide_corners, tube_centers, tube_diameter):
-    #             # 收集所有需要排除的y坐标（即存在干涉管的行）
-    #             interfering_y_coords = set()
-    #             tube_radius = tube_diameter / 2
-    #
-    #             # 定义滑道的四条边
-    #             slide_edges = [
-    #                 (slide_corners[0], slide_corners[1]),
-    #                 (slide_corners[1], slide_corners[2]),
-    #                 (slide_corners[2], slide_corners[3]),
-    #                 (slide_corners[3], slide_corners[0])
-    #             ]
-    #
-    #             # 第一遍：找出所有存在干涉的y坐标
-    #             for center in tube_centers:
-    #                 # 检查圆心是否在滑道内
-    #                 if is_point_in_rectangle(center, slide_corners):
-    #                     interfering_y_coords.add(center[1])
-    #                     continue
-    #
-    #                 # 检查圆心到滑道各边的距离是否小于等于半径（表示相交）
-    #                 for edge in slide_edges:
-    #                     distance = point_to_line_distance(center, edge[0], edge[1])
-    #                     if distance <= tube_radius + 1e-8:  # 考虑浮点数计算误差
-    #                         interfering_y_coords.add(center[1])
-    #                         break
-    #
-    #             # 第二遍：收集所有在干涉行上的换热管
-    #             slipway_centers = [
-    #                 center for center in tube_centers
-    #                 if center[1] in interfering_y_coords
-    #             ]
-    #
-    #             return slipway_centers, interfering_y_coords
-    #
-    #         def get_slide_interfering_tubes(base_x, base_y, unit_dx, unit_dy, thickness, length, is_left=True):
-    #             perp_dx, perp_dy = -unit_dy, unit_dx
-    #             half_thick = thickness / 2
-    #
-    #             p1 = QPointF(base_x + perp_dx * half_thick, base_y + perp_dy * half_thick)
-    #             p2 = QPointF(base_x - perp_dx * half_thick, base_y - perp_dy * half_thick)
-    #             p3 = QPointF(p2.x() + unit_dx * length, p2.y() + unit_dy * length)
-    #             p4 = QPointF(p1.x() + unit_dx * length, p1.y() + unit_dy * length)
-    #
-    #             slide_corners = [
-    #                 (p1.x(), p1.y()),
-    #                 (p2.x(), p2.y()),
-    #                 (p3.x(), p3.y()),
-    #                 (p4.x(), p4.y())
-    #             ]
-    #
-    #             # 检查干涉
-    #             interfering_tubes, interfering_y_coords = check_tube_slide_interference(
-    #                 slide_corners=slide_corners,
-    #                 tube_centers=self.current_centers,
-    #                 tube_diameter=do
-    #             )
-    #
-    #             return interfering_tubes, interfering_y_coords, slide_corners
-    #
-    #         def draw_slide_polygon(slide_corners, is_left=True):
-    #             polygon = QPolygonF([QPointF(x, y) for x, y in slide_corners])
-    #
-    #             # 使用ClickableRectItem而不是QGraphicsPolygonItem
-    #             path = QPainterPath()
-    #             path.addPolygon(polygon)
-    #
-    #             item = ClickableRectItem(path, is_slide=True, editor=self)
-    #             item.setBrush(QColor(0, 100, 0))  # 深绿色
-    #             item.setPen(QPen(Qt.NoPen))  # 无边框
-    #             # 关键修改：设置滑道优先级为10，与坐标轴、圆心连线一致
-    #             item.setZValue(10)
-    #
-    #             self.graphics_scene.addItem(item)
-    #             self.green_slide_items.append(item)
-    #             if len(self.green_slide_items) >= 2:
-    #                 slide1 = self.green_slide_items[-2]
-    #                 slide2 = self.green_slide_items[-1]
-    #                 slide1.set_paired_block(slide2)
-    #
-    #         # 先计算两个滑道的干涉信息
-    #         interfering_tubes1, interfering_y_coords1, slide_corners1 = get_slide_interfering_tubes(
-    #             base1_x, base1_y, u1_x, u1_y, slide_thickness, slide_length, is_left=True)
-    #         interfering_tubes2, interfering_y_coords2, slide_corners2 = get_slide_interfering_tubes(
-    #             base2_x, base2_y, u2_x, u2_y, slide_thickness, slide_length, is_left=False)
-    #         self.interfering_tubes1 = interfering_tubes1
-    #         self.interfering_tubes2 = interfering_tubes2
-    #
-    #         # 合并所有干涉的y坐标
-    #         all_interfering_y_coords = interfering_y_coords1.union(interfering_y_coords2)
-    #
-    #         # 处理所有干涉的管子（按行删除）- 在绘制滑道之前执行
-    #         if all_interfering_y_coords:
-    #             # 收集所有在干涉行上的换热管
-    #             self.slipway_centers = [
-    #                 center for center in self.current_centers
-    #                 if center[1] in all_interfering_y_coords
-    #             ]
-    #
-    #             # 擦除干涉换热管（整行删除）
-    #             slipway_set = set(self.slipway_centers)
-    #             self.current_centers = [center for center in self.current_centers if center not in slipway_set]
-    #
-    #             # 坐标转换
-    #             centers = []
-    #             for coord in self.slipway_centers:
-    #                 converted = self.actual_to_selected_coords(coord)
-    #                 if converted is not None:
-    #                     centers.append(converted)
-    #
-    #             self.slide_selected_centers = centers
-    #
-    #             # 执行删除
-    #             if centers:
-    #
-    #                 tube_num = self.get_tube_pass_count()
-    #                 if tube_num == "2" and self.heat_exchanger in ["AEU", "BEU"] or self.isSymmetry:
-    #                     all_centers = self.judge_linkage_x(centers)
-    #                     self.delete_huanreguan(all_centers)
-    #                 else:
-    #                     self.delete_huanreguan(centers)
-    #
-    #             self.update_tube_nums()
-    #
-    #         # 现在绘制滑道
-    #         draw_slide_polygon(slide_corners1, is_left=True)
-    #         draw_slide_polygon(slide_corners2, is_left=False)
-    #
-    #         if not hasattr(self, 'operations'):
-    #             self.operations = []
-    #
-    #         self.operations.append({
-    #             "type": "huadao",
-    #             "angle_deg": theta_deg,
-    #             "thickness": slide_thickness,
-    #             "DN": DN,
-    #             "coord_origin": (0, 0),
-    #             "length": slide_length
-    #         })
-    #
-    #         # 标记已布置滑道
-    #         self.isHuadao = True
-    #
-    #     except ValueError as e:
-    #         QMessageBox.warning(self, "参数错误", f"参数格式不正确: {str(e)}")
-    #
-    #     except Exception as e:
-    #         QMessageBox.warning(self, "错误", f"绘制滑道时发生错误: {str(e)}")
-    import math
-    from PyQt5.QtWidgets import QMessageBox, QGraphicsPolygonItem, QGraphicsPathItem
-    from PyQt5.QtCore import QPointF
-    from PyQt5.QtGui import QPolygonF, QPainterPath, QColor, QPen
-    from PyQt5.QtCore import Qt
-
-    # 假设ClickableRectItem类已在其他地方定义
-    # class ClickableRectItem(QGraphicsPathItem):
-    #     def __init__(self, path, is_slide=False, editor=None, parent=None):
-    #         super().__init__(path, parent)
-    #         self.is_slide = is_slide
-    #         self.editor = editor
-    #         self.paired_block = None
-    #     def set_paired_block(self, block):
-    #         self.paired_block = block
-
-    import math
-    from PyQt5.QtWidgets import QMessageBox, QGraphicsPolygonItem, QGraphicsPathItem
-    from PyQt5.QtCore import Qt, QPointF  # 修正QPointF的导入路径
-    from PyQt5.QtGui import QPolygonF, QPainterPath, QColor, QPen
-
-    # 假设ClickableRectItem类已在其他地方定义
-    # class ClickableRectItem(QGraphicsPathItem):
-    #     def __init__(self, path, is_slide=False, editor=None, parent=None):
-    #         super().__init__(path, parent)
-    #         self.is_slide = is_slide
-    #         self.editor = editor
-    #         self.paired_block = None
-    #     def set_paired_block(self, block):
-    #         self.paired_block = block
-
     def draw_slide_with_params(self, height, thickness, angle):
+        """根据给定参数绘制滑道（支持选中）"""
         try:
+            # 清除上次绘制的绿色滑道
             if hasattr(self, "green_slide_items"):
+                # 遍历副本，避免在迭代中修改列表
                 for item in list(self.green_slide_items):
                     try:
+                        # 尝试从场景中移除对象，若已销毁则捕获异常
                         self.graphics_scene.removeItem(item)
                     except RuntimeError:
+                        # 对象已被销毁，跳过处理
                         pass
                 # 清空列表，彻底移除无效引用
                 self.green_slide_items.clear()
@@ -12618,6 +11578,7 @@ class TubeLayoutEditor(QMainWindow):
             self.slipway_centers = []
             all_interfering_y_coords = set()  # 收集所有存在干涉的y坐标
 
+            # 以下是原来的绘图逻辑...
             outer_radius = DN / 2
             center_x, center_y = 0, 0
             theta_rad = math.radians(theta_deg)
@@ -12710,28 +11671,41 @@ class TubeLayoutEditor(QMainWindow):
                 return math.hypot(x - proj_x, y - proj_y)
 
             def check_tube_slide_interference(slide_corners, tube_centers, tube_diameter):
-                # 【修改核心】：通过滑道矩形四角y坐标确定干涉范围，替代原几何干涉判断
-                # 1. 提取滑道矩形四个角的y坐标
-                corner_ys = [corner[1] for corner in slide_corners]
-                # 2. 找y坐标绝对值最小（最高）和最大（最低）的点，取其原值
-                min_abs_y_idx = corner_ys.index(min(corner_ys, key=abs))
-                max_abs_y_idx = corner_ys.index(max(corner_ys, key=abs))
-                slide_min_y = corner_ys[min_abs_y_idx]  # 最高处y原值
-                slide_max_y = corner_ys[max_abs_y_idx]  # 最低处y原值
-                # 3. 确定干涉y范围（处理min和max顺序，确保左小右大）
-                lower_y = min(slide_min_y, slide_max_y)
-                upper_y = max(slide_min_y, slide_max_y)
-                # 4. 筛选y坐标在[lower_y, upper_y]之间的换热管
-                interfering_tubes = [
-                    center for center in tube_centers
-                    if lower_y - 1e-8 <= center[1] <= upper_y + 1e-8  # 浮点数误差容忍
+                # 收集所有需要排除的y坐标（即存在干涉管的行）
+                interfering_y_coords = set()
+                tube_radius = tube_diameter / 2
+
+                # 定义滑道的四条边
+                slide_edges = [
+                    (slide_corners[0], slide_corners[1]),
+                    (slide_corners[1], slide_corners[2]),
+                    (slide_corners[2], slide_corners[3]),
+                    (slide_corners[3], slide_corners[0])
                 ]
-                # 5. 收集干涉管的y坐标
-                interfering_y_coords = {center[1] for center in interfering_tubes}
 
-                return interfering_tubes, interfering_y_coords
+                # 第一遍：找出所有存在干涉的y坐标
+                for center in tube_centers:
+                    # 检查圆心是否在滑道内
+                    if is_point_in_rectangle(center, slide_corners):
+                        interfering_y_coords.add(center[1])
+                        continue
 
-            def get_slide_interfering_tubes(base_x, base_y, unit_dx, unit_dy, thickness, length, is_left=True):
+                    # 检查圆心到滑道各边的距离是否小于等于半径（表示相交）
+                    for edge in slide_edges:
+                        distance = point_to_line_distance(center, edge[0], edge[1])
+                        if distance <= tube_radius + 1e-8:  # 考虑浮点数计算误差
+                            interfering_y_coords.add(center[1])
+                            break
+
+                # 第二遍：收集所有在干涉行上的换热管
+                slipway_centers = [
+                    center for center in tube_centers
+                    if center[1] in interfering_y_coords
+                ]
+
+                return slipway_centers, interfering_y_coords
+
+            def draw_slide_polygon(base_x, base_y, unit_dx, unit_dy, thickness, length, is_left=True):
                 perp_dx, perp_dy = -unit_dy, unit_dx
                 half_thick = thickness / 2
 
@@ -12747,17 +11721,17 @@ class TubeLayoutEditor(QMainWindow):
                     (p4.x(), p4.y())
                 ]
 
-                # 检查干涉（调用修改后的check_tube_slide_interference）
+                # 检查干涉
                 interfering_tubes, interfering_y_coords = check_tube_slide_interference(
                     slide_corners=slide_corners,
                     tube_centers=self.current_centers,
                     tube_diameter=do
                 )
 
-                return interfering_tubes, interfering_y_coords, slide_corners
+                # 收集所有干涉的y坐标
+                all_interfering_y_coords.update(interfering_y_coords)
 
-            def draw_slide_polygon(slide_corners, is_left=True):
-                polygon = QPolygonF([QPointF(x, y) for x, y in slide_corners])
+                polygon = QPolygonF([p1, p2, p3, p4])
 
                 # 使用ClickableRectItem而不是QGraphicsPolygonItem
                 path = QPainterPath()
@@ -12766,8 +11740,15 @@ class TubeLayoutEditor(QMainWindow):
                 item = ClickableRectItem(path, is_slide=True, editor=self)
                 item.setBrush(QColor(0, 100, 0))  # 深绿色
                 item.setPen(QPen(Qt.NoPen))  # 无边框
-                # 关键修改：设置滑道优先级为10，与坐标轴、圆心连线一致
-                # item.setZValue(10)
+                item.slide_params = {
+                    'base_x': base_x,
+                    'base_y': base_y,
+                    'unit_dx': unit_dx,
+                    'unit_dy': unit_dy,
+                    'thickness': thickness,
+                    'length': length,
+                    'is_left': is_left
+                }
 
                 self.graphics_scene.addItem(item)
                 self.green_slide_items.append(item)
@@ -12776,27 +11757,19 @@ class TubeLayoutEditor(QMainWindow):
                     slide2 = self.green_slide_items[-1]
                     slide1.set_paired_block(slide2)
 
-            # 先计算两个滑道的干涉信息
-            interfering_tubes1, interfering_y_coords1, slide_corners1 = get_slide_interfering_tubes(
-                base1_x, base1_y, u1_x, u1_y, slide_thickness, slide_length, is_left=True)
-            interfering_tubes2, interfering_y_coords2, slide_corners2 = get_slide_interfering_tubes(
-                base2_x, base2_y, u2_x, u2_y, slide_thickness, slide_length, is_left=False)
-            self.interfering_tubes1 = interfering_tubes1
-            self.interfering_tubes2 = interfering_tubes2
+                return interfering_tubes
 
-            # 合并所有干涉的y坐标
-            all_interfering_y_coords = interfering_y_coords1.union(interfering_y_coords2)
+            # 绘制两个滑道并收集干涉信息
+            self.interfering_tubes1 = draw_slide_polygon(base1_x, base1_y, u1_x, u1_y, slide_thickness, slide_length,
+                                                         is_left=True)
+            self.interfering_tubes2 = draw_slide_polygon(base2_x, base2_y, u2_x, u2_y, slide_thickness, slide_length,
+                                                         is_left=False)
 
-            # 处理所有干涉的管子（按行删除）- 在绘制滑道之前执行
+            # 处理所有干涉的管子（按行删除）
             if all_interfering_y_coords:
-                # 【核心修改】：计算self.current_centers与lagan_centers的合集
-                # 转换lagan_info到当前坐标系统
-                lagan_centers = self.selected_to_current_coords(self.lagan_info)
-                # 合并两个列表的坐标（去重处理）
-                combined_centers = list(set(self.current_centers + lagan_centers))
-                # 收集所有在干涉行上的换热管（从合集中筛选）
+                # 收集所有在干涉行上的换热管
                 self.slipway_centers = [
-                    center for center in combined_centers
+                    center for center in self.current_centers
                     if center[1] in all_interfering_y_coords
                 ]
 
@@ -12813,21 +11786,16 @@ class TubeLayoutEditor(QMainWindow):
 
                 self.slide_selected_centers = centers
 
-                # 执行删除（保留原逻辑不变）
+                # 执行删除
                 if centers:
-
                     tube_num = self.get_tube_pass_count()
-                    if tube_num == "2" and self.heat_exchanger in ["AEU", "BEU"] or self.isSymmetry:
+                    if tube_num == "2" and self.heat_exchanger in ["AEU", "BEU"]:
                         all_centers = self.judge_linkage_x(centers)
                         self.delete_huanreguan(all_centers)
                     else:
                         self.delete_huanreguan(centers)
 
                 self.update_tube_nums()
-
-            # 现在绘制滑道
-            draw_slide_polygon(slide_corners1, is_left=True)
-            draw_slide_polygon(slide_corners2, is_left=False)
 
             if not hasattr(self, 'operations'):
                 self.operations = []
@@ -12851,21 +11819,6 @@ class TubeLayoutEditor(QMainWindow):
             QMessageBox.warning(self, "错误", f"绘制滑道时发生错误: {str(e)}")
 
     def calculate_and_update_interfering_tubes(self, line_segment, line_thickness):
-        # 先从current_centers中移除与lagan_centers重合的元素
-        lagan_centers = self.selected_to_current_coords(self.lagan_info)
-
-        # 过滤掉current_centers中与lagan_centers重合的点（考虑浮点数精度问题，使用近似比较）
-        # 定义一个判断两点是否重合的辅助函数（处理浮点数精度）
-        def is_coincident(center1, center2, epsilon=1e-6):
-            return (abs(center1[0] - center2[0]) < epsilon and
-                    abs(center1[1] - center2[1]) < epsilon)
-
-        # 保留不在lagan_centers中的点
-        self.current_centers = [
-            center for center in self.current_centers
-            if not any(is_coincident(center, lagan) for lagan in lagan_centers)
-        ]
-
         do = None
         for row in range(self.param_table.rowCount()):
             param_name_item = self.param_table.item(row, 1)
@@ -13250,6 +12203,7 @@ class TubeLayoutEditor(QMainWindow):
                     "至圆筒内壁距离": self.param_widgets["至圆筒内壁距离"].toPlainText().strip()
                 }
 
+        # 从左侧参数表获取初始参数（原有逻辑保留）
         initial_params = {}
         for row in range(self.param_table.rowCount()):
             param_name_item = self.param_table.item(row, 1)
@@ -13471,7 +12425,7 @@ class TubeLayoutEditor(QMainWindow):
                             if isinstance(item, QGraphicsEllipseItem):
                                 self.graphics_scene.removeItem(item)
                                 break
-                self.selected_centers = []
+                self.selected_centers.clear()
                 return
 
             # 转换字符串类型的选中中心
@@ -13502,7 +12456,7 @@ class TubeLayoutEditor(QMainWindow):
 
             if len(points) != 2:
                 # QMessageBox.warning(self, "错误", "无法获取两个圆心坐标")
-                self.selected_centers = []
+                self.selected_centers.clear()
                 return
 
             # 绘制平板式防冲板（保持与原始代码相同的单线效果）
@@ -13548,7 +12502,7 @@ class TubeLayoutEditor(QMainWindow):
                 "interfering_tubes": self.interfering_centers if hasattr(self, 'interfering_centers') else []
             })
 
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         elif baffle_type == "圆弧形":
             # 解析选中的中心点
@@ -13611,7 +12565,7 @@ class TubeLayoutEditor(QMainWindow):
                             if isinstance(item, QGraphicsEllipseItem):
                                 self.graphics_scene.removeItem(item)
                                 break
-                self.selected_centers = []
+                self.selected_centers.clear()
                 return
 
             # 获取并清除选中标记
@@ -13633,7 +12587,7 @@ class TubeLayoutEditor(QMainWindow):
 
             if len(points) != 2:
                 # QMessageBox.warning(self, "错误", "无法获取两个有效的圆心坐标")
-                self.selected_centers = []
+                self.selected_centers.clear()
                 return
 
             # 计算折边式防冲板的坐标点
@@ -13665,7 +12619,7 @@ class TubeLayoutEditor(QMainWindow):
                 #     f"计算得到的顶部长度为负值({top_length:.2f})，\n"
                 #     f"请检查折边角度({baffle_angle}°)和选中的管间距({AB_length:.2f})"
                 # )
-                self.selected_centers = []
+                self.selected_centers.clear()
                 return
 
             # 计算折边顶点坐标（保持与原始代码相同的计算方式）
@@ -13723,11 +12677,11 @@ class TubeLayoutEditor(QMainWindow):
                 }
             })
 
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         elif baffle_type == "焊接式":
             print("待开发")
-            self.selected_centers = []
+            self.selected_centers.clear()
 
     def on_screw_ring_click(self):
         """创建环首螺钉参数设置弹窗，从参数表获取初始值并关联更新"""
@@ -14080,7 +13034,7 @@ class TubeLayoutEditor(QMainWindow):
 
             # 清除选中状态
             self.clear_selection_highlight()
-            self.selected_centers = []
+            self.selected_centers.clear()
 
             # 关闭弹窗
             dialog.accept()
@@ -14354,7 +13308,7 @@ class TubeLayoutEditor(QMainWindow):
         # 9. 清理临时状态（避免干扰下次操作）
         self.clear_selection_highlight()
         if hasattr(self, 'selected_centers'):
-            self.selected_centers = []
+            self.selected_centers.clear()
 
         return current_coords
 
@@ -14495,18 +13449,16 @@ class TubeLayoutEditor(QMainWindow):
                     self.selected_centers = []
 
                 if label in self.selected_centers:
-                    # 取消选中 → 删除 marker，使用列表推导式创建新列表
-                    new_selected = [c for c in self.selected_centers if c != label]
-                    self.selected_centers = new_selected
+                    # 取消选中 → 删除 marker
+                    self.selected_centers.remove(label)
                     click_point = QPointF(x, y)
                     for item in self.graphics_scene.items(click_point):
                         if isinstance(item, QGraphicsEllipseItem) and item.data(0) == "marker":
                             self.graphics_scene.removeItem(item)
                             break
                 else:
-                    # 添加选中 → 画 marker，通过新列表赋值方式添加
-                    new_selected = self.selected_centers + [label]
-                    self.selected_centers = new_selected
+                    # 添加选中 → 画 marker
+                    self.selected_centers.append(label)
                     pen = QPen(Qt.NoPen)
                     brush = QBrush(QColor(173, 216, 230))
                     marker = self.graphics_scene.addEllipse(

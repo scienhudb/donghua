@@ -21,7 +21,7 @@ from modules.condition_input.funcs.funcs_def_check import check_dn, check_work_p
     check_design_pressure, check_design_temp_max, check_design_temp_min, \
     check_in_out_pressure_gap, check_trail_stand_pressure_medium_density, check_insulation_layer_thickness, \
     check_insulation_material_density, check_def_trail_stand_pressure_lying, check_def_trail_stand_pressure_stand, \
-    check_trail_stand_pressure_type, check_pressure_test_temp, check_avg_tube_metal_temp, check_avg_shell_metal_temp
+    check_trail_stand_pressure_type
 
 #数据库连接
 db_config_1 = {
@@ -112,11 +112,7 @@ def _write_row_from_list(table_widget, row, values, header_userroles=None):
         header_item = table_widget.horizontalHeaderItem(c)
         header_text = header_item.text() if header_item else ""
         # 默认：可编辑
-        if header_text in ("序号",):
-            # 序号列：不可编辑，居中
-            item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            item.setTextAlignment(Qt.AlignCenter)
-        elif header_text in ("参数名称", "规范/标准名称", "用途", "细类"):
+        if header_text in ("参数名称", "规范/标准名称", "用途", "细类"):
             item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)  # 名称等不允许改
             item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if header_text in ("参数名称","规范/标准名称") else Qt.AlignCenter)
         elif header_text in ("参数单位",):
@@ -243,10 +239,9 @@ def make_header_item(text):
 
     return item
 
-def load_design_data_if_exists(product_id, product_form="all"):
+def load_design_data_if_exists(product_id):
     """
     给定产品ID，从设计活动库优先加载5张数据表，如不存在则退回产品条件库模板表。
-    【新增】当从模板库加载时，会根据 product_form 决定是否加载特定产品形式的参数。
     """
     design_tables = {
         "产品标准": "产品设计活动表_产品标准数据表",
@@ -280,68 +275,33 @@ def load_design_data_if_exists(product_id, product_form="all"):
     for key in design_tables:
         db_used = db_config_2 if design_data_exists else db_config_1
         table_name = design_tables[key] if design_data_exists else template_tables[key]
-        # ▼▼▼【诊断点 1】: 在循环开始时打印当前处理的表和产品信息 ▼▼▼
-        print("\n" + "="*50)
-        print(f"开始处理: [ {key} ] | 产品形式: '{product_form}' | 数据源: {'设计活动库' if design_data_exists else '模板库'}")
-        print(f"目标表名: `{table_name}`")
-        print("="*50)
+
         connection = get_connection(**db_used)
         try:
             with connection.cursor() as cursor:
                 # 获取字段名，按表类型决定是否保留 参数ID 字段
                 cursor.execute(f"DESCRIBE {table_name}")
                 columns = cursor.fetchall()
-                internal_columns_to_hide = ['所属类型', '所属型式']
 
-                # 确定要查询的列名
+                preserve_param_id = key in ["产品标准", "设计数据", "通用数据"]
+
                 column_names = [
                     col['Field'] for col in columns
-                    if '产品ID' not in col['Field'] and '更改状态' not in col['Field']
-
+                    if (
+                        (preserve_param_id or not col['Field'].endswith('参数ID')) and
+                        col['Field'] not in ['所属类型', '所属型式'] and
+                        '产品ID' not in col['Field'] and
+                        '更改状态' not in col['Field']
+                    )
                 ]
 
                 field_str = ', '.join([f"`{col}`" for col in column_names])
-                # 构造查询语句
-                sql_query = f"SELECT {field_str} FROM `{table_name}`"
-                params = []
+                if design_data_exists:
+                    cursor.execute(f"SELECT {field_str} FROM {table_name} WHERE 产品ID = %s", (product_id,))
+                else:
+                    cursor.execute(f"SELECT {field_str} FROM {table_name}")
 
-                if design_data_exists:#从设计活动库加载
-                    # cursor.execute(f"SELECT {field_str} FROM {table_name} WHERE 产品ID = %s", (product_id,))
-                    sql_query += " WHERE `产品ID` = %s"
-                    params.append(product_id)
-                else:#从模板库加载 用产品形式过滤
-                    # ▼▼▼【核心修改点 2】: 从模板库加载时，应用产品形式过滤 ▼▼▼
-                    # 检查是否是受影响的表，并且模板表里真的有所属型式 列
-                    is_form_dependent_table = key in ["设计数据"] # 只影响设计数据表
-                    form_column_name = '所属型式'
-                    has_form_column = any(col['Field'] == form_column_name for col in columns)
-
-                    if is_form_dependent_table and has_form_column:
-                        if product_form == 'NEN':
-                            sql_query += f" WHERE `{form_column_name}` IN (%s, %s)"
-                            params.extend(['all', 'NEN'])
-                        else:
-                            sql_query += f" WHERE `{form_column_name}` = %s"
-                            params.append('all')
-                    # cursor.execute(f"SELECT {field_str} FROM {table_name} WHERE 所属形式 = %s",(product_form,))
-                # ▼▼▼【诊断点 2】: 打印最终要执行的 SQL 和参数 (最关键！) ▼▼▼
-                print(f"[SQL诊断] 最终执行的查询语句:\n    {sql_query}")
-                print(f"[SQL诊断] 最终绑定的参数:\n    {tuple(params)}")
-                # 执行最终构建的查询
-                cursor.execute(sql_query, tuple(params))
                 rows = cursor.fetchall()
-                # ▼▼▼【诊断点 3】: 打印查询结果的数量 ▼▼▼
-                print(f"[SQL诊断] 查询返回的行数: {len(rows)}")
-                if len(rows) > 0:
-                    print(f"[SQL诊断] 查询结果第一行示例: {rows[0]}")
-                print("-" * 50)
-
-                # ▼▼▼【核心修改点 3】: 从最终结果中移除用于过滤的列 ▼▼▼
-                # 无论从哪里加载，都不希望在UI上看到 '所属型式' 这一列
-                display_column_names = [
-                    name for name in column_names
-                    if name not in internal_columns_to_hide # 可以在这里添加更多不想显示的内部列
-                ]
 
                 # 清洗空值
                 for row in rows:
@@ -350,32 +310,29 @@ def load_design_data_if_exists(product_id, product_form="all"):
                             row[k] = ""
 
                 data = {
-                    "headers": display_column_names,
+                    "headers": column_names,
                     "rows": rows,
                     "count": len(rows)
                 }
 
                 # 设置界面用的“序号列”字段名（实际用于表格第0列）
-                # if preserve_param_id:
-                #     data["prepend_index_header"] = column_names[0]
-                if display_column_names and display_column_names[0].endswith("参数ID"):
-                    data["prepend_index_header"] = display_column_names[0]
+                if preserve_param_id:
+                    data["prepend_index_header"] = column_names[0]
 
                 if key == "检测数据":
-                    data["格式化"] = format_trail_table(display_column_names, rows)
+                    data["格式化"] = format_trail_table(column_names, rows)
                 if key == "涂漆数据":
-                    data["格式化"] = format_coating_table(display_column_names, rows)
+                    data["格式化"] = format_coating_table(column_names, rows)
 
                 result["数据"][key] = data  # 存表格数据
+
+            # 设置数据来源状态和导入状态
+            result["data_source_status"] = "设计活动库" if design_data_exists else "条件模板"
+            result["import_status"] = True if design_data_exists or len(rows) > 0 else False
 
         finally:
             connection.close()
 
-    # 设置数据来源状态和导入状态
-    result["data_source_status"] = "设计活动库" if design_data_exists else "条件模板"
-    # result["import_status"] = True if design_data_exists or len(rows) > 0 else False
-    # 只要任何一个表有数据，就认为导入成功
-    result["import_status"] = any(d["count"] > 0 for d in result["数据"].values())
     return result
 
 def format_trail_table(headers, rows):
@@ -870,12 +827,7 @@ def save_data_to_database(data, product_id, table_name, table_widget, is_from_de
 
                     columns = ', '.join(f"`{k}`" for k in insert_row)
                     placeholders = ', '.join(['%s'] * len(insert_row))
-                    # 当相同 (产品ID + 参数ID/名称) 已存在时，执行更新，避免 PRIMARY KEY 冲突
-                    update_set = ', '.join([f"`{k}`=VALUES(`{k}`)" for k in insert_row.keys() if k not in ("产品ID", param_id_field)])
-                    sql = (
-                        f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders}) "
-                        f"ON DUPLICATE KEY UPDATE {update_set}"
-                    )
+                    sql = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
                     cursor.execute(sql, tuple(insert_row.values()))
 
         connection.commit()
@@ -928,19 +880,12 @@ def save_coating_table_to_database(table_widget: QTableWidget, table_name, produ
                     full_usage = f"{current_usage}_{subtype}" if subtype else current_usage
 
                     if source_status == "条件模板":
-                        # ✅ 插入或更新，避免重复主键导致失败
+                        # ✅ 插入
                         cursor.execute(f"""
                             INSERT INTO {table_name} (
                                 `涂漆数据参数ID`, `产品ID`, `用途`, `油漆类别`, `颜色`,
                                 `干膜厚度（μm）`, `涂漆面积`, `备注`
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            ON DUPLICATE KEY UPDATE
-                                `用途`=VALUES(`用途`),
-                                `油漆类别`=VALUES(`油漆类别`),
-                                `颜色`=VALUES(`颜色`),
-                                `干膜厚度（μm）`=VALUES(`干膜厚度（μm）`),
-                                `涂漆面积`=VALUES(`涂漆面积`),
-                                `备注`=VALUES(`备注`)
                         """, (
                             id_counter,
                             product_id,
@@ -1025,22 +970,13 @@ def save_trail_table_to_database(table_widget: QTableWidget, table_name: str, pr
                     tube_level = table_widget.item(sub_row, 7).text().strip() if table_widget.item(sub_row, 7) else ""
 
                     if source_status == "条件模板":
-                        # ✅ INSERT ... ON DUPLICATE KEY UPDATE（避免重复主键报错）
+                        # ✅ INSERT 插入
                         cursor.execute(f"""
                             INSERT INTO {table_name} (
                                 `无损检测数据参数ID`, `产品ID`, `接头种类`, `检测方法`,
                                 `壳程_技术等级`, `壳程_检测比例`, `壳程_合格级别`,
                                 `管程_技术等级`, `管程_检测比例`, `管程_合格级别`
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON DUPLICATE KEY UPDATE
-                                `接头种类`=VALUES(`接头种类`),
-                                `检测方法`=VALUES(`检测方法`),
-                                `壳程_技术等级`=VALUES(`壳程_技术等级`),
-                                `壳程_检测比例`=VALUES(`壳程_检测比例`),
-                                `壳程_合格级别`=VALUES(`壳程_合格级别`),
-                                `管程_技术等级`=VALUES(`管程_技术等级`),
-                                `管程_检测比例`=VALUES(`管程_检测比例`),
-                                `管程_合格级别`=VALUES(`管程_合格级别`)
                         """, (
                             id_counter,
                             product_id,
@@ -1455,14 +1391,7 @@ def validate_design_table_cell(param_name: str, column_name: str, value: str, li
             ("绝热材料密度", "壳程数值"): check_insulation_material_density,
             ("绝热材料密度", "管程数值"): check_insulation_material_density,
             ("耐压试验类型*", "壳程数值"): check_trail_stand_pressure_type,
-            ("耐压试验类型*", "管程数值"): check_trail_stand_pressure_type,
-            ("耐压试验温度", "壳程数值"): check_pressure_test_temp,
-            ("耐压试验温度", "管程数值"): check_pressure_test_temp,
-            ("沿长度平均的换热管金属温度*", "壳程数值"): check_avg_tube_metal_temp,
-            ("沿长度平均的换热管金属温度*", "管程数值"): check_avg_tube_metal_temp,
-            ("沿长度平均的壳程圆筒金属温度*", "壳程数值"): check_avg_shell_metal_temp,
-            ("沿长度平均的壳程圆筒金属温度*", "管程数值"): check_avg_shell_metal_temp
-
+            ("耐压试验类型*", "管程数值"): check_trail_stand_pressure_type
         }
 
         # ✅ 通用规则（基础类型/范围检查）
@@ -1971,9 +1900,7 @@ def import_multi_conditions_from_excel(excel_path: str, product_id: int, viewer:
                             break
 
                     # === 校核（调用 dispatch_cell_validation） ===
-                    # 注意：多工况弹窗表格列结构为：0=参数单位，1=壳程数值，2=管程数值
-                    # 这里传入的 col_idx 必须对应 1/2，避免读取到错误列（会导致联动校验引用到壳/管程相反列）
-                    for side, (col_idx, val) in [("壳程数值", (1, kc_val)), ("管程数值", (2, gc_val))]:
+                    for side, (col_idx, val) in [("壳程数值", (0, kc_val)), ("管程数值", (1, gc_val))]:
                         if not val:
                             continue
                         print(f"[导入校核DEBUG] pname={pname_base}, gongkuang={gk_no}, side={side}, val={val}")
@@ -2485,51 +2412,12 @@ def save_local_condition_file(product_id: int, viewer: QWidget) -> bool:
         col_start=1, col_end=3, excel_col_offset=2, excel_row_offset=2,
         row_index_order=order_std
     )
-    # 这部分代码的参数，我们后续会用到
-    design_col_start = 1
-    design_col_end = 5
-    design_excel_col_offset = 2
     update_sheet_from_table(
         wb["设计数据"], viewer.tableWidget_design_data,
         col_start=1, col_end=5, excel_col_offset=2, excel_row_offset=2,
         row_index_order=order_design
     )
     fill_multi_conditions(wb["设计数据"], product_id, viewer.tableWidget_design_data, order_design)
-
-    # 1. 定义模板中的最大参数行数（以NEN为准）
-    TEMPLATE_MAX_ROWS = 34
-    # 2. 获取当前UI界面上实际的数据行数
-    current_data_rows = viewer.tableWidget_design_data.rowCount()
-
-    # 3. 如果当前产品的数据行数小于模板的最大行数，则删除多余的行
-    if current_data_rows < TEMPLATE_MAX_ROWS:
-        row_to_start_delete = 2 + current_data_rows
-        num_rows_to_delete = TEMPLATE_MAX_ROWS - current_data_rows
-        from openpyxl.styles import Border, Side
-        if num_rows_to_delete > 0:
-            wb["设计数据"].delete_rows(row_to_start_delete, num_rows_to_delete)
-            print(f"检测到行数不匹配：已从“设计数据”表中删除了 {num_rows_to_delete} 个多余的格式化行。")
-            # 1. 定义一个标准的黑色细线边框样式
-            thin_border_side = Side(style='thin', color='000000')
-
-            # 2. 获取最后一行数据所在的Excel行号
-            last_data_row_num = 2 + current_data_rows - 1
-
-            # 3. 遍历最后一行的所有单元格，为它们“补上”下边框
-            #    列的范围应该与写入数据时保持一致
-            for col_idx in range(design_excel_col_offset,
-                                 design_excel_col_offset + (design_col_end - design_col_start)):
-                cell = wb["设计数据"].cell(row=last_data_row_num, column=col_idx)
-                # 复制现有边框，只修改底部
-                existing_border = cell.border
-                new_border = Border(left=existing_border.left,
-                                    right=existing_border.right,
-                                    top=existing_border.top,
-                                    bottom=thin_border_side)  # <--- 设置底部边框
-                cell.border = new_border
-
-            print(f"已成功为第 {last_data_row_num} 行数据修复底部边框。")
-
 
     update_sheet_from_table(
         wb["通用数据"], viewer.tableWidget_general_data,
@@ -2550,6 +2438,7 @@ def save_local_condition_file(product_id: int, viewer: QWidget) -> bool:
     wb.save(local_path)
     print(f"✅ 本地条件数据表已成功保存到: {local_path}")
     return True
+
 
 def update_sheet_from_table(sheet, table_widget, col_start=0, col_end=None,
                             excel_col_offset=1, excel_row_offset=2,

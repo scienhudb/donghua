@@ -65,20 +65,14 @@ class PlusTabManager(QObject):
     def _ensure_single_plus(self):
         """保证只存在一种形态的 '+'。"""
         if self._plus_as_tab:
-            try:
-                self.tw.setCornerWidget(None, Qt.TopRightCorner)
-            except Exception:
-                pass
             self._btn.hide()
+            # 页签里必须有 '+'
             has_plus = any(self.tw.tabText(i) == "+" for i in range(self.tw.count()))
             if not has_plus:
                 self._plus_tab_index = self.tw.addTab(QWidget(), "+")
         else:
+            # corner 形态必须移除所有 '+'
             self._remove_all_plus_tabs()
-            try:
-                self.tw.setCornerWidget(self._btn, Qt.TopRightCorner)
-            except Exception:
-                pass
             self._btn.show()
             self._btn.raise_()
 

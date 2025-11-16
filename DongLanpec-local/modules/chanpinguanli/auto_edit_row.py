@@ -55,28 +55,18 @@ def update_status(row, status):
         bianl.product_table_row_status[row].pop("old_name", None)
         bianl.product_table_row_status[row].pop("old_position", None)
 
+
+
+
+
 def remove_row_and_status(row):
     bianl.product_table.removeRow(row)
     if row in bianl.product_table_row_status:
         del bianl.product_table_row_status[row]
 
-#1106新修改
+
 def add_table_row():
-    # 防御：表格对象不存在或已销毁时直接返回，避免崩溃（不影响正常新增）
-    try:
-        table = getattr(bianl, "product_table", None)
-        if table is None:
-            return
-        # 兼容性检测：若表格对象已被删除，直接返回
-        try:
-            import sip
-            if sip.isdeleted(table):
-                return
-        except Exception:
-            pass
-        current_row_count = table.rowCount()
-    except Exception:
-        return
+    current_row_count = bianl.product_table.rowCount()
     bianl.product_table.insertRow(current_row_count)
 
     item = QTableWidgetItem(f"{current_row_count + 1:02d}")
@@ -207,21 +197,8 @@ def is_row_empty(row):
 #     bianl.last_cell_content = item.text().strip() if item else ""
 
 
-#1106新修改
 def finalize_row_edit(row, new_text):
-    # 防御：表格对象不存在或已销毁时直接返回，避免崩溃（不影响正常保存）
-    try:
-        table = getattr(bianl, "product_table", None)
-        if table is None:
-            return
-        try:
-            import sip
-            if sip.isdeleted(table):
-                return
-        except Exception:
-            pass
-    except Exception:
-        return
+    table = bianl.product_table
     total_rows = table.rowCount()
     total_columns = table.columnCount()
     last_row = total_rows - 1
@@ -263,23 +240,11 @@ def finalize_row_edit(row, new_text):
     col = table.currentColumn()
     highlight_row_except_current(row, col)
 
-#1106新修改
+
 def handle_combo_changed(row: int, col: int):
     """统一处理：有值且在最后一行 → 自增；清空且非最后一行、整行空 → 自减"""
 
-    # 防御：表格对象不存在或已销毁时直接返回（不影响正常回调）
-    try:
-        table = getattr(bianl, "product_table", None)
-        if table is None:
-            return
-        try:
-            import sip
-            if sip.isdeleted(table):
-                return
-        except Exception:
-            pass
-    except Exception:
-        return
+    table = bianl.product_table
     last_row = table.rowCount() - 1
     w = table.cellWidget(row, col)
     if not w:
