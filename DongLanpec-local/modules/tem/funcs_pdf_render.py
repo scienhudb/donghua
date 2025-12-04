@@ -13,12 +13,10 @@ from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
 from modules.cailiaodingyi.controllers.combo import ComboDelegate, ComboPopupEventFilter, DynamicOptionsDelegate, \
     on_material_field_changed_col, ProcessPerColumnDelegate, NonNegativeDoubleDelegate, RowFillComboDelegate, \
     BulkFillDynamicOptionsDelegate, MultiSelectRowComboDelegate, MultiSelectDynamicOptionsDelegate
-from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options,get_fastener_bolt_type_options,\
-    get_fastener_component_options_by_template_id,load_updated_fastener_define_data
+from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options, get_fastener_component_options_by_template_id, get_fastener_bolt_type_options
 from modules.cailiaodingyi.funcs.funcs_pdf_input import load_guankou_param_structure_from_db, load_dropdown_options, \
-    query_unassigned_codes, query_codes_for_tab_raw,get_fastener_param_structure_from_db
-from modules.cailiaodingyi.controllers.tooltip_utils import ensure_table_tooltip_updater
-
+    query_unassigned_codes, query_codes_for_tab_raw
+from modules.cailiaodingyi.funcs.funcs_pdf_input import get_fastener_param_structure_from_db
 
 
 class _CopyPasteEventFilter(QtCore.QObject):
@@ -472,8 +470,8 @@ def install_reinforcement_group_toggle(
         has_reinforcement = True
         if toggle_row >= 0:
             toggle_value = _get_text(toggle_row, min(value_cols))
-            # 当选择"否"或"程序推荐"时隐藏，其他情况（"是"或空值）都显示
-            has_reinforcement = toggle_value not in ["否", "程序推荐"]
+            # 只有当明确选择"否"时才隐藏，其他情况（"是"或程序推荐/空值）都显示
+            has_reinforcement = (toggle_value != "否")
 
         # 控制补强圈相关字段的显示/隐藏
         for rr in reinforcement_rows:
@@ -886,7 +884,6 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
     table.setSelectionMode(QTableWidget.ExtendedSelection)  # 支持框选/多选/Shift/Ctrl
     install_selection_debug(table)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 关键：禁用默认触发
-    table.setProperty("user_edited_corrosion", False)
 
     # 安装我们的过滤器（持有引用避免被 GC）
     flt = ComboPopupEventFilter(table)
@@ -1065,21 +1062,6 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
             if self.table:
                 self.table.setCurrentCell(r, c)
                 self.highlight_row(r)
-            try:
-                if "腐蚀裕量" in (self.pname or "") and self.table:
-                    self.table.setProperty("user_edited_corrosion", True)
-                    v = getattr(self, "viewer", None)
-                    if v:
-                        tw = getattr(v, "guankou_tabWidget", None)
-                        if tw and tw.currentIndex() >= 0:
-                            name = tw.tabText(tw.currentIndex()).strip()
-                            s = getattr(v, "_corrosion_user_override_tabs", None)
-                            if s is None:
-                                setattr(v, "_corrosion_user_override_tabs", set())
-                                s = getattr(v, "_corrosion_user_override_tabs")
-                            s.add(name)
-            except Exception:
-                pass
 
     # 这几个是你要改成数值输入的行名（可按需要继续加）
     NUM_GE0 = {
@@ -1131,10 +1113,7 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
                 table.setItem(row, 1, item)
                 if options:
-                    if param_name == "元件所属":
-                        table.setItemDelegateForRow(row, CheckComboDelegate(options, table))
-                    else:
-                        table.setItemDelegateForRow(row, MultiSelectRowComboDelegate(options, table))
+                    table.setItemDelegateForRow(row, MultiSelectRowComboDelegate(options, table))
 
             elif control_type == "checkcombo":
                 item = QTableWidgetItem(str(value))
@@ -1375,38 +1354,58 @@ def _install_tooltip_updater(table):
     安装动态更新悬停提示的机制
     当表格内容变化时，自动更新悬停提示
     """
-    def combo_formatter(combo: QComboBox, row: int, col: int):
-        text = combo.currentText().strip()
-        return f"当前选择: {text}" if text else "请选择选项"
 
-    def item_formatter(item: QTableWidgetItem, row: int, col: int):
-        text = (item.text() or "").strip()
-        if text:
-            return text
-        if col == 0:
-            param_name = (table.item(row, col).text() if table.item(row, col) else "").strip()
-            return f"参数名: {param_name}" if param_name else ""
-        return "点击编辑"
+    def update_tooltips():
+        """更新所有单元格的悬停提示"""
+        for row in range(table.rowCount()):
+            for col in range(table.columnCount()):
+                # 检查是否是下拉框单元格
+                cell_widget = table.cellWidget(row, col)
+                if isinstance(cell_widget, QComboBox):
+                    # 为下拉框设置悬停提示
+                    current_text = cell_widget.currentText()
+                    if current_text and current_text.strip():
+                        cell_widget.setToolTip(f"当前选择: {current_text}")
+                    else:
+                        cell_widget.setToolTip("请选择选项")
+                else:
+                    # 为普通单元格设置悬停提示
+                    item = table.item(row, col)
+                    if item and item.text().strip():
+                        item.setToolTip(item.text())
+                    else:
+                        if col == 0:  # 参数名列
+                            item = table.item(row, col)
+                            if item:
+                                param_name = item.text().strip()
+                                if param_name:
+                                    item.setToolTip(f"参数名: {param_name}")
+                        else:  # 值列
+                            item = table.item(row, col)
+                            if item:
+                                item.setToolTip("点击编辑")
 
-    ensure_table_tooltip_updater(
-        table,
-        combo_formatter=combo_formatter,
-        item_formatter=item_formatter,
-    )
+    # 监听表格数据变化
+    model = table.model()
+    if model:
+        model.dataChanged.connect(lambda *args: update_tooltips())
+
+    # 监听下拉框变化
+    for row in range(table.rowCount()):
+        for col in range(table.columnCount()):
+            cell_widget = table.cellWidget(row, col)
+            if isinstance(cell_widget, QComboBox):
+                cell_widget.currentTextChanged.connect(lambda *args: update_tooltips())
 
 
-
-
-# 11.16设备法兰
 def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
     """渲染设备法兰紧固件参数到UI - 支持PNO.x格式的tab页面"""
-    print(
-        f"[DBG][fastener_render] 开始渲染设备法兰紧固件，数据条数={0 if fastener_para_info is None else len(fastener_para_info)}")
-
+    print(f"[DBG][fastener_render] 开始渲染设备法兰紧固件，数据条数={0 if fastener_para_info is None else len(fastener_para_info)}")
+    
     # 获取参数结构
     param_structures = get_fastener_param_structure_from_db()
     print(f"[DBG][fastener_render] 参数结构: {param_structures}")
-
+    
     # 根据参数结构确定列数
     max_cols = 3  # 默认3列：参数名 + 参数值1 + 参数值2
     for _, structure, _, _ in param_structures:
@@ -1417,50 +1416,21 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
             max_cols = 3  # 3列结构：参数名 + 参数值1 + 参数值2
         elif structure == "2列":
             max_cols = 3  # 2列结构也使用3列表格，但会合并单元格
-
+    
+    # 获取候选项
     template_id = fastener_para_info[0].get('模板ID') if fastener_para_info else None
     print(f"[DBG][fastener_render] 模板ID: {template_id}")
     component_options = get_fastener_component_options_by_template_id(template_id)
     print(f"[DBG][fastener_render] 元件所属候选项: {component_options}")
     bolt_type_options = get_fastener_bolt_type_options()
     print(f"[DBG][fastener_render] 螺柱型式候选项: {bolt_type_options}")
-    try:
-        setattr(viewer_instance, 'fastener_component_all_options', component_options or [])
-    except Exception:
-        pass
-
-    used_by_tab = {}
-    try:
-        for item in fastener_para_info or []:
-            name = str(item.get('参数名称', '')).strip()
-            val = str(item.get('参数值', '') or '').strip()
-            tabc = str(item.get('Tab分类', '') or '').strip()
-            if not tabc:
-                continue
-            if not val or val.lower() == 'null':
-                continue
-            if name == '元件所属' or name.startswith('元件所属'):
-                vals = []
-                if val.startswith('['):
-                    try:
-                        import json
-                        parsed = json.loads(val)
-                        if isinstance(parsed, list):
-                            vals = [str(x).strip() for x in parsed if str(x).strip()]
-                    except Exception:
-                        vals = []
-                if not vals:
-                    vals = [x.strip() for x in val.split('、') if x.strip()]
-                s = used_by_tab.setdefault(tabc, set())
-                for x in vals:
-                    s.add(x)
-    except Exception:
-        used_by_tab = used_by_tab
-    try:
-        setattr(viewer_instance, 'fastener_belonging_used_by_tab_saved', used_by_tab)
-    except Exception:
-        pass
-
+    
+    dropdown_options = {
+        "元件所属": component_options,
+        "螺柱型式": bolt_type_options,
+    }
+    print(f"[DBG][fastener_render] 下拉框选项: {dropdown_options}")
+    
     # 处理数据分组 - 按Tab分类字段分组
     param_map = {}
     if fastener_para_info:
@@ -1473,9 +1443,9 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
     else:
         # 如果没有数据，创建默认的PNO.1
         param_map = {"PNO.1": []}
-
+    
     print(f"[DBG][fastener_render] 参数分组: {list(param_map.keys())}")
-
+    
     # 获取或创建tabWidget - 设备法兰紧固件使用tabWidget_3
     tw = getattr(viewer_instance, "tabWidget_3", None)
     if not tw:
@@ -1489,35 +1459,14 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
         tw.removeTab(i)
         if w:
             w.deleteLater()
-
+    
     # 初始化动态tab字典
     if not hasattr(viewer_instance, "dynamic_fastener_param_tabs"):
         viewer_instance.dynamic_fastener_param_tabs = {}
     viewer_instance.dynamic_fastener_param_tabs.clear()
-
+    
     # 为每个PNO创建tab页
     for idx, (pno_label, data) in enumerate(param_map.items()):
-        already_used = set()
-        for t, vs in used_by_tab.items():
-            if t != pno_label:
-                already_used |= set(vs or [])
-        filtered_component_opts = [x for x in component_options if x not in already_used]
-        curr_vals = list(used_by_tab.get(pno_label, set()))
-        for v in curr_vals:
-            if v and v not in filtered_component_opts:
-                filtered_component_opts.append(v)
-        dropdown_options = {
-            "元件所属": filtered_component_opts,
-            "螺柱型式": bolt_type_options,
-        }
-        try:
-            from modules.cailiaodingyi.funcs.funcs_pdf_input import get_options_for_param
-            forging_opts = get_options_for_param("锻件级别") or []
-            dropdown_options["锻件级别"] = [str(x).strip() for x in forging_opts if str(x).strip()]
-            proc_opts = get_options_for_param("表面处理工艺") or []
-            dropdown_options["表面处理工艺"] = [str(x).strip() for x in proc_opts if str(x).strip()]
-        except Exception:
-            pass
         if idx == 0:
             # 第一个tab，复用现有的
             tw.setTabText(0, pno_label)
@@ -1528,101 +1477,43 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
                 print("[DBG][fastener_render] 未找到tableWidget_define1_3")
                 return
             page0.setProperty("param_table", table)
-            try:
-                table._viewer_instance = viewer_instance
-                table._current_tab_name = pno_label
-                table.setProperty('gk_code_candidates', filtered_component_opts)
-            except Exception:
-                pass
         else:
-            # 创建新的tab页（设备法兰紧固件使用 tabWidget_3）
-            from PyQt5 import QtWidgets, QtCore
-            try:
-                from modules.cailiaodingyi.controllers.table import CustomHeaderView
-            except Exception:
-                CustomHeaderView = None
-            insert_pos = None
-            last_is_plus = (tw.count() > 0 and tw.tabText(tw.count() - 1).strip() in {"+", "＋"})
-            insert_pos = tw.count() - 1 if last_is_plus else tw.count()
-            insert_pos = max(0, insert_pos)
-            page = QtWidgets.QWidget()
-            table = QTableWidget()
-            if CustomHeaderView:
-                table.setHorizontalHeader(CustomHeaderView(QtCore.Qt.Horizontal, table))
-            table.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-            main_layout = QtWidgets.QVBoxLayout(page)
-            w0 = tw.widget(0) if tw.count() > 0 else None
-            if w0 and w0.layout():
-                m = w0.layout().contentsMargins()
-                main_layout.setContentsMargins(m.left(), m.top(), m.right(), m.bottom())
-                main_layout.setSpacing(w0.layout().spacing())
-                page.setStyleSheet(w0.styleSheet())
-                mp = w0.contentsMargins()
-                page.setContentsMargins(mp.left(), mp.top(), mp.right(), mp.bottom())
-            else:
-                main_layout.setContentsMargins(9, 6, 9, 6)
-                main_layout.setSpacing(6)
-            main_layout.addWidget(table)
-            tw.insertTab(insert_pos, page, pno_label)
-            tw.setCurrentIndex(insert_pos)
+            # 创建新的tab页
+            page, table = viewer_instance._new_param_tab_like_default(pno_label)
             page.setProperty("param_table", table)
-            try:
-                table._viewer_instance = viewer_instance
-                table._current_tab_name = pno_label
-                table.setProperty('gk_code_candidates', filtered_component_opts)
-            except Exception:
-                pass
-
+        
         # 保存到字典
         viewer_instance.dynamic_fastener_param_tabs[pno_label] = table
-
+        
         # 渲染数据到表格
         _render_fastener_table_data(table, data, param_structures, dropdown_options, max_cols, viewer_instance)
-
+        
         print(f"[DBG][fastener_render] 完成渲染 {pno_label}，共 {table.rowCount()} 行")
-
-    try:
-        from modules.cailiaodingyi.controllers.add_tab import PlusTabManager
-        from modules.cailiaodingyi.controllers.datamanager import _add_single_fastener_tab_copy_only, _on_fastener_tab_right_menu
-        if hasattr(viewer_instance, 'fastener_plus_mgr'):
-            try:
-                viewer_instance.fastener_plus_mgr.tw.tabBar().tabBarClicked.disconnect()
-                viewer_instance.fastener_plus_mgr.tw.removeEventFilter(viewer_instance.fastener_plus_mgr)
-                viewer_instance.fastener_plus_mgr.tw.tabBar().removeEventFilter(viewer_instance.fastener_plus_mgr)
-            except Exception:
-                pass
-            del viewer_instance.fastener_plus_mgr
-
-        def wrapper_add_fastener(src_idx, src_name):
-            return _add_single_fastener_tab_copy_only(viewer_instance, src_idx, src_name)
-        viewer_instance.fastener_plus_mgr = PlusTabManager(tw, wrapper_add_fastener)
-        try:
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(100, lambda: (viewer_instance.fastener_plus_mgr.refresh_after_model_change(), viewer_instance.fastener_plus_mgr.update_mode()))
-        except Exception:
-            pass
-        try:
-            from PyQt5.QtCore import Qt
-            if not getattr(tw.tabBar(), "_fastener_context_wired", False):
-                tw.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
-                tw.tabBar().customContextMenuRequested.connect(lambda pos: _on_fastener_tab_right_menu(viewer_instance, pos))
-                setattr(tw.tabBar(), "_fastener_context_wired", True)
-        except Exception as e:
-            print(f"[DBG][fastener_render] 右键菜单绑定失败: {e}")
-    except Exception as e:
-        print(f"[DBG][fastener_render] 初始化PlusTabManager失败: {e}")
-
-    try:
-        refresh_fastener_belonging_candidates(viewer_instance)
-    except Exception as e:
-        print(f"[DBG][fastener_render] 初次刷新候选失败: {e}")
+    
+    # 设置+号tab页的复制逻辑 - 复制最后一个PNO tab而不是管口tab
+    if hasattr(viewer_instance, '_add_single_table_tab_copy_only'):
+        # 重写复制函数，让它复制设备法兰紧固件的PNO tab
+        original_copy_func = viewer_instance._add_single_table_tab_copy_only
+        
+        def fastener_copy_func(source_tab_name, insert_after_index):
+            # 获取最后一个PNO tab作为源
+            pno_tabs = list(param_map.keys())
+            if pno_tabs:
+                last_pno = pno_tabs[-1]  # 使用最后一个PNO作为源
+                print(f"[DBG][fastener_render] +号tab复制源: {last_pno}")
+                # 调用原始的复制函数，但使用PNO tab作为源
+                return original_copy_func(last_pno, insert_after_index)
+            else:
+                return original_copy_func(source_tab_name, insert_after_index)
+        
+        viewer_instance._add_single_table_tab_copy_only = fastener_copy_func
 
 
 def _render_fastener_table_data(table, data, param_structures, dropdown_options, max_cols, viewer_instance=None):
     """渲染设备法兰紧固件数据到表格"""
     from PyQt5.QtWidgets import QTableWidgetItem, QComboBox, QLineEdit
     from PyQt5.QtCore import Qt
-
+    
     # 定义辅助函数
     def ensure_editable_item(r, c, txt=""):
         it = table.item(r, c)
@@ -1633,7 +1524,7 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
         it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
         it.setText(txt)
         return it
-
+    
     def ensure_readonly_item(r, c, txt=""):
         it = table.item(r, c)
         if it is None:
@@ -1642,59 +1533,35 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
         it.setTextAlignment(Qt.AlignCenter)
         it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         it.setText(txt)
+        it.setBackground(Qt.lightGray)
         return it
+    
+    # 定义ComboDelegate
+    class ComboDelegate(QStyledItemDelegate):
+        def __init__(self, options, parent_table):
+            super().__init__(parent_table)
+            self.options = options
 
-    def _normalize(v):
-        s = "" if v is None else str(v).strip()
-        return "" if s.lower() == "null" else s
+        def createEditor(self, parent, option, index):
+            combo = QComboBox(parent)
+            combo.addItems(self.options)
+            combo.setEditable(False)
+            combo.currentTextChanged.connect(lambda: self.commitData.emit(combo))
+            return combo
 
-    def _first_non_empty(d):
-        for k in sorted(d.keys()):
-            s = _normalize(d.get(k, ""))
-            if s:
-                return s
-        return ""
+        def setEditorData(self, editor, index):
+            text = index.data() or ""
+            if text in self.options:
+                editor.setCurrentText(text)
+            else:
+                editor.setCurrentIndex(0)
 
-    def _is_empty_belonging_text(s):
-        s = (s or "").strip()
-        if not s:
-            return True
-        if s in ("[]", "—", "请选择"):
-            return True
-        if s.lower() in ("null", "none"):
-            return True
-        if s.startswith("[") and s.endswith("]"):
-            try:
-                import json
-                p = json.loads(s)
-                if not p:
-                    return True
-            except Exception:
-                pass
-        parts = [x.strip() for x in s.split("、") if x.strip()]
-        return len(parts) == 0
+        def setModelData(self, editor, model, index):
+            model.setData(index, editor.currentText())
 
-    def _clear_on_empty_belonging():
-        try:
-            table.blockSignals(True)
-            bases = ["材料类型", "材料牌号", "材料标准", "供货状态"]
-            for r in range(table.rowCount()):
-                it0 = table.item(r, 0)
-                if not it0:
-                    continue
-                nm = (it0.text() or "").strip()
-                if nm in bases or any(nm.startswith(b) for b in bases):
-                    for c in range(1, max_cols):
-                        itv = table.item(r, c)
-                        if itv:
-                            itv.setText("")
-                if nm == "螺柱型式":
-                    itv1 = table.item(r, 1)
-                    if itv1:
-                        itv1.setText("")
-        finally:
-            table.blockSignals(False)
-
+        def updateEditorGeometry(self, editor, option, index):
+            editor.setGeometry(option.rect)
+    
     table.clear()
     table.setRowCount(0)
     table.setColumnCount(max_cols)
@@ -1702,26 +1569,48 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
     table.horizontalHeader().setVisible(False)  # 隐藏表头
     table.setSelectionBehavior(QTableWidget.SelectItems)
     table.setSelectionMode(QTableWidget.ExtendedSelection)
-    table.setEditTriggers(QAbstractItemView.SelectedClicked)
-
+    table.setEditTriggers(QAbstractItemView.SelectedClicked)  # 允许点击编辑
+    
+    # 设置表格样式，使其与管口表格一致
+    table.setAlternatingRowColors(False)
+    table.setStyleSheet("""
+        QTableWidget {
+            gridline-color: #d0d0d0;
+            background-color: white;
+        }
+        QTableWidget::item {
+            border: 1px solid #d0d0d0;
+            padding: 4px;
+        }
+        QTableWidget::item:selected {
+            background-color: #e3f2fd;
+        }
+    """)
+    
+    # 设置表格大小策略，确保表格可见
+    from PyQt5.QtWidgets import QSizePolicy
+    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    table.setMinimumSize(400, 200)  # 设置最小尺寸
+    
+    # 安装过滤器
     flt = ComboPopupEventFilter(table)
     table._popup_filter = flt
     table.viewport().installEventFilter(flt)
-
+    
     # 创建数据映射 - 支持多列数据格式
     display_map = {}
     if data:
         for item in data:
             param_name = item.get('参数名称', '')
-            param_value = _normalize(item.get('参数值', ''))
-
+            param_value = item.get('参数值', '')
+            
             # 检查是否是带数字后缀的参数名（如"元件类型1"、"元件类型2"）
             import re
             match = re.match(r'^(.*?)(\d+)$', param_name)
             if match:
                 base_name, col_index = match.groups()
                 col_index = int(col_index)
-
+                
                 # 如果是多列参数，创建字典结构
                 if base_name not in display_map:
                     display_map[base_name] = {}
@@ -1761,88 +1650,91 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
                 display_map[param_name] = {1: "螺柱", 2: "螺母"}
             else:
                 display_map[param_name] = ""  # 其他字段为空
-
+    
     # 渲染参数
     for param_name, structure, control_type, prefix in param_structures:
         row = table.rowCount()
         table.insertRow(row)
-
+        
         # 左侧名称列
         label_item = QTableWidgetItem(param_name)
         label_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         table.setItem(row, 0, label_item)
-
+        
         option_key = prefix or param_name
         options = dropdown_options.get(option_key, [])
         value = display_map.get(param_name, "")
-
+        
         if structure == "2列":
             table.setSpan(row, 1, 1, 3)
-
+            
             if control_type == "combo":
-                display_val = _first_non_empty(value) if isinstance(value, dict) else _normalize(value)
-                item = QTableWidgetItem(display_val)
+                item = QTableWidgetItem(str(value))
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
                 table.setItem(row, 1, item)
-
+                
+                # 特殊处理：只有元件名称设为只读
                 if param_name == "元件名称":
-                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-
+                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)  # 移除可编辑标志
+                    item.setBackground(Qt.lightGray)
+                
                 if options:
-                    if param_name == "元件所属":
-                        table.setItemDelegateForRow(row, CheckComboDelegate(options, table))
-                    else:
-                        table.setItemDelegateForRow(row, MultiSelectRowComboDelegate(options, table))
-
+                    table.setItemDelegateForRow(row, ComboDelegate(options, table))
+                    
             elif control_type == "text":
-                display_val = _first_non_empty(value) if isinstance(value, dict) else _normalize(value)
-                item = QTableWidgetItem(display_val)
+                item = QTableWidgetItem(str(value))
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
                 table.setItem(row, 1, item)
-
+                
+                # 特殊处理：元件名称设为只读
                 if param_name == "元件名称":
-                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-
+                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)  # 移除可编辑标志
+                    item.setBackground(Qt.lightGray)
+                    
+                # 表面处理工艺特殊处理
                 if param_name == "表面处理工艺":
-                    item.setText("/")
-                    item.setVisible(False)
-
+                    item.setText("/")  # 默认值
+                    item.setVisible(False)  # 隐藏处理
+                    
         elif structure == "3列":
+            # 3列结构：除"元件名称"外，始终显示两格（参数值1、参数值2），不合并，避免清空后看起来变成单列
             value_map = display_map.get(param_name, {})
             if not isinstance(value_map, dict):
                 value_map = {}
 
             if param_name == "元件名称":
+                # 元件名称只读，跨两列显示
                 table.setSpan(row, 1, 1, 2)
                 val = value_map.get(1, "") if value_map else display_map.get(param_name, "")
                 display_val = str(val) if val and str(val) != "null" else ""
                 ensure_readonly_item(row, 1, display_val)
             else:
-                if param_name == "螺柱型式":
-                    val1 = value_map.get(1, "")
-                    display_val1 = str(val1) if val1 and str(val1) != "null" else ""
-                    ensure_editable_item(row, 1, display_val1)
-                    ensure_readonly_item(row, 2, "-")
-                else:
-                    for col in range(1, 3):
-                        val = value_map.get(col, "")
-                        display_val = str(val) if val and str(val) != "null" else ""
-                        if param_name == "元件类型":
-                            ensure_readonly_item(row, col, display_val or ("螺柱" if col == 1 else "螺母"))
-                        else:
-                            ensure_editable_item(row, col, display_val)
-
-            if options:
+                # 始终提供两个可编辑单元格
+                for col in range(1, 3):
+                    val = value_map.get(col, "")
+                    display_val = str(val) if val and str(val) != "null" else ""
+                    if param_name == "元件类型":
+                        # 两列均只读，不允许用户单独编辑
+                        ensure_readonly_item(row, col, display_val or ("螺柱" if col == 1 else "螺母"))
+                    else:
+                        ensure_editable_item(row, col, display_val)
+            
+            # 为3列结构安装委托 - 材料字段由联动逻辑处理，其他字段使用ComboDelegate
+            if options and control_type == "combo":
+                # 材料字段由材料联动逻辑处理，不安装ComboDelegate
                 material_fields = ["材料类型", "材料牌号", "材料标准", "供货状态"]
-                if control_type == "combo":
-                    if param_name not in material_fields and param_name != "元件类型":
-                        table.setItemDelegateForRow(row, MultiSelectRowComboDelegate(options, table))
-                elif control_type == "checkcombo":
-                    table.setItemDelegateForRow(row, CheckComboDelegate(options, table))
-
+                if param_name not in material_fields:
+                    # "元件类型"固定，不安装下拉委托
+                    if param_name != "元件类型":
+                        table.setItemDelegateForRow(row, ComboDelegate(options, table))
+                    print(f"[DBG][fastener_render] 为{param_name}安装下拉框委托，选项: {options}")
+                else:
+                    print(f"[DBG][fastener_render] {param_name}由材料联动逻辑处理，跳过ComboDelegate")
+                    
         elif structure == "4列":
+            # 4列结构处理
             value_map = display_map.get(param_name, {})
             if not isinstance(value_map, dict):
                 value_map = {}
@@ -1852,33 +1744,51 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
                 table.setItem(row, col, item)
-
+            
             if options:
-                material_fields = ["材料类型", "材料牌号", "材料标准", "供货状态"]
                 if control_type == "combo":
+                    # 材料字段由材料联动逻辑处理，不安装ComboDelegate
+                    material_fields = ["材料类型", "材料牌号", "材料标准", "供货状态"]
                     if param_name not in material_fields:
-                        table.setItemDelegateForRow(row, MultiSelectRowComboDelegate(options, table))
-                elif control_type == "checkcombo":
-                    table.setItemDelegateForRow(row, CheckComboDelegate(options, table))
-
+                        table.setItemDelegateForRow(row, ComboDelegate(options, table))
+                        print(f"[DBG][fastener_render] 为{param_name}安装下拉框委托，选项: {options}")
+                    else:
+                        print(f"[DBG][fastener_render] {param_name}由材料联动逻辑处理，跳过ComboDelegate")
+    
+    # 表头自适应 - 参考管口的设置
     header = table.horizontalHeader()
-    header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+    header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 参数名称列自适应
     for col in range(1, max_cols):
-        header.setSectionResizeMode(col, QHeaderView.Stretch)
-
+        header.setSectionResizeMode(col, QHeaderView.Stretch)  # 其他列平均分配
+    
+    # 设置行高，使其与管口表格一致
+    for row in range(table.rowCount()):
+        table.setRowHeight(row, 30)  # 设置行高为30像素
+    
+    # 调试信息：确保表格正确设置
+    print(f"[DBG][fastener_render] 表格设置完成: 行数={table.rowCount()}, 列数={table.columnCount()}")
+    print(f"[DBG][fastener_render] 表格可见性: {table.isVisible()}, 大小={table.size()}")
+    print(f"[DBG][fastener_render] 表格父控件: {table.parent()}")
+    
+    # 强制刷新表格显示
+    table.update()
+    table.repaint()
+    
     # 安装材料字段联动逻辑 - 使用四联组识别方式，确保列间独立性
     try:
         from modules.cailiaodingyi.funcs.funcs_pdf_render import find_material_groups_fuzzy_strict
         from modules.cailiaodingyi.controllers.combo import MultiSelectDynamicOptionsDelegate
-
+        
+        # 使用四联组识别方式，确保每列有独立的材料联动
         groups, row2field, row2group = find_material_groups_fuzzy_strict(table)
         found_rows = sorted(row2field.keys())
-
+        
         if found_rows:
-            # print(f"[DBG][fastener_render] 识别到材料四联组: {len(groups)} 组，涉及行: {found_rows}")
-
+            print(f"[DBG][fastener_render] 识别到材料四联组: {len(groups)} 组，涉及行: {found_rows}")
+            
+            # 确保可编辑 & 去掉 cellWidget
             for r in found_rows:
-                for c in range(1, max_cols):
+                for c in (1, 2):  # 只处理列1和列2
                     it = table.item(r, c)
                     if it is None:
                         it = QTableWidgetItem("")
@@ -1887,123 +1797,24 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
                     it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
                     if table.cellWidget(r, c):
                         table.setCellWidget(r, c, None)
-
+            
+            # 安装动态代理（只对这些行）
             for r in found_rows:
                 table.setItemDelegateForRow(r, None)
             dyn = MultiSelectDynamicOptionsDelegate(table, groups, row2field, row2group)
             for r in found_rows:
                 table.setItemDelegateForRow(r, dyn)
-            install_copy_paste_shortcuts(table, groups, row2field, row2group)
+            
+            print(f"[DBG][fastener_render] 材料四联组联动逻辑安装完成")
         else:
             print(f"[DBG][fastener_render] 未识别到材料四联组，跳过材料联动逻辑")
-
+        
     except Exception as e:
-        # print(f"[DBG][fastener_render] 材料字段联动逻辑安装失败: {e}")
+        print(f"[DBG][fastener_render] 材料字段联动逻辑安装失败: {e}")
         import traceback
         traceback.print_exc()
-
-    # ===== 设备法兰紧固件：按材料类型控制显隐 =====
-    def _find_row_by_name(tbl, name, col=0):
-        for r in range(tbl.rowCount()):
-            it = tbl.item(r, col)
-            if it and it.text().strip() == name:
-                return r
-        return None
-
-    def _apply_fastener_surface_treatment_visibility():
-        try:
-            type_row = _find_row_by_name(table, "材料类型", 0)
-            target_row = _find_row_by_name(table, "表面处理工艺", 0)
-            if type_row is None or target_row is None:
-                return
-
-            # 读取两列材料类型（3列结构对应两值列）并判断
-            show = False
-            type_vals = []
-            for c in range(1, max_cols):
-                it = table.item(type_row, c)
-                type_vals.append((it.text().strip() if it else ""))
-
-            show = any(tv == "钢棒" for tv in type_vals)
-
-            table.setRowHidden(target_row, not show)
-
-            # 显示时为空则设置默认值“/”以保持一致
-            if show:
-                for c in range(1, max_cols):
-                    vitem = table.item(target_row, c)
-                    if vitem and not (vitem.text() or "").strip():
-                        vitem.setText("/")
-            for c in range(1, max_cols):
-                it = table.item(target_row, c)
-                if it is None:
-                    it = QTableWidgetItem("")
-                    it.setTextAlignment(Qt.AlignCenter)
-                    table.setItem(target_row, c, it)
-                tv = type_vals[c-1] if c-1 < len(type_vals) else ""
-                if tv == "钢棒":
-                    it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
-                else:
-                    it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                    if not (it.text() or "").strip():
-                        it.setText("/")
-        except Exception as _e:
-            print(f"[设备法兰显隐] 表面处理工艺显隐更新失败: {_e}")
-
-    def _apply_fastener_forging_grade_visibility():
-        try:
-            type_row = _find_row_by_name(table, "材料类型", 0)
-            target_row = _find_row_by_name(table, "锻件级别", 0)
-            if type_row is None or target_row is None:
-                return
-
-            type_vals = []
-            for c in range(1, max_cols):
-                it = table.item(type_row, c)
-                type_vals.append((it.text().strip() if it else ""))
-
-            show = any(tv == "钢锻件" for tv in type_vals)
-            table.setRowHidden(target_row, not show)
-
-            if show:
-                for c in range(1, max_cols):
-                    vitem = table.item(target_row, c)
-                    if vitem is None:
-                        vitem = QTableWidgetItem("")
-                        vitem.setTextAlignment(Qt.AlignCenter)
-                        table.setItem(target_row, c, vitem)
-            for c in range(1, max_cols):
-                it = table.item(target_row, c)
-                if it is None:
-                    it = QTableWidgetItem("")
-                    it.setTextAlignment(Qt.AlignCenter)
-                    table.setItem(target_row, c, it)
-                tv = type_vals[c-1] if c-1 < len(type_vals) else ""
-                if tv == "钢锻件":
-                    it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
-                    cur_txt = (it.text() or "").strip()
-                    if cur_txt in {"", "/", "-"}:
-                        try:
-                            cand = dropdown_options.get("锻件级别", []) or []
-                            if "Ⅱ" in cand:
-                                it.setText("Ⅱ")
-                            elif cand:
-                                # 取首个非空候选
-                                it.setText(next((x for x in cand if (x or '').strip()), "/"))
-                            else:
-                                it.setText("/")
-                        except Exception:
-                            it.setText("Ⅱ")
-                else:
-                    it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                    it.setText("-" if show else "/")
-        except Exception as _e:
-            print(f"[设备法兰显隐] 锻件级别显隐更新失败: {_e}")
-
-    # 初次渲染时应用一次显隐规则
-    _apply_fastener_surface_treatment_visibility()
-    _apply_fastener_forging_grade_visibility()
-
+    
+    # 添加事件处理逻辑 - 参考固定鞍座的实现
     def _on_item_changed(item: QTableWidgetItem):
         # 总闸
         if getattr(table, "_loading", False):
@@ -2018,25 +1829,9 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
 
         pname = pitem.text().strip()
         val = (item.text() or "").strip()
-        # print(f"[设备法兰紧固件-参数修改] {pname}={val} (仅UI更新，未保存到数据库)")
+        print(f"[设备法兰紧固件-参数修改] {pname}={val} (仅UI更新，未保存到数据库)")
 
-        # 当材料类型修改时，更新相关显隐
-        if pname == "材料类型":
-            _apply_fastener_surface_treatment_visibility()
-            _apply_fastener_forging_grade_visibility()
-        if pname == "元件所属":
-            try:
-                refresh_fastener_belonging_candidates(viewer_instance)
-            except Exception as _e:
-                print(f"[设备法兰紧固件] 刷新元件所属候选失败: {_e}")
-            if _is_empty_belonging_text(val):
-                _clear_on_empty_belonging()
-
-    def _select_row_first(r, c):
-        table.selectRow(r)
-
-    table.setEditTriggers(QAbstractItemView.SelectedClicked)
-
+    # 单击进入编辑
     def _edit_on_click(r, c):
         idx = table.model().index(r, c)
         it = table.item(r, c)
@@ -2052,135 +1847,14 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
     table.itemChanged.connect(_on_item_changed)
 
     try:
-        table.cellPressed.disconnect()
-    except Exception:
-        pass
-    table.cellPressed.connect(_select_row_first)
-
-    try:
         table.cellClicked.disconnect()
     except Exception:
         pass
     table.cellClicked.connect(_edit_on_click)
-
-    _set_table_tooltips(table)
-    _install_tooltip_updater(table)
-
-    try:
-        r0 = None
-        for r in range(table.rowCount()):
-            it0 = table.item(r, 0)
-            if it0 and (it0.text() or "").strip() == "元件所属":
-                r0 = r
-                break
-        if r0 is not None:
-            itv = table.item(r0, 1)
-            s0 = (itv.text() or "").strip() if itv else ""
-            if _is_empty_belonging_text(s0):
-                _clear_on_empty_belonging()
-    except Exception:
-        pass
+    
+    print(f"[DBG][fastener_render] 事件处理逻辑安装完成")
 
 
-
-
-
-def refresh_fastener_belonging_candidates(viewer_instance):
-    try:
-        all_options = getattr(viewer_instance, 'fastener_component_all_options', []) or []
-        tabs = getattr(viewer_instance, 'dynamic_fastener_param_tabs', {}) or {}
-        if not tabs:
-            return
-        used_by_tab_ui = {}
-        saved_by_tab = {}
-        try:
-            from modules.cailiaodingyi.funcs.funcs_pdf_change import load_updated_fastener_define_data
-            product_id = getattr(viewer_instance, 'product_id', None)
-            element_id = getattr(viewer_instance, 'current_fastener_element_id', None) or getattr(viewer_instance, 'current_element_id', None)
-            data2 = load_updated_fastener_define_data(product_id, element_id)
-            for item in data2 or []:
-                name = str(item.get('参数名称', '')).strip()
-                val = str(item.get('参数值', '') or '').strip()
-                tabc = str(item.get('Tab分类', '') or '').strip()
-                if not tabc:
-                    continue
-                if not val or val.lower() == 'null':
-                    continue
-                if name == '元件所属' or name.startswith('元件所属'):
-                    vals = []
-                    if val.startswith('['):
-                        import json
-                        try:
-                            parsed = json.loads(val)
-                            if isinstance(parsed, list):
-                                vals = [str(x).strip() for x in parsed if str(x).strip()]
-                        except Exception:
-                            vals = []
-                    if not vals:
-                        vals = [x.strip() for x in val.split('、') if x.strip()]
-                    s = saved_by_tab.setdefault(tabc, set())
-                    for x in vals:
-                        s.add(x)
-        except Exception:
-            saved_by_tab = getattr(viewer_instance, 'fastener_belonging_used_by_tab_saved', {}) or {}
-        from PyQt5.QtWidgets import QTableWidgetItem
-        from PyQt5.QtCore import Qt
-        def _find_row(tbl, name):
-            for r in range(tbl.rowCount()):
-                it = tbl.item(r, 0)
-                if it and it.text().strip() == name:
-                    return r
-            return None
-        import json
-        for tab_name, tbl in tabs.items():
-            r = _find_row(tbl, '元件所属')
-            sel = set()
-            if r is not None:
-                it = tbl.item(r, 1)
-                txt = (it.text() or '').strip() if it else ''
-                vals = []
-                if txt.startswith('['):
-                    try:
-                        parsed = json.loads(txt)
-                        if isinstance(parsed, list):
-                            vals = [str(x).strip() for x in parsed if str(x).strip()]
-                    except Exception:
-                        vals = []
-                if not vals:
-                    vals = [x.strip() for x in txt.split('、') if x.strip()]
-                sel = set(vals)
-            used_by_tab_ui[tab_name] = sel
-        for tab_name, tbl in tabs.items():
-            already = set()
-            for t, vs in saved_by_tab.items():
-                if t != tab_name:
-                    already |= (vs or set())
-            filtered = [x for x in all_options if x not in already]
-            curr = used_by_tab_ui.get(tab_name, set()) or set()
-            for v in curr:
-                if v and v not in filtered:
-                    filtered.append(v)
-            try:
-                tbl.setProperty('gk_code_candidates', filtered)
-            except Exception:
-                pass
-            r = _find_row(tbl, '元件所属')
-            if r is None:
-                continue
-            it = tbl.item(r, 1)
-            if it is None:
-                it = QTableWidgetItem('')
-                it.setTextAlignment(Qt.AlignCenter)
-                it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
-                tbl.setItem(r, 1, it)
-            from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
-            from modules.cailiaodingyi.controllers.combo import MultiSelectRowComboDelegate
-            if filtered:
-                tbl.setItemDelegateForRow(r, CheckComboDelegate(filtered, tbl))
-            else:
-                tbl.setItemDelegateForRow(r, None)
-    except Exception as e:
-        print(f"[设备法兰紧固件] 刷新候选失败: {e}")
 
 
 

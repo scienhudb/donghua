@@ -68,7 +68,6 @@ from modules.chanpinguanli import chanpinguanli_main
 from modules.chanpinguanli.chanpinguanli_main import product_manager
 from modules.condition_input.funcs.funcs_cdt_input import sync_corrosion_to_guankou_param
 from modules.condition_input.view import DesignConditionInputViewer, check_project_and_product
-from modules.condition_input.view import check_project_and_product
 from modules.guankoudingyi.dynamically_adjust_ui import Stats
 
 product_id = None
@@ -86,7 +85,8 @@ product_manager.product_id_changed.connect(on_product_id_changed)
 class DesignParameterDefineInputerViewer(QWidget):
     def __init__(self, line_tip=None, main_window=None):
         super().__init__()
-        # # 0903会议纪要 首先进行项目和产品检查
+
+        # 0903会议纪要 首先进行项目和产品检查
         # print("准备检查项目和产品状态...")
         # can_open, msg = check_project_and_product()
         # if not can_open:
@@ -97,15 +97,6 @@ class DesignParameterDefineInputerViewer(QWidget):
         self.line_tip = line_tip
         self.main_window = main_window
         self.guankou_define_info = None
-
-        # # 使用绝对路径加载UI文件，避免工作目录变化导致的问题
-        # import os
-        # current_dir = os.path.dirname(os.path.abspath(__file__))
-        # ui_path = os.path.join(current_dir, "ui", "paradefine.ui")
-        # self.ui = uic.loadUi(ui_path, self)
-        # self.init_widgets()  # 获取所有控件、绑定事件
-        # self.product_id = product_id
-
         self.ui = uic.loadUi("modules/cailiaodingyi/ui/paradefine.ui", self)  # 加载UI文件
         self.init_widgets()  # 获取所有控件、绑定事件
         self.product_id = product_id
@@ -173,21 +164,19 @@ class DesignParameterDefineInputerViewer(QWidget):
         self.pushButton_guankou_clear = self.findChild(QPushButton, "pushButton_6")
         self.pushButton_guankou_clear.clicked.connect(lambda: on_clear_guankou_param_update(self))
 
-
-
-        # 合并元件的清空
+        # 固定鞍座元件的清空
         self.pushButton_fixed_saddle_clear = self.findChild(QPushButton, "pushButton_10")  # 假设按钮ID为pushButton_10
         if self.pushButton_fixed_saddle_clear:
-            from modules.cailiaodingyi.controllers.datamanager import on_clear_element_merged_para_update
-            self.pushButton_fixed_saddle_clear.clicked.connect(lambda: on_clear_element_merged_para_update(self))
+            from modules.cailiaodingyi.controllers.datamanager import on_clear_fixed_saddle_param_update
+            self.pushButton_fixed_saddle_clear.clicked.connect(lambda: on_clear_fixed_saddle_param_update(self))
         
-        # 合并元件的确定
+        # 固定鞍座元件的确定
         self.pushButton_fixed_saddle_confirm = self.findChild(QPushButton, "pushButton_11")  # 假设按钮ID为pushButton_11
         if self.pushButton_fixed_saddle_confirm:
-            from modules.cailiaodingyi.controllers.datamanager import on_confirm_element_merged_para_param
-            self.pushButton_fixed_saddle_confirm.clicked.connect(lambda: on_confirm_element_merged_para_param(self))
+            from modules.cailiaodingyi.controllers.datamanager import on_confirm_fixed_saddle_param
+            self.pushButton_fixed_saddle_confirm.clicked.connect(lambda: on_confirm_fixed_saddle_param(self))
 
-        # 11.16设备法兰
+
         # 设备法兰紧固件 清空/确定
         self.pushButton_fastener_clear = self.findChild(QPushButton, "pushButton_12")
         if self.pushButton_fastener_clear:
@@ -198,6 +187,7 @@ class DesignParameterDefineInputerViewer(QWidget):
         if self.pushButton_fastener_confirm:
             from modules.cailiaodingyi.controllers.datamanager import on_confirm_fastener_param
             self.pushButton_fastener_confirm.clicked.connect(lambda: on_confirm_fastener_param(self))
+
 
 
 
@@ -1129,10 +1119,6 @@ class DesignParameterDefineInputerViewer(QWidget):
             element_para_info = query_template_element_para_data(first_template_id)
             insert_element_para_data(product_id, element_para_info)
 
-            # 批量插入元件附加参数合并表数据（包括支座）
-            from modules.cailiaodingyi.controllers.datamanager import batch_insert_element_merged_para_data
-            batch_insert_element_merged_para_data(product_id, first_template_id, template_name)
-
             #加载布管参数表至数据库
             init_buguan_defaults(product_id)
 
@@ -1163,7 +1149,13 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         if has_product(product_id):
 
-            # 构建 param_map -> 渲染（不在打开时自动覆盖腐蚀裕量）
+            # 同步腐蚀裕量
+            category_labels = query_all_guankou_categories(product_id)
+            print(f"[DBG] 准备同步腐蚀裕量的分类：{category_labels}")
+            for category_label in category_labels:
+                guankou_codes = query_guankou_codes(self.product_id, category_label) or []
+                print(f"[DBG] 产品 {self.product_id}, 分类 {repr(category_label)} 的管口号: {guankou_codes}")
+                sync_corrosion_to_guankou_param(product_id, guankou_codes, category_label)
 
             # 构建 param_map -> 渲染
             labels = query_all_guankou_categories(self.product_id) or ["管口材料分类1"]
@@ -1659,7 +1651,6 @@ class DesignParameterDefineInputerViewer(QWidget):
 
             if part_name == "管口":
                 self.stackedWidget.setCurrentIndex(0)  # 管口页面
-            # 11.16设备法兰
             elif part_name == "设备法兰紧固件":
                 self.stackedWidget.setCurrentIndex(3)  # page_4 - 设备法兰紧固件页面
                 try:
@@ -1678,9 +1669,30 @@ class DesignParameterDefineInputerViewer(QWidget):
                 except Exception as e:
                     print(f"[设备法兰紧固件] 数据加载失败: {e}")
                     return
-            elif part_name in ["支座", "铭牌", "保温支撑"]:  # 支座和铭牌支架使用同一个UI界面  # 新增保温支撑
+            elif part_name == "固定鞍座":  # 只有固定鞍座才使用特殊渲染
                 self.stackedWidget.setCurrentIndex(2)  # 鞍座页面 (page_3)
                 print(f"[调试] 跳转到鞍座页面: {part_name}")
+                
+                # ✅ 新增：加载固定鞍座数据
+                try:
+                    element_id = self.element_data[row].get("元件ID")
+                    print(f"[调试] 元件ID: {element_id}")
+                    
+                    # 导入数据加载函数
+                    from modules.cailiaodingyi.controllers.datamanager import load_fixed_saddle_data_by_product, render_fixed_saddle_data_to_ui
+                    
+                    # 加载数据
+                    saddle_data = load_fixed_saddle_data_by_product(self.product_id, element_id)
+                    print(f"[调试] 加载的鞍座数据: {len(saddle_data)} 条")
+                    
+                    # 存储数据到实例变量
+                    self.fixed_saddle_data = saddle_data
+                    
+                    # 渲染数据到UI
+                    render_fixed_saddle_data_to_ui(self, saddle_data)
+                    
+                except Exception as e:
+                    print(f"[固定鞍座] 数据加载失败: {e}")
             elif "鞍座" in part_name:  # 其他鞍座类型（如滑动鞍座）使用普通渲染
                 self.stackedWidget.setCurrentIndex(1)  # 其他元件页面
             else:

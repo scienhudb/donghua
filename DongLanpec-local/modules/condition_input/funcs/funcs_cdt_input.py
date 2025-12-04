@@ -1,8 +1,10 @@
 from openpyxl.styles import Alignment
 
-
 from modules.cailiaodingyi.funcs.funcs_pdf_change import update_element_name_data, \
-    get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions
+    get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions, query_guankou_codes
+from modules.cailiaodingyi.funcs.funcs_pdf_input import query_all_guankou_categories
+# from modules.cailiaodingyi.funcs.funcs_pdf_change import update_element_name_data, \
+#     get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions
 from modules.condition_input.funcs.db_cnt import get_connection
 from PyQt5.QtWidgets import (QTableWidgetItem, QTableWidget, QHeaderView, QWidget,
                              QMessageBox, QUndoStack, QFileDialog, QComboBox, QStyledItemDelegate, QShortcut)
@@ -1286,6 +1288,15 @@ def save_all_tables(viewer, product_id):
 
         sync_design_params_to_element_params(product_id)
 
+        # 1124新修改-保存时增加元件定义腐蚀裕量同步
+        try:
+            labels = query_all_guankou_categories(product_id) or ["管口材料分类1"]
+            for label in labels:
+                codes = query_guankou_codes(product_id, label) or []
+                sync_corrosion_to_guankou_param(product_id, codes, label)
+        except Exception as e:
+            print(f"[警告] 设计数据保存后的腐蚀裕量同步失败: {e}")
+
         save_data_to_database(
             get_table_data(viewer.tableWidget_general_data),
             product_id,
@@ -1458,10 +1469,10 @@ def validate_design_table_cell(param_name: str, column_name: str, value: str, li
             ("耐压试验类型*", "管程数值"): check_trail_stand_pressure_type,
             ("耐压试验温度", "壳程数值"): check_pressure_test_temp,
             ("耐压试验温度", "管程数值"): check_pressure_test_temp,
-            ("沿长度平均的换热管金属温度*", "壳程数值"): check_avg_tube_metal_temp,
+            # ("沿长度平均的换热管金属温度*", "壳程数值"): check_avg_tube_metal_temp,
             ("沿长度平均的换热管金属温度*", "管程数值"): check_avg_tube_metal_temp,
-            ("沿长度平均的壳程圆筒金属温度*", "壳程数值"): check_avg_shell_metal_temp,
-            ("沿长度平均的壳程圆筒金属温度*", "管程数值"): check_avg_shell_metal_temp
+            ("沿长度平均的壳程圆筒金属温度*", "壳程数值"): check_avg_shell_metal_temp
+            # ("沿长度平均的壳程圆筒金属温度*", "管程数值"): check_avg_shell_metal_temp
 
         }
 

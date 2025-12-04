@@ -39,6 +39,12 @@ class CheckComboDelegate(QStyledItemDelegate):
 
         combo.setModel(model)
         combo.setCurrentIndex(0)
+        #11.19 设备法兰复选框新增
+        try:
+            setattr(combo, "_delegate_index", index)
+            setattr(combo, "_delegate_model", index.model())
+        except Exception:
+            pass
 
         # 点击仅切换勾选，不改变 currentIndex，不关闭 popup；随后再自动弹出
         combo.view().pressed.connect(lambda mi: self._on_pressed(mi, combo))
@@ -89,6 +95,31 @@ class CheckComboDelegate(QStyledItemDelegate):
         it = combo.model().item(row)
         it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
         self._update_display_text(combo)
+        #11.19 设备法兰复选框新增
+        # 立即提交数据，避免必须回车/切焦
+        try:
+            self.commitData.emit(combo)
+        except Exception:
+            pass
+        # 同步写回模型与表格单元格文本
+        try:
+            txt = self._selected_text(combo)
+            idx = getattr(combo, "_delegate_index", None)
+            mdl = getattr(combo, "_delegate_model", None)
+            if idx is not None and mdl is not None:
+                mdl.setData(idx, txt, Qt.EditRole)
+            if self.table is not None and idx is not None:
+                r, c = idx.row(), idx.column()
+                it2 = self.table.item(r, c)
+                if it2 is None:
+                    it2 = QTableWidgetItem()
+                    it2.setTextAlignment(Qt.AlignCenter)
+                    it2.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+                    self.table.setItem(r, c, it2)
+                it2.setText(txt)
+        except Exception:
+            pass
+
         combo.setCurrentIndex(0)
         # 关键：保持下拉不关闭，立刻再弹出
         QTimer.singleShot(0, combo.showPopup)
