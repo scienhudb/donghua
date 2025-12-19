@@ -1142,7 +1142,9 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
                 table.setItem(row, 1, item)
                 if options:
-                    table.setItemDelegateForRow(row, CheckComboDelegate(options, table))
+                    # 管口号启用"全选"功能，其他参数不启用
+                    enable_select_all = (param_name == "管口号")
+                    table.setItemDelegateForRow(row, CheckComboDelegate(options, table, enable_select_all=enable_select_all))
 
             elif control_type == "empty":
                 item = QTableWidgetItem("")
@@ -1168,7 +1170,9 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                 if control_type == "combo":
                     table.setItemDelegateForRow(row, MultiSelectRowComboDelegate(opts, table))
                 elif control_type == "checkcombo":
-                    table.setItemDelegateForRow(row, CheckComboDelegate(opts, table))
+                    # 管口号启用"全选"功能，其他参数不启用
+                    enable_select_all = (param_name == "管口号")
+                    table.setItemDelegateForRow(row, CheckComboDelegate(opts, table, enable_select_all=enable_select_all))
 
         if param_name in NUM_GE0 or param_name in NUM_GT0:
             rule = "ge0" if param_name in NUM_GE0 else "gt0"

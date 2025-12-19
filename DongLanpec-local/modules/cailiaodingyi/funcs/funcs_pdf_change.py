@@ -26,6 +26,15 @@ db_config_2 = {
     'database': '材料库'
 }
 
+# [性能优化] 以下缓存用于减少数据库重复查询，加快垫片相关联动与校核响应
+_DESIGN_ROWS_CACHE = {}
+_GASKET_MAPPING_CACHE = {}
+_GASKET_MAPPINGS_ALL_CACHE = {}
+_MAP_GTYPE_CACHE = {}
+_GASKET_DIM_CACHE = {}
+_FLANGE_MATERIAL_CACHE = {}
+_COMPUTE_PN_CACHE = {}
+
 def load_element_additional_data(template_id, element_id):
 
     """根据元件ID和模板ID查询元件附加参数表"""
@@ -2408,7 +2417,7 @@ def get_dn_by_side(product_id: str, side: str) -> str:
     return ""
 
 
-def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard: str) -> dict:
+def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard: str, gasket_material: str = "") -> dict:
     """
     返回:
     {
@@ -2420,32 +2429,66 @@ def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard:
     """
     t = (gasket_type or "").strip()
     st = (gasket_standard or "").strip()
-    if not t or not st:
+    gm = (gasket_material or "").strip()
+    if not (t and st) and not gm:
         return {}
 
     conn = get_connection(**db_config_2)  # 材料库
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             # 取候选材料
-            sql_mats = """
-                SELECT DISTINCT 垫片材料
-                FROM 垫片定义表
-                WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s)
-                ORDER BY 垫片材料
-            """
-            cur.execute(sql_mats, (t, st, f"%{st}%"))
-            mats = [ (row.get("垫片材料") or "").strip() for row in cur.fetchall() if (row.get("垫片材料") or "").strip() ]
+            mats = []
+            if t and st:
+                sql_mats = """
+                    SELECT DISTINCT 垫片材料
+                    FROM 垫片定义表
+                    WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s)
+                    ORDER BY 垫片材料
+                """
+                cur.execute(sql_mats, (t, st, f"%{st}%"))
+                mats = [ (row.get("垫片材料") or "").strip() for row in cur.fetchall() if (row.get("垫片材料") or "").strip() ]
 
-            # 取 y/m（优先精确命中）
-            sql_ym = """
-                SELECT 垫片比压力y, 垫片系数m
-                FROM 垫片定义表
-                WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s)
-                ORDER BY CASE WHEN 垫片标准=%s THEN 0 ELSE 1 END
-                LIMIT 1
-            """
-            cur.execute(sql_ym, (t, st, f"%{st}%", st))
-            ym = cur.fetchone() or {}
+            # 取 y/m（优先精确命中当前材料；未命中则回退类型+标准）
+            ym = {}
+
+            # 1) 类型+标准+材料 优先
+            if t and st and gm:
+                sql_ym = """
+                    SELECT 垫片比压力y, 垫片系数m
+                    FROM 垫片定义表
+                    WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s) AND 垫片材料=%s
+                    ORDER BY CASE WHEN 垫片标准=%s THEN 0 ELSE 1 END
+                    LIMIT 1
+                """
+                cur.execute(sql_ym, (t, st, f"%{st}%", gm, st))
+                ym = cur.fetchone() or {}
+
+            # 2) 类型+标准 回退
+            if (not ym) and t and st:
+                cur.execute(
+                    """
+                    SELECT 垫片比压力y, 垫片系数m
+                    FROM 垫片定义表
+                    WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s)
+                    ORDER BY CASE WHEN 垫片标准=%s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (t, st, f"%{st}%", st),
+                )
+                ym = cur.fetchone() or {}
+
+            # 3) 仅按材料查（当类型/标准缺失或前面未命中）
+            if (not ym) and gm:
+                cur.execute(
+                    """
+                    SELECT 垫片比压力y, 垫片系数m
+                    FROM 垫片定义表
+                    WHERE 垫片材料=%s
+                    LIMIT 1
+                    """,
+                    (gm,),
+                )
+                ym = cur.fetchone() or {}
 
             def _fmt(v):
                 return "" if v in (None, "") else str(v)
@@ -2463,7 +2506,13 @@ def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard:
 
 
 
+# [性能优化] 设计压力行集查询结果按产品ID进行进程内缓存
 def _fetch_design_rows(product_id: str):
+    key = product_id
+    if key in _DESIGN_ROWS_CACHE:
+        # 命中缓存直接返回，避免重复查询
+        rows = _DESIGN_ROWS_CACHE.get(key) or []
+        return rows
     conn = get_connection(**db_config_1)
     try:
         with conn.cursor() as cur:
@@ -2473,7 +2522,9 @@ def _fetch_design_rows(product_id: str):
                 WHERE 产品ID=%s AND 参数名称='设计压力*'
             """
             cur.execute(sql, (product_id,))
-            return cur.fetchall() or []
+            rows = cur.fetchall() or []
+            _DESIGN_ROWS_CACHE[key] = rows
+            return rows
     finally:
         conn.close()
 
@@ -2568,6 +2619,7 @@ def get_dn_for_outer_head_cylinder(product_id: str) -> str:
 
 
 
+# [性能优化] 垫片-法兰映射按垫片名称缓存，减少重复读取
 def get_gasket_mapping(gasket_name: str) -> dict:
     """
     FROM 材料库.垫片配套法兰映射表
@@ -2576,6 +2628,10 @@ def get_gasket_mapping(gasket_name: str) -> dict:
     res = {"flange": "", "flange_side": "", "gasket_side": ""}
     if not gasket_name:
         return res
+    key = (gasket_name.strip(),)
+    if key in _GASKET_MAPPING_CACHE:
+        cached = _GASKET_MAPPING_CACHE.get(key) or {}
+        return cached or res
     conn = get_connection(**db_config_2)
     try:
         with conn.cursor() as cur:
@@ -2592,6 +2648,40 @@ def get_gasket_mapping(gasket_name: str) -> dict:
                 res["gasket_side"] = (row.get("垫片管壳程") or "").strip()
     finally:
         conn.close()
+    _GASKET_MAPPING_CACHE[key] = res
+    return res
+
+
+# [性能优化] 垫片-法兰映射(全量)按垫片名称缓存
+def get_gasket_mappings_all(gasket_name: str) -> list:
+    res = []
+    if not gasket_name:
+        return res
+    key = (gasket_name.strip(),)
+    if key in _GASKET_MAPPINGS_ALL_CACHE:
+        cached = _GASKET_MAPPINGS_ALL_CACHE.get(key) or []
+        return cached
+    conn = get_connection(**db_config_2)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 配套法兰, 法兰管壳程, 垫片管壳程
+                FROM 垫片配套法兰映射表
+                WHERE 垫片名称=%s
+                """,
+                (gasket_name.strip(),)
+            )
+            rows = cur.fetchall() or []
+            for row in rows:
+                res.append({
+                    "配套法兰": (row.get("配套法兰") or "").strip(),
+                    "法兰管壳程": (row.get("法兰管壳程") or "").strip(),
+                    "垫片管壳程": (row.get("垫片管壳程") or "").strip(),
+                })
+    finally:
+        conn.close()
+    _GASKET_MAPPINGS_ALL_CACHE[key] = res
     return res
 
 
@@ -2627,6 +2717,7 @@ def get_pn_for_gasket(product_id: str, gasket_name: str) -> str:
 
 
 
+# [性能优化] 垫片类型到代号的映射按类型缓存
 def map_gasket_type_code_from_db(gasket_type: str) -> str:
     """
     从《垫片类型对照表》把垫片类型映射到类型代号（如 SWG/JG/MCG/FG/NMG）
@@ -2634,15 +2725,21 @@ def map_gasket_type_code_from_db(gasket_type: str) -> str:
     """
     if not gasket_type:
         return ""
+    key = (gasket_type.strip(),)
+    if key in _MAP_GTYPE_CACHE:
+        cached = _MAP_GTYPE_CACHE.get(key)
+        return cached if cached is not None else ""
     conn = get_connection(**db_config_2)
     try:
         with conn.cursor() as cur:
             sql = "SELECT 垫片名称代号 FROM 垫片类型对照表 WHERE 垫片类型=%s LIMIT 1"
             cur.execute(sql, (gasket_type.strip(),))
             row = cur.fetchone()
-            return (row.get("垫片名称代号") or "").strip() if row else ""
+            val = (row.get("垫片名称代号") or "").strip() if row else ""
     finally:
         conn.close()
+    _MAP_GTYPE_CACHE[key] = val
+    return val
 
 
 # 你按实际补全：示例
@@ -2667,6 +2764,7 @@ def map_gasket_name_code(gasket_name: str) -> str:
 _GSK_TBL_SIZE = "垫片尺寸"
 def _like(tok: str) -> str: return f"%{tok}%" if tok else "%"
 
+# [性能优化] 《垫片尺寸》检索按(DN, PN, CS, ST, GP)组合键缓存
 def query_gasket_D_d_d1_from_size(*, dn: str, pn: str, cs_code: str, st_abbr: str, gp_code: str) -> dict:
     """
     命中 -> 返回 {"外直径D": "...", "内直径d": "...", "环内径d1": "...", "nonstd": False, "msg": ""}
@@ -2677,6 +2775,19 @@ def query_gasket_D_d_d1_from_size(*, dn: str, pn: str, cs_code: str, st_abbr: st
             "外直径D": "程序推荐", "内直径d": "程序推荐", "环内径d1": "程序推荐",
             "nonstd": True, "msg": "检索条件不完整(DN/PN/CS/ST/GP)"
         }
+    try:
+        float(str(pn))
+    except Exception:
+        return {
+            "外直径D": "程序推荐", "内直径d": "程序推荐", "环内径d1": "程序推荐",
+            "nonstd": True, "msg": "检索条件不完整(DN/PN/CS/ST/GP)"
+        }
+
+    key = (str(dn), str(pn), str(cs_code), str(st_abbr), str(gp_code))
+    if key in _GASKET_DIM_CACHE:
+        cached = _GASKET_DIM_CACHE.get(key)
+        if isinstance(cached, dict):
+            return cached
 
     conn = get_connection(**db_config_2)
     try:
@@ -2692,12 +2803,14 @@ def query_gasket_D_d_d1_from_size(*, dn: str, pn: str, cs_code: str, st_abbr: st
             cur.execute(sql, (dn, pn, _like(cs_code), _like(st_abbr), _like(gp_code)))
             row = cur.fetchone()
             if row:
-                return {
+                spec = {
                     "外直径D":  "" if row.get("外直径D")  is None else str(row.get("外直径D")),
                     "内直径d":  "" if row.get("内直径d")  is None else str(row.get("内直径d")),
                     "环内径d1": "" if row.get("环内径d1") is None else str(row.get("环内径d1")),
                     "nonstd": False, "msg": ""
                 }
+                _GASKET_DIM_CACHE[key] = spec
+                return spec
 
             # 如果未命中，查找比当前PN大的最小值
             sql_next = """
@@ -2711,29 +2824,129 @@ def query_gasket_D_d_d1_from_size(*, dn: str, pn: str, cs_code: str, st_abbr: st
             cur.execute(sql_next, (dn, pn, _like(cs_code), _like(st_abbr), _like(gp_code)))
             row = cur.fetchone()
             if row:
-                return {
+                spec = {
                     "外直径D":  "" if row.get("外直径D")  is None else str(row.get("外直径D")),
                     "内直径d":  "" if row.get("内直径d")  is None else str(row.get("内直径d")),
                     "环内径d1": "" if row.get("环内径d1") is None else str(row.get("环内径d1")),
                     "nonstd": False,
                     "msg": f"未找到PN={pn}的记录，已取大于它的最小PN={row.get('压力等级PN')}"
                 }
+                _GASKET_DIM_CACHE[key] = spec
+                return spec
 
             # 都没有找到
-            return {
+            spec = {
                 "外直径D": "程序推荐", "内直径d": "程序推荐", "环内径d1": "程序推荐",
                 "nonstd": True, "msg": "《垫片尺寸》未命中记录"
             }
+            _GASKET_DIM_CACHE[key] = spec
+            return spec
     finally:
         conn.close()
 
 
 
+def query_element_name_param_value(product_id: str, element_name: str, param_name: str):
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 参数值
+                FROM 产品设计活动表_元件附加参数表
+                WHERE 产品ID = %s AND 元件名称 = %s AND 参数名称 = %s
+                LIMIT 1
+                """,
+                (product_id, (element_name or "").strip(), (param_name or "").strip())
+            )
+            row = cur.fetchone()
+            return None if not row else row.get("参数值")
+    finally:
+        conn.close()
+
+def invalidate_caches_for_product(product_id: str):
+    try:
+        _DESIGN_ROWS_CACHE.pop(product_id, None)
+    except Exception:
+        pass
+    try:
+        ks = list(_COMPUTE_PN_CACHE.keys())
+        for k in ks:
+            if isinstance(k, tuple) and len(k) >= 1 and k[0] == product_id:
+                _COMPUTE_PN_CACHE.pop(k, None)
+    except Exception:
+        pass
+    try:
+        ks2 = list(_FLANGE_MATERIAL_CACHE.keys())
+        for k in ks2:
+            if isinstance(k, tuple) and len(k) >= 1 and k[0] == product_id:
+                _FLANGE_MATERIAL_CACHE.pop(k, None)
+    except Exception:
+        pass
+
+# [性能优化] 推荐PN按(产品ID, 垫片名称)缓存计算结果
+def compute_pn_for_gasket(product_id: str, gasket_name: str):
+    key = (product_id, (gasket_name or "").strip())
+    if key in _COMPUTE_PN_CACHE:
+        cached = _COMPUTE_PN_CACHE.get(key)
+        return cached
+    tube_p = get_design_pressure_side(product_id, "管程")
+    shell_p = get_design_pressure_side(product_id, "壳程")
+    tube_t = _get_design_temperature_side(product_id, "管程")
+    shell_t = _get_design_temperature_side(product_id, "壳程")
+    maps = get_gasket_mappings_all(gasket_name or "")
+    pn_map = {}
+    pn_vals = []
+    for r in maps or []:
+        flange_name = (r.get("配套法兰") or "").strip()
+        side = (r.get("法兰管壳程") or "").strip()
+        if flange_name in {"浮头法兰", "钩圈"}:
+            try:
+                p_candidates = [float(v) for v in (tube_p, shell_p) if v not in (None, "", "程序推荐")]
+                t_candidates = [float(v) for v in (tube_t, shell_t) if v not in (None, "", "程序推荐")]
+                P = str(max(p_candidates)) if p_candidates else _first_nonempty(tube_p, shell_p)
+                T = str(max(t_candidates)) if t_candidates else _first_nonempty(tube_t, shell_t)
+            except Exception:
+                P, T = _first_nonempty(tube_p, shell_p), _first_nonempty(tube_t, shell_t)
+            side_print = "两侧"
+        else:
+            P = get_design_pressure_side(product_id, side)
+            T = _get_design_temperature_side(product_id, side)
+            side_print = side
+        material = _get_flange_material_by_name(product_id, flange_name)
+        pv = _compute_pn_inline(material, T, P)
+        print(f"[垫片尺寸PN][逐条] 垫片={gasket_name}, 法兰={flange_name}, 侧别={side_print}, 材料={material}, P={P}, T={T}, 计算PN={pv if pv is not None else 'None'}")
+        if pv is not None:
+            pn_map[flange_name] = pv
+            pn_vals.append(pv)
+    pn_inline = None
+    if (gasket_name or "").strip() == "平盖垫片":
+        if "管箱法兰" in pn_map:
+            pn_inline = pn_map.get("管箱法兰")
+            print(f"[垫片尺寸PN][平盖选择] 垫片={gasket_name}, 选法兰=管箱法兰, PN={pn_inline}")
+        else:
+            for r in maps or []:
+                nm2 = (r.get("配套法兰") or "").strip()
+                if nm2 in pn_map:
+                    pn_inline = pn_map[nm2]
+                    print(f"[垫片尺寸PN][平盖选择] 垫片={gasket_name}, 选法兰={nm2}, PN={pn_inline}")
+                    break
+    else:
+        if pn_vals:
+            try:
+                pn_inline = max(pn_vals)
+            except Exception:
+                pn_inline = pn_vals[-1]
+            print(f"[垫片尺寸PN][聚合最大] 垫片={gasket_name}, 候选PN={pn_vals} → 取最大={pn_inline}")
+    _COMPUTE_PN_CACHE[key] = pn_inline
+    return pn_inline
+
 def resolve_gasket_dimensions(
     product_id: str,
     gasket_name: str,      # 页面"垫片名称"（没有就用元件名）
     gasket_standard: str,  # ★ 页面"垫片标准"，直接作为 ST 使用
-    gasket_type: str       # 页面"垫片型式/垫片类型"
+    gasket_type: str,      # 页面"垫片型式/垫片类型"
+    pn: str = None         # ★ 优先使用界面/调用传入的公称压力PN；为空则按材料/温度/压力即时计算
 ) -> dict:
     """
     流程：
@@ -2745,16 +2958,160 @@ def resolve_gasket_dimensions(
       4) 《垫片尺寸》查询，返回 D/d/d1；未命中 -> "程序推荐"
     """
     dn = get_dn_for_gasket(product_id, gasket_name or "")
-    pn = get_pn_for_gasket(product_id, gasket_name or "")
+
+    # —— PN优先级：调用传入PN > 即时计算PN > 程序推荐 —— #
+    def _canon_pn(p):
+        s = (str(p) if p is not None else "").strip()
+        if not s:
+            return ""
+        ss = s.upper()
+        if ss.startswith("PN"):
+            s = s[2:].strip()
+        return s
+
+    pn_override = _canon_pn(pn)
+
+    pn_inline = compute_pn_for_gasket(product_id, gasket_name or "")
+    if pn_override:
+        pn = pn_override
+        print(f"[垫片尺寸PN] 使用界面PN覆盖: 垫片={gasket_name}, PN={pn}")
+    elif pn_inline is not None:
+        pn = str(pn_inline).strip()
+    else:
+        pn = "程序推荐"
 
     cs_code = map_gasket_name_code(gasket_name or "")
     gp_code = map_gasket_type_code_from_db(gasket_type or "")
     st_abbr = (gasket_standard or "").strip()
     print(f"dn{dn},pn{pn},cscode{cs_code},gp_code{gp_code}")
 
-    return query_gasket_D_d_d1_from_size(
+    spec = query_gasket_D_d_d1_from_size(
         dn=dn, pn=pn, cs_code=cs_code, st_abbr=st_abbr, gp_code=gp_code
     )
+    try:
+        spec["推荐PN"] = pn
+    except Exception:
+        pass
+    return spec
+
+def _get_design_temperature_side(product_id: str, side: str) -> str:
+    prefer_tube = "管程" in (side or "")
+    prefer_shell = "壳程" in (side or "")
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 参数名称, 管程数值, 壳程数值
+                FROM 产品设计活动表_设计数据表
+                WHERE 产品ID=%s AND 参数名称='设计温度（最高）*'
+                """,
+                (product_id,)
+            )
+            rows = cur.fetchall() or []
+            idx = { (r.get("参数名称") or "").strip(): (r.get("管程数值"), r.get("壳程数值")) for r in rows }
+            tube, shell = idx.get("设计温度（最高）*", (None, None))
+            if prefer_tube:
+                return _first_nonempty(tube, shell)
+            if prefer_shell:
+                return _first_nonempty(shell, tube)
+            return _first_nonempty(tube, shell)
+    finally:
+        conn.close()
+
+# [性能优化] 法兰材料牌号按(产品ID, 法兰名称)缓存
+def _get_flange_material_by_name(product_id: str, flange_name: str) -> str:
+    if not flange_name:
+        return ""
+    key = (product_id, (flange_name or "").strip())
+    if key in _FLANGE_MATERIAL_CACHE:
+        cached = _FLANGE_MATERIAL_CACHE.get(key)
+        return cached if cached is not None else ""
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 元件ID
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件名称 = %s
+                """,
+                (product_id, flange_name)
+            )
+            rows = cur.fetchall() or []
+            for r in rows:
+                eid = r.get("元件ID")
+                if not eid:
+                    continue
+                cur.execute(
+                    """
+                    SELECT 参数值
+                    FROM 产品设计活动表_元件附加参数表
+                    WHERE 产品ID = %s AND 元件ID = %s AND 参数名称 = '材料牌号'
+                    LIMIT 1
+                    """,
+                    (product_id, eid)
+                )
+                row2 = cur.fetchone()
+                if row2 and row2.get("参数值"):
+                    val = str(row2.get("参数值")).strip()
+                    _FLANGE_MATERIAL_CACHE[key] = val
+                    return val
+            _FLANGE_MATERIAL_CACHE[key] = ""
+            return ""
+    finally:
+        conn.close()
+
+def _compute_pn_inline(material: str, T: str, P: str):
+    try:
+        if not material:
+            return None
+        if T in (None, "") or P in (None, ""):
+            return None
+        Tf = float(T)
+        Pf = float(P)
+    except Exception:
+        return None
+    conn = get_connection(**db_config_2)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM 压力等级表 WHERE Name=%s", (material,))
+            rows = cursor.fetchall() or []
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    def _get_col(row, temp):
+        for k in row.keys():
+            try:
+                if float(k) == float(temp):
+                    return float(row[k])
+            except Exception:
+                continue
+        return None
+    temp_cols = [float(k) for k in rows[0].keys() if k not in ("Name", "PN", "DNmin", "DNmax", "Tmin", "Tmax")]
+    temp_cols.sort()
+    candidate = None
+    candidate_row = None
+    for row in rows:
+        px = _get_col(row, Tf)
+        if px is None:
+            lower = max([x for x in temp_cols if x < Tf], default=None)
+            upper = min([x for x in temp_cols if x > Tf], default=None)
+            if lower is None or upper is None:
+                continue
+            y1 = _get_col(row, lower)
+            y2 = _get_col(row, upper)
+            if y1 is None or y2 is None:
+                continue
+            px = y1 + (y2 - y1) * (Tf - lower) / (upper - lower)
+        if px >= Pf:
+            if candidate is None or px < candidate:
+                candidate = px
+                candidate_row = row
+    if candidate_row is None:
+        return None
+    return candidate_row.get("PN")
 
 
 def update_extra_param_value_by_name(product_id: str, param_name: str, value: str):

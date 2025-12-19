@@ -19,7 +19,8 @@ from modules.condition_input.funcs.funcs_cdt_input import load_design_data_if_ex
     validate_required_fields, import_all_reference_data, save_local_condition_file, save_all_tables, \
     trigger_all_cross_table_relations, apply_design_data_dropdowns, apply_general_data_dropdowns, \
     apply_trail_data_dropdowns, TrailTableComboDelegate, highlight_entire_row, shrink_index_column, shrink_unit_column,\
-    get_ref_data_excel_path, fetch_all_mode_orders, capture_default_order, apply_mode_param_order
+    get_ref_data_excel_path, fetch_all_mode_orders, capture_default_order, apply_mode_param_order, \
+    autofill_outer_diameter
 from modules.chanpinguanli.chanpinguanli_main import product_manager
 from modules.condition_input.funcs.design_data_delegate import DesignDataDelegate  # 根据实际路径调整
 from modules.yudingyi.luoshuan import update_user_config_for_2_6_1
@@ -62,6 +63,7 @@ class DesignConditionInputViewer(QWidget):
         self.original_window_title = ""  # UI加载后赋值
         self._is_saved_to_design_db = False  # 记录产品是否已保存到产品设计活动库#1106新修改
         self._has_confirmed_saved = False  # 记录是否点击过确认按钮保存#1106新修改
+        self._initial_table_snapshots = {}  # 1112新修改-条件输入表格实质性变化：存储初始状态快照，用于实质性变化检测
 
 
         # 0903会议纪要 首先进行项目和产品检查
@@ -214,14 +216,8 @@ class DesignConditionInputViewer(QWidget):
 
         # ===lxy101 核心修改点 1: 连接信号与槽函数 ===
 
-        # 为所有表格的撤销/重做操作添加 _is_modified 标记 1014
-        for table in tables:
-            if hasattr(table, "undo_stack"):
-                table.undo_stack.indexChanged.connect(self.mark_as_modified)
-                # table.undo_stack.indexChanged.connect(lambda: setattr(self, "_is_modified", True))
-        combo = getattr(self, "combo_mode", None)
-        if combo:
-             combo.currentTextChanged.connect(lambda: self.mark_as_modified())
+        # 1112新修改-条件输入表格实质性变化：移除撤销/重做和模式切换的实时修改标记（改为按需检测）
+        # 保留撤销/重做功能本身，但不再实时标记为修改状态
 
         # 只对“设计数据”表开启单击打开多工况窗口
         self.tableWidget_design_data.viewport().installEventFilter(self)
@@ -241,13 +237,45 @@ class DesignConditionInputViewer(QWidget):
             self.tableWidget_coating_data
         ]
 
-        # 用一个循环为所有表格连接 itemChanged 信号
+        # 1112新修改-条件输入表格实质性变化：保留实时校验功能，但移除实时修改标记
         for table in tables:
-            # itemChanged 是当一个单元格(item)的数据发生变化时发出的信号
-            table.itemChanged.connect(self.mark_as_modified)
-            # 1015 为需要实时校验的表格，额外连接到 handle_cell_input ▼▼▼
+            # 1015 为需要实时校验的表格，连接到 handle_cell_input（保留高亮功能）
             if table in [self.tableWidget_design_data, self.tableWidget_general_data]:
                 table.itemChanged.connect(self.handle_cell_input)
+
+        # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+        # === 新增：通用数据表 外径联动 ===
+        if hasattr(self, 'tableWidget_general_data') and self.tableWidget_general_data is not None:
+            try:
+                self.tableWidget_general_data.itemChanged.connect(self.on_general_table_item_changed)
+            except Exception:
+                pass
+            # 初始化一次联动状态（不改变数据，仅UI显示/可编辑性）
+            try:
+                self.update_general_diameter_linkage()
+            except Exception:
+                pass
+        # 标记外径自动填充就绪（避免在界面载入前触发弹窗）
+        try:
+            setattr(self, "_outer_autofill_ready", True)
+        except Exception:
+            pass
+        # 初始化缓存，避免“仅点击单元格”引发重复联动
+        try:
+            self._outer_base_last_val = None  # 是否以外径为基准* 的上次值
+        except Exception:
+            pass
+        # 将缓存初始化为当前“是否以外径为基准*”的值，防止首次仅点击即触发
+        try:
+            table = getattr(self, 'tableWidget_general_data', None)
+            if table is not None:
+                row = self._find_row_by_param_name(table, "是否以外径为基准*")
+                if row >= 0:
+                    it = table.item(row, 3)
+                    cur = it.text().strip() if it and it.text() else ""
+                    self._outer_base_last_val = cur
+        except Exception:
+            pass
 
     # 1014lxy
     def mark_as_modified(self, item=None): # item参数设为可选
@@ -270,10 +298,9 @@ class DesignConditionInputViewer(QWidget):
     def can_be_closed(self):
         """
         供主窗口调用的关闭检查接口。
-        根据三种情况决定是否需要检查必填项：
-        情况1：新产品，第一次打开，没有保存到产品设计活动库 -> 即使没有修改也需要检查
-        情况2：新产品，第一次打开，进行了修改 -> 如果已确认保存且无新修改，不需要检查；否则需要检查
-        情况3：老产品，已保存到产品设计活动库 -> 如果没有修改或已确认保存且无新修改，不需要检查；否则需要检查
+        根据两种情况决定是否需要检查必填项：
+        情况A：新产品（未保存到设计活动库） -> 如果已确认保存且无新修改，不需要检查；否则需要检查
+        情况B：老产品（已保存到设计活动库） -> 只有在有实质性修改时才需要检查
         返回: bool -> 是否可以安全关闭
         """
         # 判断是否需要检查必填项
@@ -301,36 +328,55 @@ class DesignConditionInputViewer(QWidget):
             # 用户选择取消关闭
             return False
 
-    # 1106新修改
+    # 1112新修改-条件输入3情况优化-2情况
     def _should_check_required_fields(self):
         """
-        判断是否需要检查必填项
-        返回: bool -> True表示需要检查，False表示不需要检查
-        
-        三种情况：
-        情况1：新产品，第一次打开，没有保存到产品设计活动库 -> 即使没有修改也需要检查
-        情况2：新产品，第一次打开，进行了修改 -> 如果已确认保存且无新修改，不需要检查；否则需要检查
-        情况3：老产品，已保存到产品设计活动库 -> 如果没有修改或已确认保存且无新修改，不需要检查；否则需要检查
+            #     判断是否需要检查必填项
+            #     返回: bool -> True表示需要检查，False表示不需要检查
+            #     两种情况：
+            #     情况1：新产品，第一次打开，没有保存到产品设计活动库 -> 即使没有修改也需要检查
+            #     情况2：产品，已保存到产品设计活动库 -> 如果没有修改或已确认保存且无新修改，不需要检查；否则需要检查
         """
-        # 情况1和情况2：新产品，第一次打开，没有保存到产品设计活动库
+        # 1112新修改-条件输入表格实质性变化：检查是否有实质性变化
+        has_changes = self._has_substantial_changes()
+
         if not self._is_saved_to_design_db:
-            # 如果已确认保存且没有新修改，不需要检查（情况2的特殊情况）
-            if self._has_confirmed_saved and not self._is_modified:
-                return False
-            # 否则需要检查（情况1：没有修改也需要检查；情况2：有修改或未保存需要检查）
-            return True
-        
-        # 情况3：老产品，已保存到产品设计活动库
-        # 如果没有任何修改，不需要检查
-        if not self._is_modified:
-            return False
-        
-        # 如果有修改，检查是否已确认保存且没有新的修改
-        # 如果_has_confirmed_saved为True但_is_modified也为True，说明保存后又有新修改，需要检查
-        # 如果_has_confirmed_saved为True且_is_modified为False，说明保存后没有新修改，不需要检查
-        # 但上面的逻辑已经处理了_is_modified为False的情况，所以这里_is_modified一定是True
-        # 因此，只要_is_modified为True，就需要检查（无论_has_confirmed_saved的值）
-        return True
+            # 情况A：新产品（未保存到设计活动库）
+            # 如果已确认保存且没有新修改，不需要检查；否则需要检查
+            return not (self._has_confirmed_saved and not has_changes)
+        else:
+            # 情况B：老产品（已保存到设计活动库）
+            # 只有在有实质性修改时才需要检查
+            return has_changes
+    # 1106新修改
+    # def _should_check_required_fields(self):
+    #     """
+    #     判断是否需要检查必填项
+    #     返回: bool -> True表示需要检查，False表示不需要检查
+    #
+    #     三种情况：
+    #     情况1：新产品，第一次打开，没有保存到产品设计活动库 -> 即使没有修改也需要检查
+    #     情况2：新产品，第一次打开，进行了修改 -> 如果已确认保存且无新修改，不需要检查；否则需要检查
+    #     情况3：老产品，已保存到产品设计活动库 -> 如果没有修改或已确认保存且无新修改，不需要检查；否则需要检查
+    #     """
+    #     # 1112新修改-条件输入表格实质性变化：检查是否有实质性变化
+    #     has_changes = self._has_substantial_changes()
+    #
+    #     # 情况1和情况2：新产品，第一次打开，没有保存到产品设计活动库
+    #     if not self._is_saved_to_design_db:
+    #         # 如果已确认保存且没有新修改，不需要检查（情况2的特殊情况）
+    #         if self._has_confirmed_saved and not has_changes:
+    #             return False
+    #         # 否则需要检查（情况1：没有修改也需要检查；情况2：有修改或未保存需要检查）
+    #         return True
+    #
+    #     # 情况3：老产品，已保存到产品设计活动库
+    #     # 如果没有任何实质性修改，不需要检查
+    #     if not has_changes:
+    #         return False
+    #
+    #     # 如果有实质性修改，需要检查
+    #     return True
     # def can_be_closed(self): 无弹窗提示直接关闭版
     #     """
     #     供主窗口调用的关闭检查接口。
@@ -466,6 +512,8 @@ class DesignConditionInputViewer(QWidget):
         trigger_all_cross_table_relations(self)
         # 新增：数据导入后清除高亮lxy101
         self.clear_all_highlights()
+        # 1112新修改-条件输入表格实质性变化：数据加载完成后保存初始快照，用于实质性变化检测
+        self._save_initial_snapshots()
 
     def fill_table_widget(self, table_widget, headers, rows, index_header=None):
         """
@@ -547,6 +595,215 @@ class DesignConditionInputViewer(QWidget):
 
         table_widget.resizeColumnsToContents()
 
+        # 1111新修改-2金属温度单元格不可编辑-仅对设计数据表应用特殊只读逻辑
+        if table_widget.objectName() == "tableWidget_design_data":
+            self._apply_special_readonly_for_nen_bem()
+
+    # 1111新修改-2金属温度单元格不可编辑
+    def _apply_special_readonly_for_nen_bem(self):
+        """
+        针对NEN和BEM产品，将设计数据表中的特定单元格设为只读：
+        - "沿长度平均的换热管金属温度*" 的壳程数值列（第3列）
+        - "沿长度平均的壳程圆筒金属温度*" 的管程数值列（第4列）
+
+        此函数在表格填充后和模式切换后都需要调用。
+        """
+        if not hasattr(self, 'tableWidget_design_data') or self.tableWidget_design_data is None:
+            return
+
+        # 获取产品类型（只查询一次）
+        from main import get_product_form_from_db
+        product_form = get_product_form_from_db(self.product_id)
+
+        # 只对NEN和BEM产品应用（BEM的product_form返回'all'）
+        if product_form not in ['NEN', 'BEM']:
+            return
+
+        print(f"[DEBUG] 正在为NEN/BEM产品设置特殊只读单元格")
+
+        # 遍历设计数据表的所有行
+        for row in range(self.tableWidget_design_data.rowCount()):
+            # 获取参数名称（第1列，第0列是序号）
+            param_item = self.tableWidget_design_data.item(row, 1)
+            if not param_item:
+                continue
+            param_name = param_item.text().strip()
+
+            # "沿长度平均的换热管金属温度*" 的壳程数值列（第3列）设为只读
+            if param_name == "沿长度平均的换热管金属温度*":
+                shell_item = self.tableWidget_design_data.item(row, 3)
+                if shell_item:
+                    shell_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                    print(f"[DEBUG] 已设置'{param_name}'的壳程数值为只读")
+
+            # "沿长度平均的壳程圆筒金属温度*" 的管程数值列（第4列）设为只读
+            elif param_name == "沿长度平均的壳程圆筒金属温度*":
+                tube_item = self.tableWidget_design_data.item(row, 4)
+                if tube_item:
+                    tube_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                    print(f"[DEBUG] 已设置'{param_name}'的管程数值为只读")
+
+    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+    # === 新增：通用数据表 外径显示/编辑联动 ===
+    def _find_row_by_param_name(self, table, target_name: str):
+        """在给定表格中查找参数名称列（索引1）等于 target_name 的行索引；找不到返回 -1。"""
+        if table is None:
+            return -1
+        try:
+            rows = table.rowCount()
+            for r in range(rows):
+                item = table.item(r, 1)
+                if item and item.text().strip() == target_name:
+                    return r
+        except Exception:
+            pass
+        return -1
+
+    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+    def _set_row_editable(self, table, row: int, editable: bool):
+        """切换整行可编辑性；缓存原始 flags 于 UserRole+10，恢复时按缓存。"""
+        if table is None or row < 0:
+            return
+        try:
+            cols = table.columnCount()
+            for c in range(cols):
+                it = table.item(row, c)
+                if not it:
+                    continue
+                # 缓存原 flags
+                key_role = Qt.UserRole + 10
+                if it.data(key_role) is None:
+                    try:
+                        it.setData(key_role, int(it.flags()))
+                    except Exception:
+                        pass
+                orig_flags = it.data(key_role)
+                if orig_flags is None:
+                    orig_flags = int(it.flags())
+                if editable:
+                    # 恢复为原始flags
+                    it.setFlags(Qt.ItemFlags(int(orig_flags)))
+                else:
+                    # 去掉可编辑标志，但保留可选择/可用
+                    it.setFlags((Qt.ItemFlags(int(orig_flags)) & ~Qt.ItemIsEditable))
+        except Exception:
+            pass
+
+    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+    def update_general_diameter_linkage(self):
+        """
+        当“是否以外径为基准*”为“否”时，隐藏并禁用“外径系列”“外径”两行；否则显示并恢复可编辑性。
+        仅影响UI展示与编辑性，不改动数据。
+        """
+        table = getattr(self, 'tableWidget_general_data', None)
+        if table is None:
+            return
+        # 定位三行
+        base_row = self._find_row_by_param_name(table, "是否以外径为基准*")
+        row_series = self._find_row_by_param_name(table, "外径系列")
+        row_diameter = self._find_row_by_param_name(table, "外径")
+        if base_row < 0:
+            return
+        # 读取数值列（索引3）
+        val_item = table.item(base_row, 3)
+        val = val_item.text().strip() if val_item and val_item.text() else ""
+        need_hide = (val == "否")
+        # 处理“外径系列”：不再隐藏，按状态切换可编辑性，‘否’时写入“/”
+        if row_series >= 0:
+            self._set_row_editable(table, row_series, not need_hide)
+            if need_hide:
+                try:
+                    v_item = table.item(row_series, 3)
+                    if v_item is None:
+                        v_item = QTableWidgetItem()
+                        table.setItem(row_series, 3, v_item)
+                    bs = table.blockSignals(True)
+                    try:
+                        v_item.setText("/")
+                    finally:
+                        table.blockSignals(bs)
+                except Exception:
+                    pass
+        # 处理“外径”：不再隐藏，按状态切换可编辑性，‘否’时写入“/”
+        if row_diameter >= 0:
+            self._set_row_editable(table, row_diameter, not need_hide)
+            if need_hide:
+                try:
+                    v_item = table.item(row_diameter, 3)
+                    if v_item is None:
+                        v_item = QTableWidgetItem()
+                        table.setItem(row_diameter, 3, v_item)
+                    bs = table.blockSignals(True)
+                    try:
+                        v_item.setText("/")
+                    finally:
+                        table.blockSignals(bs)
+                except Exception:
+                    pass
+        # 当切回“是”时，设置默认外径系列=“欧标系列”，并根据映射自动填充“外径”
+        if not need_hide and row_series >= 0:
+            try:
+                v_item = table.item(row_series, 3)
+                cur = v_item.text().strip() if v_item else ""
+                desired = "欧标系列"
+                if cur != desired:
+                    if v_item is None:
+                        v_item = QTableWidgetItem()
+                        table.setItem(row_series, 3, v_item)
+                    bs = table.blockSignals(True)
+                    try:
+                        v_item.setText(desired)
+                    finally:
+                        table.blockSignals(bs)
+            except Exception:
+                pass
+            # 初始化加载阶段不触发自动填充，避免尚未进入界面就弹窗
+            try:
+                is_loading = getattr(self, "_is_loading_data", False)
+            except Exception:
+                is_loading = False
+            if not is_loading:
+                # 重置一次 (dn, series) 缓存，确保不会因缓存相同而跳过本次自动填充
+                try:
+                    setattr(self, "_outer_last_pair", None)
+                except Exception:
+                    pass
+                # 直接调用自动填充外径（内部已做必要校验与信号阻断）
+                try:
+                    autofill_outer_diameter(self)
+                except Exception:
+                    pass
+
+    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+    def on_general_table_item_changed(self, item):
+        """监听通用数据表变更，仅当“是否以外径为基准*”的数值列变化时触发联动。"""
+        try:
+            if self._is_loading_data:
+                return
+        except Exception:
+            pass
+        table = getattr(self, 'tableWidget_general_data', None)
+        if table is None or item is None:
+            return
+        try:
+            # 仅关注基准开关行的“数值列”(索引3)
+            if item.column() != 3:
+                return
+            param_item = table.item(item.row(), 1)
+            if param_item and param_item.text().strip() == "是否以外径为基准*":
+                # 读取当前值，与上次缓存比较，避免“仅点击/重复提交相同值”造成的误触发
+                cur_val = item.text().strip() if item and item.text() else ""
+                last_val = getattr(self, "_outer_base_last_val", None)
+                if last_val == cur_val:
+                    return
+                try:
+                    self._outer_base_last_val = cur_val
+                except Exception:
+                    pass
+                self.update_general_diameter_linkage()
+        except Exception:
+            pass
+
     # 1106新修改
     def on_input_ref_data_clicked(self):
         if not getattr(self, "_is_valid_product", True):
@@ -574,8 +831,8 @@ class DesignConditionInputViewer(QWidget):
                 import_all_reference_data(file_path, self)
                 QMessageBox.information(self, "成功", "成功导入参考数据！")
 
-                # 关键：导入后标记为未保存 1014
-                self._is_modified = True  # <--- 新增这一行
+                # 1112新修改-条件输入表格实质性变化：导入后不更新快照，让系统检测到这是相对于初始状态的变化
+                # 这样关闭界面时会提示保存
                 
                 # 导入后清除所有高亮，确保不会显示缺失项高亮 #1106新修改
                 self.clear_all_highlights()
@@ -676,40 +933,6 @@ class DesignConditionInputViewer(QWidget):
                     print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
             except Exception as e:
                 print(f"[条件输入保存] 鞍座高度同步失败: {e}")
-            #
-            # # 1109新修改-元件定义-垫片
-            # # ✅ 保存成功后，校验垫片并更新尺寸
-            # try:
-            #     from modules.cailiaodingyi.controllers.check_dianpian import check_gasket_params, \
-            #         update_gasket_dimensions_after_pn
-            #     # 创建一个临时对象，用于调用check_gasket_params
-            #     # check_gasket_params需要self.last_confirmed_product_id和self.line_tip
-            #     class TempChecker:
-            #         def __init__(self, product_id, line_tip):
-            #             self.last_confirmed_product_id = product_id
-            #             self.line_tip = line_tip
-            #
-            #     temp_checker = TempChecker(self.product_id, self.line_tip)
-            #     # 调用check_gasket_params，获取需要更新尺寸的垫片列表
-            #     gaskets_to_update = check_gasket_params(temp_checker)
-            #
-            #     # 遍历所有垫片，调用update_gasket_dimensions_after_pn更新尺寸
-            #     if gaskets_to_update:
-            #         print(f"[条件输入保存] 开始更新{len(gaskets_to_update)}个垫片的尺寸")
-            #         for pid, gid, gname, pn_val in gaskets_to_update:
-            #             try:
-            #                 update_gasket_dimensions_after_pn(pid, gid, gname, pn_val)
-            #                 print(f"[条件输入保存] 已更新垫片={gname}, 元件ID={gid}, PN={pn_val}")
-            #             except Exception as e:
-            #                 print(f"[条件输入保存] 更新垫片尺寸失败: 垫片={gname}, 元件ID={gid}, 错误={e}")
-            #     else:
-            #         print(f"[条件输入保存] 没有需要更新尺寸的垫片")
-            # except Exception as e:
-            #     print(f"[条件输入保存] 垫片校验失败: {e}")
-
-
-
-
 
 
             # 保存成功后清理状态
@@ -729,6 +952,8 @@ class DesignConditionInputViewer(QWidget):
             self._has_confirmed_saved = True
             # 保存后，产品已保存到设计活动库
             self._is_saved_to_design_db = True
+            # 1112新修改-条件输入表格实质性变化：保存成功后更新快照，将当前状态作为新的基准状态
+            self._save_initial_snapshots()
 
             return (True, [])
 
@@ -740,7 +965,7 @@ class DesignConditionInputViewer(QWidget):
     def check_and_save_datagb(self, force=False, skip_confirm=False):
         """
         用于用户点击关闭界面时，检查必填项并保存。
-        根据三种情况决定是否需要检查必填项。
+        根据两种情况决定是否需要检查必填项。
         返回: (bool, list) -> (是否可以关闭, 缺失字段列表)
         """
         if not getattr(self, "_is_valid_product", True):
@@ -757,8 +982,8 @@ class DesignConditionInputViewer(QWidget):
             # 需要检查必填项
             is_valid, missing_fields = self.only_check_validate_data()
             if is_valid:
-                # 必填项完整，但有修改，直接保存（不弹窗）
-                if self._is_modified:
+                # 1112新修改-条件输入表格实质性变化：必填项完整，但有实质性修改，直接保存（不弹窗）
+                if self._has_substantial_changes():
                     try:
                         # 执行保存操作
                         if not save_local_condition_file(self.product_id, self):
@@ -781,6 +1006,11 @@ class DesignConditionInputViewer(QWidget):
                         self.setWindowTitle(self.original_window_title)
                         self._has_confirmed_saved = True
                         self._is_saved_to_design_db = True
+                        # 1112新修改-条件输入表格实质性变化：保存成功后更新快照，将当前状态作为新的基准状态
+                        self._save_initial_snapshots()
+                        # 保存成功后清理高亮状态
+                        self._validation_triggered = False
+                        self.clear_all_highlights()
                         print("保存成功！现在可以关闭。")
                         if hasattr(self, 'line_tip') and self.line_tip:
                             self.line_tip.setText("保存成功！")
@@ -822,43 +1052,17 @@ class DesignConditionInputViewer(QWidget):
                         print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
                 except Exception as e:
                     print(f"[条件输入保存] 鞍座高度同步失败: {e}")
-                #
-                # # 1109新修改-元件定义-垫片
-                # # ✅ 保存成功后，校验垫片并更新尺寸
-                # try:
-                #     from modules.cailiaodingyi.controllers.check_dianpian import check_gasket_params, \
-                #         update_gasket_dimensions_after_pn
-                #     # 创建一个临时对象，用于调用check_gasket_params
-                #     # check_gasket_params需要self.last_confirmed_product_id和self.line_tip
-                #     class TempChecker:
-                #         def __init__(self, product_id, line_tip):
-                #             self.last_confirmed_product_id = product_id
-                #             self.line_tip = line_tip
-                #
-                #     temp_checker = TempChecker(self.product_id, self.line_tip)
-                #     # 调用check_gasket_params，获取需要更新尺寸的垫片列表
-                #     gaskets_to_update = check_gasket_params(temp_checker)
-                #
-                #     # 遍历所有垫片，调用update_gasket_dimensions_after_pn更新尺寸
-                #     if gaskets_to_update:
-                #         print(f"[条件输入保存] 开始更新{len(gaskets_to_update)}个垫片的尺寸")
-                #         for pid, gid, gname, pn_val in gaskets_to_update:
-                #             try:
-                #                 update_gasket_dimensions_after_pn(pid, gid, gname, pn_val)
-                #                 print(f"[条件输入保存] 已更新垫片={gname}, 元件ID={gid}, PN={pn_val}")
-                #             except Exception as e:
-                #                 print(f"[条件输入保存] 更新垫片尺寸失败: 垫片={gname}, 元件ID={gid}, 错误={e}")
-                #     else:
-                #         print(f"[条件输入保存] 没有需要更新尺寸的垫片")
-                # except Exception as e:
-                #     print(f"[条件输入保存] 垫片校验失败: {e}")
-
 
                 # 保存成功后，重置状态并允许关闭
                 self._is_modified = False
                 self.setWindowTitle(self.original_window_title)
                 self._has_confirmed_saved = True
                 self._is_saved_to_design_db = True
+                # 1112新修改-条件输入表格实质性变化：保存成功后更新快照，将当前状态作为新的基准状态
+                self._save_initial_snapshots()
+                # 保存成功后清理高亮状态
+                self._validation_triggered = False
+                self.clear_all_highlights()
                 print("保存成功！现在可以关闭。")
                 if hasattr(self, 'line_tip') and self.line_tip:
                     self.line_tip.setText("保存成功！")
@@ -883,7 +1087,7 @@ class DesignConditionInputViewer(QWidget):
     def check_and_save_dataqh(self, force=False, skip_confirm=False):
         """
         用于用户从条件输入界面切换至其他界面时，检查必填项并保存。
-        根据三种情况决定是否需要检查必填项。
+        根据两种情况决定是否需要检查必填项。
         返回: (bool, list) -> (是否可以切换, 缺失字段列表)
         """
         if not getattr(self, "_is_valid_product", True):
@@ -898,8 +1102,8 @@ class DesignConditionInputViewer(QWidget):
             # 需要检查必填项
             is_valid, missing_fields = self.only_check_validate_data()
             if is_valid:
-                # 必填项完整，但有修改，直接保存（不弹窗）
-                if self._is_modified:
+                # 1112新修改-条件输入表格实质性变化：必填项完整，但有实质性修改，直接保存（不弹窗）
+                if self._has_substantial_changes():
                     try:
                         # 执行保存操作
                         if not save_local_condition_file(self.product_id, self):
@@ -916,42 +1120,17 @@ class DesignConditionInputViewer(QWidget):
                                 print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
                         except Exception as e:
                             print(f"[条件输入保存] 鞍座高度同步失败: {e}")
-                        #
-                        # # 1109新修改-元件定义-垫片
-                        # # ✅ 保存成功后，校验垫片并更新尺寸
-                        # try:
-                        #     from modules.cailiaodingyi.controllers.check_dianpian import check_gasket_params, \
-                        #         update_gasket_dimensions_after_pn
-                        #     # 创建一个临时对象，用于调用check_gasket_params
-                        #     # check_gasket_params需要self.last_confirmed_product_id和self.line_tip
-                        #     class TempChecker:
-                        #         def __init__(self, product_id, line_tip):
-                        #             self.last_confirmed_product_id = product_id
-                        #             self.line_tip = line_tip
-                        #
-                        #     temp_checker = TempChecker(self.product_id, self.line_tip)
-                        #     # 调用check_gasket_params，获取需要更新尺寸的垫片列表
-                        #     gaskets_to_update = check_gasket_params(temp_checker)
-                        #
-                        #     # 遍历所有垫片，调用update_gasket_dimensions_after_pn更新尺寸
-                        #     if gaskets_to_update:
-                        #         print(f"[条件输入保存] 开始更新{len(gaskets_to_update)}个垫片的尺寸")
-                        #         for pid, gid, gname, pn_val in gaskets_to_update:
-                        #             try:
-                        #                 update_gasket_dimensions_after_pn(pid, gid, gname, pn_val)
-                        #                 print(f"[条件输入保存] 已更新垫片={gname}, 元件ID={gid}, PN={pn_val}")
-                        #             except Exception as e:
-                        #                 print(f"[条件输入保存] 更新垫片尺寸失败: 垫片={gname}, 元件ID={gid}, 错误={e}")
-                        #     else:
-                        #         print(f"[条件输入保存] 没有需要更新尺寸的垫片")
-                        # except Exception as e:
-                        #     print(f"[条件输入保存] 垫片校验失败: {e}")
 
                         # 保存成功后，重置状态并允许切换
                         self._is_modified = False
                         self.setWindowTitle(self.original_window_title)
                         self._has_confirmed_saved = True
                         self._is_saved_to_design_db = True
+                        # 1112新修改-条件输入表格实质性变化：保存成功后更新快照，将当前状态作为新的基准状态
+                        self._save_initial_snapshots()
+                        # 保存成功后清理高亮状态
+                        self._validation_triggered = False
+                        self.clear_all_highlights()
                         print("保存成功！现在可以切换。")
                         if hasattr(self, 'line_tip') and self.line_tip:
                             self.line_tip.setText("保存成功！")
@@ -999,6 +1178,11 @@ class DesignConditionInputViewer(QWidget):
                 self.setWindowTitle(self.original_window_title)
                 self._has_confirmed_saved = True
                 self._is_saved_to_design_db = True
+                # 1112新修改-条件输入表格实质性变化：保存成功后更新快照，将当前状态作为新的基准状态
+                self._save_initial_snapshots()
+                # 保存成功后清理高亮状态
+                self._validation_triggered = False
+                self.clear_all_highlights()
                 print("保存成功！现在可以切换。")
                 if hasattr(self, 'line_tip') and self.line_tip:
                     self.line_tip.setText("保存成功！")
@@ -1115,6 +1299,7 @@ class DesignConditionInputViewer(QWidget):
             else:
                 QMessageBox.critical(self, "导出失败", err_msg)
 
+    # 1111新修改-2金属温度单元格不可编辑
     #新增 模式切换处理函数
     def on_mode_changed(self, mode_name: str):
         """
@@ -1136,6 +1321,10 @@ class DesignConditionInputViewer(QWidget):
                 apply_mode_param_order(self.tableWidget_design_data, [i for i in ids_design if i is not None])
             #if ids_general:
                 #apply_mode_param_order(self.tableWidget_general_data, [i for i in ids_general if i is not None])
+
+            ## 1111新修改-2金属温度单元格不可编辑
+            # 切换到设计模式后，重新应用NEN/BEM产品的特殊只读单元格
+            self._apply_special_readonly_for_nen_bem()
             return
 
         # 其他模式：查表里的“参数顺序”并应用
@@ -1160,6 +1349,10 @@ class DesignConditionInputViewer(QWidget):
                 if item is not None:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # 移除可编辑标志
             print(f"[DEBUG] 设计数据表格序号列已设为不可编辑")  # ✅ 调试打印
+
+        # # 1111新修改-2金属温度单元格不可编辑
+        # 切换到工作模式后，重新应用NEN/BEM产品的特殊只读单元格
+        self._apply_special_readonly_for_nen_bem()
 
     def eventFilter(self, obj, event):
         """
@@ -1204,3 +1397,83 @@ class DesignConditionInputViewer(QWidget):
     def _set_modified(self, modified=True):
         """标记数据是否已修改"""
         self._is_modified = modified
+
+    # 1112新修改-条件输入表格实质性变化
+    def _extract_table_data(self, table_widget):
+        """提取表格的所有数据内容，用于快照比较（忽略行顺序）"""
+        if not table_widget:
+            return {}
+        
+        data = {}
+        row_count = table_widget.rowCount()
+        col_count = table_widget.columnCount()
+        
+        # 提取表头信息
+        headers = []
+        for col in range(col_count):
+            header_item = table_widget.horizontalHeaderItem(col)
+            headers.append(header_item.text() if header_item else f"Col_{col}")
+        data['headers'] = headers
+        
+        # 提取所有单元格数据，并按内容排序以忽略行顺序
+        rows_data = []
+        for row in range(row_count):
+            row_data = []
+            for col in range(col_count):
+                item = table_widget.item(row, col)
+                cell_value = item.text() if item else ""
+                row_data.append(cell_value)
+            rows_data.append(tuple(row_data))  # 转为tuple便于排序和比较
+        
+        # 对行数据进行排序，这样即使行的顺序改变，只要内容相同就认为没有变化
+        rows_data.sort()
+        data['rows'] = rows_data
+        
+        return data
+
+    # 1112新修改-条件输入表格实质性变化
+    def _save_initial_snapshots(self):
+        """保存所有表格的初始状态快照"""
+        tables = [
+            ('design_data', self.tableWidget_design_data),
+            ('general_data', self.tableWidget_general_data),
+            ('product_std', self.tableWidget_product_std),
+            ('trail_data', self.tableWidget_trail_data),
+            ('coating_data', self.tableWidget_coating_data)
+        ]
+        
+        for table_name, table_widget in tables:
+            if table_widget:
+                self._initial_table_snapshots[table_name] = self._extract_table_data(table_widget)
+        
+        print(f"[快照] 已保存 {len(self._initial_table_snapshots)} 个表格的初始状态快照")
+
+    # 1112新修改-条件输入表格实质性变化
+    def _has_substantial_changes(self):
+        """检测是否有实质性变化（相对于初始状态）"""
+        if not self._initial_table_snapshots:
+            # 如果没有初始快照，认为没有变化
+            return False
+        
+        tables = [
+            ('design_data', self.tableWidget_design_data),
+            ('general_data', self.tableWidget_general_data),
+            ('product_std', self.tableWidget_product_std),
+            ('trail_data', self.tableWidget_trail_data),
+            ('coating_data', self.tableWidget_coating_data)
+        ]
+        
+        for table_name, table_widget in tables:
+            if not table_widget:
+                continue
+                
+            initial_data = self._initial_table_snapshots.get(table_name, {})
+            current_data = self._extract_table_data(table_widget)
+            
+            # 比较当前数据与初始数据
+            if initial_data != current_data:
+                print(f"[快照] 检测到表格 {table_name} 发生实质性变化")
+                return True
+        
+        print("[快照] 未检测到实质性变化")
+        return False

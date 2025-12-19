@@ -18,12 +18,13 @@ from modules.condition_input.funcs.funcs_cdt_input import load_design_data_if_ex
     render_coating_table, set_multilevel_headers, apply_table_style, highlight_missing_required_rows, \
     validate_required_fields, import_all_reference_data, save_local_condition_file, save_all_tables, \
     trigger_all_cross_table_relations, apply_design_data_dropdowns, apply_general_data_dropdowns, \
-    apply_trail_data_dropdowns, TrailTableComboDelegate, highlight_entire_row, shrink_index_column, shrink_unit_column,\
+    apply_trail_data_dropdowns, TrailTableComboDelegate, highlight_entire_row, shrink_index_column, shrink_unit_column, \
     get_ref_data_excel_path, fetch_all_mode_orders, capture_default_order, apply_mode_param_order
 from modules.chanpinguanli.chanpinguanli_main import product_manager
 from modules.condition_input.funcs.design_data_delegate import DesignDataDelegate  # 根据实际路径调整
 from modules.yudingyi.luoshuan import update_user_config_for_2_6_1
 from modules.chanpinguanli.project_confirm_btn import show_confirm_dialog
+
 product_id = None
 
 
@@ -37,7 +38,7 @@ def on_product_id_changed(new_id):
 product_manager.product_id_changed.connect(on_product_id_changed)
 
 
-#0903会议纪要 添加一个通用的检查函数，用于所有非项目管理界面
+# 0903会议纪要 添加一个通用的检查函数，用于所有非项目管理界面
 def check_project_and_product():
     """检查项目和产品状态的通用函数（修复变量引用问题）"""
     # 关键修改：直接通过bianl模块访问current_project_id
@@ -52,15 +53,17 @@ def check_project_and_product():
         return False, "请先创建至少一个产品！"
     return True, ""
 
+
 class DesignConditionInputViewer(QWidget):
     def __init__(self, line_tip=None):
         super().__init__()
 
         # ▼▼▼【核心修改 1】在最开始初始化状态变量 ▼▼▼
-        self._is_modified = False     # 关键！追踪界面数据是否被修改
-        self._is_loading_data = True  # 关键！开始初始化，标记为“正在加载”
+        self._is_modified = False  # 关键！追踪界面数据是否被修改
+        self._is_loading_data = True  # 关键！开始初始化，标记为"正在加载"
         self.original_window_title = ""  # UI加载后赋值
-
+        self._is_saved_to_design_db = False  # 记录产品是否已保存到产品设计活动库#1106新修改
+        self._has_confirmed_saved = False  # 记录是否点击过确认按钮保存#1106新修改
 
         # 0903会议纪要 首先进行项目和产品检查
         print("准备检查项目和产品状态...")
@@ -219,7 +222,7 @@ class DesignConditionInputViewer(QWidget):
                 # table.undo_stack.indexChanged.connect(lambda: setattr(self, "_is_modified", True))
         combo = getattr(self, "combo_mode", None)
         if combo:
-             combo.currentTextChanged.connect(lambda: self.mark_as_modified())
+            combo.currentTextChanged.connect(lambda: self.mark_as_modified())
 
         # 只对“设计数据”表开启单击打开多工况窗口
         self.tableWidget_design_data.viewport().installEventFilter(self)
@@ -248,7 +251,7 @@ class DesignConditionInputViewer(QWidget):
                 table.itemChanged.connect(self.handle_cell_input)
 
     # 1014lxy
-    def mark_as_modified(self, item=None): # item参数设为可选
+    def mark_as_modified(self, item=None):  # item参数设为可选
         """当任何数据被用户改变时，将界面标记为已修改"""
         # 正在加载数据时，任何信号都忽略
         if self._is_loading_data:
@@ -263,78 +266,73 @@ class DesignConditionInputViewer(QWidget):
         self.setWindowTitle(f"{self.original_window_title}*")
         print("条件输入界面已被修改，标记完成。")
 
+    # 1106新修改
     # 修改后 (弹窗提示)
     def can_be_closed(self):
         """
         供主窗口调用的关闭检查接口。
-        - 如果没有修改，直接返回 True。
-        - 如果有修改，弹窗询问用户操作（保存/不保存/取消）。
+        根据三种情况决定是否需要检查必填项：
+        情况1：新产品，第一次打开，没有保存到产品设计活动库 -> 即使没有修改也需要检查
+        情况2：新产品，第一次打开，进行了修改 -> 如果已确认保存且无新修改，不需要检查；否则需要检查
+        情况3：老产品，已保存到产品设计活动库 -> 如果没有修改或已确认保存且无新修改，不需要检查；否则需要检查
         返回: bool -> 是否可以安全关闭
         """
-        # 1. 如果没有被修改过，直接告诉主窗口“可以关闭”
-        if not self._is_modified:
+        # 判断是否需要检查必填项
+        need_check = self._should_check_required_fields()
+
+        if not need_check:
+            # 不需要检查，直接允许关闭
             return True
 
-        # 2. 如果有修改，弹出提示框询问用户
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setWindowTitle("确认关闭")
-        msg_box.setText(f"文档 '{self.original_window_title}' 有未保存的更改。")
-        msg_box.setInformativeText("有修改项未被保存，是否在关闭前保存更改？")
+        # 需要检查必填项
+        is_valid, missing_fields = self.only_check_validate_data()
 
-        # 添加三个标准按钮
-        save_button = msg_box.addButton("是", QMessageBox.AcceptRole)
-        discard_button = msg_box.addButton("否", QMessageBox.DestructiveRole)
-        cancel_button = msg_box.addButton("取消", QMessageBox.RejectRole)
+        if is_valid:
+            # 必填项完整，允许关闭
+            return True
 
-        msg_box.setDefaultButton(save_button)  # 默认选中“保存”
+        # 必填项不完整，弹窗提示
+        msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否确认继续关闭？")
+        reply = show_confirm_dialog(self, "提示", msg)
 
-        msg_box.exec_()
+        if reply:
+            # 用户选择继续关闭
+            return True
+        else:
+            # 用户选择取消关闭
+            return False
 
-        clicked_button = msg_box.clickedButton()
+    # 1106新修改
+    def _should_check_required_fields(self):
+        """
+        判断是否需要检查必填项
+        返回: bool -> True表示需要检查，False表示不需要检查
 
-        # 3. 根据用户的选择执行相应操作
-        if clicked_button == save_button:
-            # 用户选择“保存”
-            print("用户选择保存。")
-            try:
-                # 执行核心保存操作
-                if not save_local_condition_file(self.product_id, self):
-                    raise IOError("保存本地条件文件失败。")
-                save_all_tables(self, self.product_id)
+        三种情况：
+        情况1：新产品，第一次打开，没有保存到产品设计活动库 -> 即使没有修改也需要检查
+        情况2：新产品，第一次打开，进行了修改 -> 如果已确认保存且无新修改，不需要检查；否则需要检查
+        情况3：老产品，已保存到产品设计活动库 -> 如果没有修改或已确认保存且无新修改，不需要检查；否则需要检查
+        """
+        # 情况1和情况2：新产品，第一次打开，没有保存到产品设计活动库
+        if not self._is_saved_to_design_db:
+            # 如果已确认保存且没有新修改，不需要检查（情况2的特殊情况）
+            if self._has_confirmed_saved and not self._is_modified:
+                return False
+            # 否则需要检查（情况1：没有修改也需要检查；情况2：有修改或未保存需要检查）
+            return True
 
-                # 保存成功后，重置状态并允许关闭
-                self._is_modified = False
-                self.setWindowTitle(self.original_window_title)
-                print("保存成功！现在可以关闭。")
-                if hasattr(self, 'line_tip') and self.line_tip:
-                    self.line_tip.setText("关闭前保存成功！")
-                    self.line_tip.setStyleSheet("color: black;")  # 确保设置黑色
-                    self.line_tip.setToolTip("关闭前保存成功！")
-                    if hasattr(self, 'tip_timer'):
-                        self.tip_timer.start(5000)
-                return True  # 返回 True，主窗口继续关闭
+        # 情况3：老产品，已保存到产品设计活动库
+        # 如果没有任何修改，不需要检查
+        if not self._is_modified:
+            return False
 
-            except Exception as e:
-                # 如果保存失败，弹窗提示并阻止关闭
-                print(f"保存失败，无法关闭: {e}")
-                QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，关闭操作已取消。\n\n错误信息: {e}")
-                return False  # 返回 False，主窗口中断关闭
+        # 如果有修改，检查是否已确认保存且没有新的修改
+        # 如果_has_confirmed_saved为True但_is_modified也为True，说明保存后又有新修改，需要检查
+        # 如果_has_confirmed_saved为True且_is_modified为False，说明保存后没有新修改，不需要检查
+        # 但上面的逻辑已经处理了_is_modified为False的情况，所以这里_is_modified一定是True
+        # 因此，只要_is_modified为True，就需要检查（无论_has_confirmed_saved的值）
+        return True
 
-        elif clicked_button == discard_button:
-            # 用户选择“不保存”
-            print("用户选择不保存，直接关闭。")
-            # 直接允许关闭
-            return True  # 返回 True，主窗口继续关闭
-
-        elif clicked_button == cancel_button:
-            # 用户选择“取消”
-            print("用户取消了关闭操作。")
-            # 阻止关闭
-            return False  # 返回 False，主窗口中断关闭
-
-        # 以防万一用户直接关闭了提示框，也当作取消
-        return False
     # def can_be_closed(self): 无弹窗提示直接关闭版
     #     """
     #     供主窗口调用的关闭检查接口。
@@ -373,7 +371,7 @@ class DesignConditionInputViewer(QWidget):
     #         print(f"自动保存失败，无法关闭: {e}")
     #         QMessageBox.critical(self, "保存失败", f"自动保存数据时发生错误，关闭操作已取消。\n\n错误信息: {e}")
     #         return False  # 返回失败，主窗口将中断关闭操作
-# lxy1014
+    # lxy1014
     def clear_line_tip(self):
         """5秒后自动清空line_tip的文本和样式（避免残留）"""
         # 先判断line_tip是否存在，防止空指针错误
@@ -395,10 +393,16 @@ class DesignConditionInputViewer(QWidget):
 
         if not result or not result.get("import_status"):
             QMessageBox.information(self, "提示", "未找到设计数据，表格将保持为空。")
+            # 如果没有导入数据，默认为新产品（未保存到设计活动库）#1106新修改
+            self._is_saved_to_design_db = False
+            self.design_data_source = "条件模板"
             return
 
         self.design_data_source = result["data_source_status"]
         print(f"数据来源：{self.design_data_source}")
+        # 记录产品是否已保存到产品设计活动库 #1106新修改
+        self._is_saved_to_design_db = (self.design_data_source == "设计活动库")
+        print(f"产品是否已保存到设计活动库：{self._is_saved_to_design_db}")
 
         # ❗️没有导入数据，提示后返回（错误/空数据情况需要用户知道）
         if not result.get("import_status", False):
@@ -429,9 +433,9 @@ class DesignConditionInputViewer(QWidget):
         )
 
         # === 记录默认顺序（用于保存/导出固定顺序写出）===
-        #capture_default_order(self.tableWidget_product_std)
+        # capture_default_order(self.tableWidget_product_std)
         capture_default_order(self.tableWidget_design_data)
-        #capture_default_order(self.tableWidget_general_data)
+        # capture_default_order(self.tableWidget_general_data)
 
         set_multilevel_headers(
             self.tableWidget_trail_data,
@@ -545,6 +549,7 @@ class DesignConditionInputViewer(QWidget):
 
         table_widget.resizeColumnsToContents()
 
+    # 1106新修改
     def on_input_ref_data_clicked(self):
         if not getattr(self, "_is_valid_product", True):
             self.line_tip.setText("当前未选择产品，无法导入参考数据")
@@ -562,68 +567,33 @@ class DesignConditionInputViewer(QWidget):
             if not file_path:
                 return  # 用户取消选择，直接返回
 
-            # 执行导入操作
-            import_all_reference_data(file_path, self)
-            QMessageBox.information(self, "成功", "成功导入参考数据！")
+            # 导入前阻塞信号，防止触发自动高亮 #1106新修改
+            self.tableWidget_design_data.blockSignals(True)
+            self.tableWidget_general_data.blockSignals(True)
 
-            # 关键：导入后标记为未保存 1014
-            self._is_modified = True  # <--- 新增这一行
+            try:
+                # 执行导入操作
+                import_all_reference_data(file_path, self)
+                QMessageBox.information(self, "成功", "成功导入参考数据！")
+
+                # 关键：导入后标记为未保存 1014
+                self._is_modified = True  # <--- 新增这一行
+
+                # 导入后清除所有高亮，确保不会显示缺失项高亮 #1106新修改
+                self.clear_all_highlights()
+            finally:
+                # 恢复信号
+                self.tableWidget_design_data.blockSignals(False)
+                self.tableWidget_general_data.blockSignals(False)
 
         except Exception as e:
             QMessageBox.critical(self, "导入失败", str(e))
+            # 确保异常时也恢复信号 #1106新修改
+            self.tableWidget_design_data.blockSignals(False)
+            self.tableWidget_general_data.blockSignals(False)
 
     def render_grouped_table(self, table_widget, grouped_data, headers, group_key_column=0):
         render_grouped_table(table_widget, grouped_data, headers, group_key_column)
-
-    # 保存及检查必填项 lxy1012
-    # def check_and_save_data1(self, force=False, skip_confirm=False):
-    #     """
-    #     保存及检查必填项
-    #     :param force: 是否强制保存（确认按钮时 True，切换/关闭时 False）
-    #     :return: 检查结果 + 缺失字段（元组）
-    #     """
-    #     print(f"[调试] check_and_save_data：force={force}, _is_modified={self._is_modified}")  # 新增日志
-    #     if not getattr(self, "_is_valid_product", True):
-    #         return (True, [])  # 空界面不用保存，返回成功和空列表
-    #
-    #     try:
-    #         # 新增：优先判断是否有未保存的修改
-    #         if self._is_modified and not force:
-    #             # 有未保存修改，且不是强制保存场景 → 阻止关闭
-    #             return (False, [])
-    #         # 检查必填项
-    #         has_missing_dsg, missing_dsg = validate_required_fields(
-    #             self.tableWidget_design_data, mode="设计数据"
-    #         )
-    #         has_missing_common, missing_common = validate_required_fields(
-    #             self.tableWidget_general_data, mode="通用数据"
-    #         )
-    #
-    #         missing_fields = [name for _, name in (missing_dsg + missing_common)]
-    #
-    #         # 1. 切换/关闭场景（force=False）：只检查不提示，返回检查结果和缺失字段
-    #         if not force:
-    #             # 高亮未填项
-    #             if has_missing_dsg or has_missing_common:
-    #                 self._validation_triggered = True
-    #                 highlight_missing_required_rows(self.tableWidget_design_data, missing_dsg)
-    #                 highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
-    #                 return (False, missing_fields)  # 检查失败，返回缺失字段
-    #             return (True, [])  # 检查通过
-    #
-    #         # 2. 主动保存场景（force=True）：有未填项时才弹提示
-    #         if has_missing_dsg or has_missing_common:
-    #             self._validation_triggered = True
-    #             highlight_missing_required_rows(self.tableWidget_design_data, missing_dsg)
-    #             highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
-    #         self.tip_timer.stop()
-    #         self.tip_timer.start(5000)
-    #         self._is_modified = False
-    #         return (True, [])
-    #
-    #     except Exception as e:
-    #         QMessageBox.critical(self, "保存失败1", f"保存数据出错：\n{str(e)}")
-    #         return (False, [])
 
     def only_check_validate_data(self, force=False):
         """
@@ -651,19 +621,20 @@ class DesignConditionInputViewer(QWidget):
                 highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
 
                 # 返回 False，表示有未填写的必填项
-                return False,missing_fields
+                return False, missing_fields
 
             # 如果没有缺失项，则返回 True
-            return True,[]
+            return True, []
 
         except Exception as e:
             print(f"检查数据出错：{str(e)}")
-            return False,[]
+            return False, []
 
     # 这个方法现在只由他将输入界面的“确认”按钮调用 (force=True)
+    # 1106新修改
     def check_and_save_data(self, force=False, skip_confirm=False):
         """
-        【保留功能】仅用于用户点击“确认”按钮时，检查必填项并保存。
+        【保留功能】仅用于用户点击“确认”按钮时，检查必填项、以及保存。
         """
         if not getattr(self, "_is_valid_product", True):
             return (True, [])
@@ -685,7 +656,7 @@ class DesignConditionInputViewer(QWidget):
                 highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
 
                 # 保留您的弹窗询问逻辑
-                if skip_confirm==False:
+                if skip_confirm == False:
                     msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否确认继续保存？")
                     if not show_confirm_dialog(self, "提示", msg):
                         return (False, missing_fields)
@@ -696,6 +667,46 @@ class DesignConditionInputViewer(QWidget):
             save_all_tables(self, self.product_id)
             update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
 
+            # ✅ 保存成功后，同步固定鞍座的鞍座高度
+            try:
+                from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
+                    get_fixed_saddle_element_id_from_db
+                element_id = get_fixed_saddle_element_id_from_db(self.product_id)
+                if element_id:
+                    sync_saddle_height_on_tab_refresh(self.product_id, element_id)
+                    print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+            except Exception as e:
+                print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+
+            # 1109新修改-元件定义-垫片
+            # ✅ 保存成功后，校验垫片并更新尺寸
+            try:
+                from modules.cailiaodingyi.controllers.check_dianpian import check_gasket_params, \
+                    update_gasket_dimensions_after_pn
+                # 创建一个临时对象，用于调用check_gasket_params
+                # check_gasket_params需要self.last_confirmed_product_id和self.line_tip
+                class TempChecker:
+                    def __init__(self, product_id, line_tip):
+                        self.last_confirmed_product_id = product_id
+                        self.line_tip = line_tip
+
+                temp_checker = TempChecker(self.product_id, self.line_tip)
+                # 调用check_gasket_params，获取需要更新尺寸的垫片列表
+                gaskets_to_update = check_gasket_params(temp_checker)
+
+                # 遍历所有垫片，调用update_gasket_dimensions_after_pn更新尺寸
+                if gaskets_to_update:
+                    print(f"[条件输入保存] 开始更新{len(gaskets_to_update)}个垫片的尺寸")
+                    for pid, gid, gname, pn_val in gaskets_to_update:
+                        try:
+                            update_gasket_dimensions_after_pn(pid, gid, gname, pn_val)
+                            print(f"[条件输入保存] 已更新垫片={gname}, 元件ID={gid}, PN={pn_val}")
+                        except Exception as e:
+                            print(f"[条件输入保存] 更新垫片尺寸失败: 垫片={gname}, 元件ID={gid}, 错误={e}")
+                else:
+                    print(f"[条件输入保存] 没有需要更新尺寸的垫片")
+            except Exception as e:
+                print(f"[条件输入保存] 垫片校验失败: {e}")
 
             # 保存成功后清理状态
             self._validation_triggered = False
@@ -710,6 +721,10 @@ class DesignConditionInputViewer(QWidget):
             # 关键：保存成功后，重置修改状态
             self._is_modified = False
             self.setWindowTitle(self.original_window_title)  # 恢复窗口标题
+            # 标记已点击确认按钮保存
+            self._has_confirmed_saved = True
+            # 保存后，产品已保存到设计活动库
+            self._is_saved_to_design_db = True
 
             return (True, [])
 
@@ -717,256 +732,287 @@ class DesignConditionInputViewer(QWidget):
             QMessageBox.critical(self, "保存失败", f"保存数据出错：\n{str(e)}")
             return (False, [])
 
+    # 1106新修改
     def check_and_save_datagb(self, force=False, skip_confirm=False):
         """
-        【调试专用版本】
         用于用户点击关闭界面时，检查必填项并保存。
-        增加了详细的日志和对可疑函数的隔离。
+        根据三种情况决定是否需要检查必填项。
+        返回: (bool, list) -> (是否可以关闭, 缺失字段列表)
         """
-        print("\n--- [BUG HUNT] '条件输入'的 check_and_save_datagb 开始执行 ---")
-
         if not getattr(self, "_is_valid_product", True):
-            print("[BUG HUNT] 1. _is_valid_product 为 False，提前退出。")
+            return (True, [])
+
+        # 判断是否需要检查必填项
+        need_check = self._should_check_required_fields()
+
+        if not need_check:
+            # 不需要检查，直接允许关闭
             return (True, [])
 
         try:
-            # --- 调试步骤 1: 暂时绕过最可疑的函数 ---
-            # 我们先假设没有缺失项，直接跳过 validate_required_fields 和 highlight_missing_required_rows
-            # 如果这样就不再闪退，就证明 bug 就在这两个函数之一。
-            print("[BUG HUNT] 2. 准备调用 validate_required_fields...")
-
-            # ▼▼▼ 崩溃最可能发生在这里 ▼▼▼
-            has_missing_dsg, missing_dsg = validate_required_fields(
-                self.tableWidget_design_data, mode="设计数据"
-            )
-            print("[BUG HUNT] 3. '设计数据' 验证函数成功返回。")
-
-            has_missing_common, missing_common = validate_required_fields(
-                self.tableWidget_general_data, mode="通用数据"
-            )
-            print("[BUG HUNT] 4. '通用数据' 验证函数成功返回。")
-            # ▲▲▲ 如果日志能打印到这里，说明上面两行没问题 ▲▲▲
-
-            missing_fields = [name for _, name in (missing_dsg + missing_common)]
-
-            if has_missing_dsg or has_missing_common:
-                print("[BUG HUNT] 5. 发现缺失项，进入高亮和弹窗逻辑。")
-                self._validation_triggered = True
-
-                print("[BUG HUNT] 5.1. 准备调用 highlight_missing_required_rows...")
-                highlight_missing_required_rows(self.tableWidget_design_data, missing_dsg)
-                highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
-                print("[BUG HUNT] 5.2. 高亮函数成功返回。")
-
-                if not skip_confirm:
-                    msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否确认继续关闭？")
-                    if show_confirm_dialog(self, "提示", msg):
-                        print("[BUG HUNT] 6. 用户选择'是'，执行保存。")
+            # 需要检查必填项
+            is_valid, missing_fields = self.only_check_validate_data()
+            if is_valid:
+                # 必填项完整，但有修改，直接保存（不弹窗）
+                if self._is_modified:
+                    try:
+                        # 执行保存操作
                         if not save_local_condition_file(self.product_id, self):
-                            return (False, missing_fields)
+                            raise IOError("保存本地条件文件失败。")
                         save_all_tables(self, self.product_id)
                         update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
+                        # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                        try:
+                            from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
+                                get_fixed_saddle_element_id_from_db
+                            element_id = get_fixed_saddle_element_id_from_db(self.product_id)
+                            if element_id:
+                                sync_saddle_height_on_tab_refresh(self.product_id, element_id)
+                                print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                        except Exception as e:
+                            print(f"[条件输入保存] 鞍座高度同步失败: {e}")
 
-                        # ... 省略UI更新代码 ...
+                        # 保存成功后，重置状态并允许关闭
                         self._is_modified = False
+                        self.setWindowTitle(self.original_window_title)
+                        self._has_confirmed_saved = True
+                        self._is_saved_to_design_db = True
+                        print("保存成功！现在可以关闭。")
+                        if hasattr(self, 'line_tip') and self.line_tip:
+                            self.line_tip.setText("保存成功！")
+                            self.line_tip.setStyleSheet("color: black;")
+                            self.line_tip.setToolTip("保存成功！")
+                            if hasattr(self, 'tip_timer'):
+                                self.tip_timer.start(5000)
                         return (True, [])
-                    else:
-                        print("[BUG HUNT] 7. 用户选择'否'，阻止关闭。")
-                        return (False, missing_fields)
 
-            # 如果没有缺失项，代码会执行到这里
-            print("[BUG HUNT] 8. 没有发现缺失项，方法正常结束。")
-            # 添加一个明确的返回，避免隐式返回 None
-            return (True, [])
+                    except Exception as e:
+                        # 如果保存失败，弹窗提示并阻止关闭
+                        print(f"保存失败，无法关闭: {e}")
+                        QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，关闭操作已取消。\n\n错误信息: {e}")
+                        return (False, [])
+                # 必填项完整，没有修改，直接允许关闭
+                return (True, [])
+            # 必填项不完整，弹窗提示
+            if not skip_confirm:
+                msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否确认继续关闭？")
+                reply = show_confirm_dialog(self, "提示", msg)
+                if not reply:
+                    # 用户选择取消关闭
+                    return (False, missing_fields)
+            # 用户选择继续关闭，需要保存数据
+            try:
+                # 执行保存操作
+                if not save_local_condition_file(self.product_id, self):
+                    raise IOError("保存本地条件文件失败。")
+                save_all_tables(self, self.product_id)
+                update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
+
+                # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                try:
+                    from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
+                        get_fixed_saddle_element_id_from_db
+                    element_id = get_fixed_saddle_element_id_from_db(self.product_id)
+                    if element_id:
+                        sync_saddle_height_on_tab_refresh(self.product_id, element_id)
+                        print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                except Exception as e:
+                    print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+
+                # 1109新修改-元件定义-垫片
+                # ✅ 保存成功后，校验垫片并更新尺寸
+                try:
+                    from modules.cailiaodingyi.controllers.check_dianpian import check_gasket_params, \
+                        update_gasket_dimensions_after_pn
+                    # 创建一个临时对象，用于调用check_gasket_params
+                    # check_gasket_params需要self.last_confirmed_product_id和self.line_tip
+                    class TempChecker:
+                        def __init__(self, product_id, line_tip):
+                            self.last_confirmed_product_id = product_id
+                            self.line_tip = line_tip
+
+                    temp_checker = TempChecker(self.product_id, self.line_tip)
+                    # 调用check_gasket_params，获取需要更新尺寸的垫片列表
+                    gaskets_to_update = check_gasket_params(temp_checker)
+
+                    # 遍历所有垫片，调用update_gasket_dimensions_after_pn更新尺寸
+                    if gaskets_to_update:
+                        print(f"[条件输入保存] 开始更新{len(gaskets_to_update)}个垫片的尺寸")
+                        for pid, gid, gname, pn_val in gaskets_to_update:
+                            try:
+                                update_gasket_dimensions_after_pn(pid, gid, gname, pn_val)
+                                print(f"[条件输入保存] 已更新垫片={gname}, 元件ID={gid}, PN={pn_val}")
+                            except Exception as e:
+                                print(f"[条件输入保存] 更新垫片尺寸失败: 垫片={gname}, 元件ID={gid}, 错误={e}")
+                    else:
+                        print(f"[条件输入保存] 没有需要更新尺寸的垫片")
+                except Exception as e:
+                    print(f"[条件输入保存] 垫片校验失败: {e}")
+
+                # 保存成功后，重置状态并允许关闭
+                self._is_modified = False
+                self.setWindowTitle(self.original_window_title)
+                self._has_confirmed_saved = True
+                self._is_saved_to_design_db = True
+                print("保存成功！现在可以关闭。")
+                if hasattr(self, 'line_tip') and self.line_tip:
+                    self.line_tip.setText("保存成功！")
+                    self.line_tip.setStyleSheet("color: black;")
+                    self.line_tip.setToolTip("保存成功！")
+                    if hasattr(self, 'tip_timer'):
+                        self.tip_timer.start(5000)
+                return (True, missing_fields)
+
+            except Exception as e:
+                # 如果保存失败，弹窗提示并阻止关闭
+                print(f"保存失败，无法关闭: {e}")
+                QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，关闭操作已取消。\n\n错误信息: {e}")
+                return (False, missing_fields)
 
         except Exception as e:
-            print(f"[BUG HUNT] 捕获到 Python 异常: {e}")
-            QMessageBox.critical(self, "保存失败", f"保存数据出错：\n{str(e)}")
+            print(f"检查数据出错：{str(e)}")
+            QMessageBox.critical(self, "检查失败", f"检查数据时发生错误：\n{str(e)}")
             return (False, [])
 
-    # 关闭条件输入界面用
-    # def check_and_save_datagb(self, force=False, skip_confirm=False):
-    #     """
-    #     用于用户点击关闭界面时，检查必填项并保存。
-    #     """
-    #     if not getattr(self, "_is_valid_product", True):
-    #         return (True, [])
-    #
-    #     try:
-    #         # 检查必填项
-    #         has_missing_dsg, missing_dsg = validate_required_fields(
-    #             self.tableWidget_design_data, mode="设计数据"
-    #         )
-    #         has_missing_common, missing_common = validate_required_fields(
-    #             self.tableWidget_general_data, mode="通用数据"
-    #         )
-    #
-    #         missing_fields = [name for _, name in (missing_dsg + missing_common)]
-    #
-    #         if has_missing_dsg or has_missing_common:
-    #             self._validation_triggered = True  # 保留您的实时高亮逻辑
-    #             highlight_missing_required_rows(self.tableWidget_design_data, missing_dsg)
-    #             highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
-    #
-    #             # 保留您的弹窗询问逻辑
-    #             if skip_confirm==False:
-    #                 msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否继续关闭？")
-    #                 reply = QMessageBox.question(self, "提示", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-    #                 # if reply == QMessageBox.No:
-    #                 #     return (False, missing_fields)
-    #                 if reply == QMessageBox.Yes:
-    #                     # 执行保存操作
-    #                     if not save_local_condition_file(self.product_id, self):
-    #                         return (False, missing_fields)
-    #                     save_all_tables(self, self.product_id)
-    #
-    #                     # 保存成功后清理状态
-    #                     self._validation_triggered = False
-    #                     self.clear_all_highlights()
-    #                     self.line_tip.setText("保存成功！")
-    #                     self.line_tip.setToolTip("保存成功！")
-    #                     self.line_tip.setStyleSheet("color: black;")
-    #
-    #                     self.tip_timer.stop()
-    #                     self.tip_timer.start(5000)
-    #
-    #                     # 关键：保存成功后，重置修改状态
-    #                     self._is_modified = False
-    #                     self.setWindowTitle(self.original_window_title)  # 恢复窗口标题
-    #                     return (True, [])
-    #                 else:
-    #                     return (False, missing_fields)
-    #
-    #     except Exception as e:
-    #         QMessageBox.critical(self, "保存失败", f"保存数据出错：\n{str(e)}")
-    #         return (False, [])
-
+    # 1106新修改
     def check_and_save_dataqh(self, force=False, skip_confirm=False):
         """
         用于用户从条件输入界面切换至其他界面时，检查必填项并保存。
+        根据三种情况决定是否需要检查必填项。
+        返回: (bool, list) -> (是否可以切换, 缺失字段列表)
         """
         if not getattr(self, "_is_valid_product", True):
             return (True, [])
 
-        try:
-            # 检查必填项
-            has_missing_dsg, missing_dsg = validate_required_fields(
-                self.tableWidget_design_data, mode="设计数据"
-            )
-            has_missing_common, missing_common = validate_required_fields(
-                self.tableWidget_general_data, mode="通用数据"
-            )
-
-            missing_fields = [name for _, name in (missing_dsg + missing_common)]
-
-            if has_missing_dsg or has_missing_common:
-                self._validation_triggered = True  # 保留您的实时高亮逻辑
-                highlight_missing_required_rows(self.tableWidget_design_data, missing_dsg)
-                highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
-
-                # 保留您的弹窗询问逻辑
-                if skip_confirm==False:
-                    msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否确认继续切换界面？")
-                    if not show_confirm_dialog(self, "提示", msg):
-                        return (False, missing_fields)
-
-            # 执行保存操作
-            if not save_local_condition_file(self.product_id, self):
-                return (False, missing_fields)
-            save_all_tables(self, self.product_id)
-            update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
-
-
-            # 保存成功后清理状态
-            self._validation_triggered = False
-            self.clear_all_highlights()
-            self.line_tip.setText("保存成功！")
-            self.line_tip.setToolTip("保存成功！")
-            self.line_tip.setStyleSheet("color: black;")
-
-            self.tip_timer.stop()
-            self.tip_timer.start(5000)
-
-            # 关键：保存成功后，重置修改状态
-            self._is_modified = False
-            self.setWindowTitle(self.original_window_title)  # 恢复窗口标题
-
+        # 判断是否需要检查必填项
+        need_check = self._should_check_required_fields()
+        if not need_check:
+            # 不需要检查，直接允许切换
             return (True, [])
+        try:
+            # 需要检查必填项
+            is_valid, missing_fields = self.only_check_validate_data()
+            if is_valid:
+                # 必填项完整，但有修改，直接保存（不弹窗）
+                if self._is_modified:
+                    try:
+                        # 执行保存操作
+                        if not save_local_condition_file(self.product_id, self):
+                            raise IOError("保存本地条件文件失败。")
+                        save_all_tables(self, self.product_id)
+                        update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
+                        # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                        try:
+                            from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
+                                get_fixed_saddle_element_id_from_db
+                            element_id = get_fixed_saddle_element_id_from_db(self.product_id)
+                            if element_id:
+                                sync_saddle_height_on_tab_refresh(self.product_id, element_id)
+                                print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                        except Exception as e:
+                            print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+                        #
+                        # 1109新修改-元件定义-垫片
+                        # ✅ 保存成功后，校验垫片并更新尺寸
+                        try:
+                            from modules.cailiaodingyi.controllers.check_dianpian import check_gasket_params, \
+                                update_gasket_dimensions_after_pn
+                            # 创建一个临时对象，用于调用check_gasket_params
+                            # check_gasket_params需要self.last_confirmed_product_id和self.line_tip
+                            class TempChecker:
+                                def __init__(self, product_id, line_tip):
+                                    self.last_confirmed_product_id = product_id
+                                    self.line_tip = line_tip
+
+                            temp_checker = TempChecker(self.product_id, self.line_tip)
+                            # 调用check_gasket_params，获取需要更新尺寸的垫片列表
+                            gaskets_to_update = check_gasket_params(temp_checker)
+
+                            # 遍历所有垫片，调用update_gasket_dimensions_after_pn更新尺寸
+                            if gaskets_to_update:
+                                print(f"[条件输入保存] 开始更新{len(gaskets_to_update)}个垫片的尺寸")
+                                for pid, gid, gname, pn_val in gaskets_to_update:
+                                    try:
+                                        update_gasket_dimensions_after_pn(pid, gid, gname, pn_val)
+                                        print(f"[条件输入保存] 已更新垫片={gname}, 元件ID={gid}, PN={pn_val}")
+                                    except Exception as e:
+                                        print(f"[条件输入保存] 更新垫片尺寸失败: 垫片={gname}, 元件ID={gid}, 错误={e}")
+                            else:
+                                print(f"[条件输入保存] 没有需要更新尺寸的垫片")
+                        except Exception as e:
+                            print(f"[条件输入保存] 垫片校验失败: {e}")
+
+                        # 保存成功后，重置状态并允许切换
+                        self._is_modified = False
+                        self.setWindowTitle(self.original_window_title)
+                        self._has_confirmed_saved = True
+                        self._is_saved_to_design_db = True
+                        print("保存成功！现在可以切换。")
+                        if hasattr(self, 'line_tip') and self.line_tip:
+                            self.line_tip.setText("保存成功！")
+                            self.line_tip.setStyleSheet("color: black;")
+                            self.line_tip.setToolTip("保存成功！")
+                            if hasattr(self, 'tip_timer'):
+                                self.tip_timer.start(5000)
+                        return (True, [])
+
+                    except Exception as e:
+                        # 如果保存失败，弹窗提示并阻止切换
+                        print(f"保存失败，无法切换: {e}")
+                        QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，切换操作已取消。\n\n错误信息: {e}")
+                        return (False, [])
+                # 必填项完整，没有修改，直接允许切换
+                return (True, [])
+            # 必填项不完整，弹窗提示
+            if not skip_confirm:
+                msg = ("以下必填项：\n" + "、".join(missing_fields) + "\n对应参数值不能为空。\n是否确认继续切换界面？")
+                reply = show_confirm_dialog(self, "提示", msg)
+                if not reply:
+                    # 用户选择取消切换
+                    return (False, missing_fields)
+
+            # 用户选择继续切换，需要保存数据
+            try:
+                # 执行核心保存操作
+                if not save_local_condition_file(self.product_id, self):
+                    raise IOError("保存本地条件文件失败。")
+                save_all_tables(self, self.product_id)
+                update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
+                # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                try:
+                    from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
+                        get_fixed_saddle_element_id_from_db
+                    element_id = get_fixed_saddle_element_id_from_db(self.product_id)
+                    if element_id:
+                        sync_saddle_height_on_tab_refresh(self.product_id, element_id)
+                        print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                except Exception as e:
+                    print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+
+                # 保存成功后，重置状态并允许切换
+                self._is_modified = False
+                self.setWindowTitle(self.original_window_title)
+                self._has_confirmed_saved = True
+                self._is_saved_to_design_db = True
+                print("保存成功！现在可以切换。")
+                if hasattr(self, 'line_tip') and self.line_tip:
+                    self.line_tip.setText("保存成功！")
+                    self.line_tip.setStyleSheet("color: black;")
+                    self.line_tip.setToolTip("保存成功！")
+                    if hasattr(self, 'tip_timer'):
+                        self.tip_timer.start(5000)
+                return (True, missing_fields)
+
+            except Exception as e:
+                # 如果保存失败，弹窗提示并阻止切换
+                print(f"保存失败，无法切换: {e}")
+                QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，切换操作已取消。\n\n错误信息: {e}")
+                return (False, missing_fields)
 
         except Exception as e:
-            QMessageBox.critical(self, "保存失败", f"保存数据出错：\n{str(e)}")
+            print(f"检查数据出错：{str(e)}")
+            QMessageBox.critical(self, "检查失败", f"检查数据时发生错误：\n{str(e)}")
             return (False, [])
-    # def check_and_save_data(self, force=False):
-    #     """
-    #     保存及检查必填项
-    #     :param force: 是否强制保存（确认按钮时 True，切换/关闭时 False）
-    #     :return: 检查结果 + 缺失字段（元组）
-    #     """
-    #     if not getattr(self, "_is_valid_product", True):
-    #         return True  # 空界面不用保存，返回成功和空列表
-    #
-    #     # 如果不是强制保存，并且没有修改过数据，就直接跳过 1012lxy修改 将此处注释
-    #     # if not force and not getattr(self, "_is_modified", False):
-    #     #     return True
-    #
-    #     try:
-    #         # 检查必填项
-    #         has_missing_dsg, missing_dsg = validate_required_fields(
-    #             self.tableWidget_design_data, mode="设计数据"
-    #         )
-    #         has_missing_common, missing_common = validate_required_fields(
-    #             self.tableWidget_general_data, mode="通用数据"
-    #         )
-    #
-    #         if has_missing_dsg or has_missing_common:
-    #             # ===lxy101 核心修改点 1: 打开实时验证的“开关” ===
-    #             self._validation_triggered = True  # <--- 在发现错误时，激活实时高亮清除功能
-    #
-    #             missing_fields = [name for _, name in (missing_dsg + missing_common)]
-    #             msg = (
-    #                     "以下必填项：\n"
-    #                     + "、".join(missing_fields)
-    #                     + "\n对应参数值不能为空。\n是否继续保存？"
-    #             )
-    #
-    #             # 自定义“是 / 否”按钮
-    #             box = QMessageBox(self)
-    #             box.setIcon(QMessageBox.Question)
-    #             box.setWindowTitle("提示")
-    #             box.setText(msg)
-    #             yes_btn = box.addButton("是", QMessageBox.YesRole)
-    #             no_btn = box.addButton("否", QMessageBox.NoRole)
-    #             box.setDefaultButton(no_btn)
-    #             box.exec_()
-    #
-    #             # 始终高亮未填项
-    #             highlight_missing_required_rows(self.tableWidget_design_data, missing_dsg)
-    #             highlight_missing_required_rows(self.tableWidget_general_data, missing_common)
-    #
-    #             if box.clickedButton() == no_btn:
-    #                 return False
-    #             # 如果点“是”，继续保存
-    #
-    #         # 保存操作
-    #         if not save_local_condition_file(self.product_id, self):
-    #             return False
-    #         save_all_tables(self, self.product_id)
-    #
-    #         # ===lxy101 核心修改点 2: 保存成功后，关闭“开关”并清除高亮 ===
-    #         self._validation_triggered = False  # <--- 保存成功，重置标志
-    #         self.clear_all_highlights()      # <--- 调用您已有的清除函数
-    #
-    #         self.line_tip.setText("保存成功！")
-    #         self.line_tip.setToolTip("保存成功！")
-    #         self.line_tip.setStyleSheet("color: black;")
-    #
-    #         # 保存完成后清除修改标志
-    #         self._is_modified = False
-    #         return True
-    #
-    #     except Exception as e:
-    #         QMessageBox.critical(self, "保存失败", f"保存数据出错：\n{str(e)}")
-    #         return False
 
     # lxy101 新增清除高亮
     def clear_all_highlights(self):
@@ -1014,36 +1060,6 @@ class DesignConditionInputViewer(QWidget):
         finally:
             # ▼▼▼【核心修改 2.3】处理完成后，一定要恢复信号 ▼▼▼
             table_widget.blockSignals(False)
-    # # lxy101 新增单元格输入 1014lxy
-    # def handle_cell_input(self, table_widget, row, col):
-    #     """处理单元格输入，实时校验并更新高亮状态"""
-    #
-    #     # === 核心修改点 3: 检查“开关”状态 ===
-    #     # # 如果验证从未被触发过，则直接返回，不执行任何操作
-    #     # if not self._validation_triggered:
-    #     #     return
-    #
-    #
-    #     if self._is_loading_data:
-    #         return # 排除加载阶段的修改
-    #     # 关键：只要修改就标记为未保存（移除 _validation_triggered 判断）
-    #     self._is_modified = True
-    #     print(f"[调试] 数据修改后，_is_modified = {self._is_modified}")  # 新增日志
-    #
-    #     # === 关键修复：在处理前，临时阻塞信号，防止无限循环 ===
-    #     table_widget.blockSignals(True)
-    #     try:
-    #         # 1. 确定当前操作的是哪个表格，获取对应的模式名称
-    #         # mode = "设计数据" if table_widget == self.tableWidget_design_data else "通用数据"
-    #         # 2. 重新对当前表格的所有必填项进行校验
-    #         # has_missing, missing_fields = validate_required_fields(table_widget, mode=mode)
-    #         # 3. 根据最新的校验结果，直接更新高亮
-    #         # highlight_missing_required_rows(table_widget, missing_fields)
-    #         pass
-    #     finally:
-    #         # === 关键修复：处理完成后，一定要恢复信号，确保用户下一次输入能被响应 ===
-    #         table_widget.blockSignals(False)
-    # # lxy101 - 之后的代码部分省略
 
     def export_condition_file(self):
         """
@@ -1094,7 +1110,7 @@ class DesignConditionInputViewer(QWidget):
             else:
                 QMessageBox.critical(self, "导出失败", err_msg)
 
-    #新增 模式切换处理函数
+    # 新增 模式切换处理函数
     def on_mode_changed(self, mode_name: str):
         """
         仅改变界面显示顺序；数据库与本地Excel保存仍使用默认顺序。
@@ -1106,15 +1122,15 @@ class DesignConditionInputViewer(QWidget):
         # 默认模式 = 恢复默认顺序（即初始载入时顺序） 设计模式
         if mode_name == self._default_mode_name or mode_name.strip() == "":
             # 用“默认ID顺序”再排一次（就是 capture_default_order 记录那次的出现次序）
-            #ids_std = getattr(self.tableWidget_product_std, "_default_param_ids", None)
+            # ids_std = getattr(self.tableWidget_product_std, "_default_param_ids", None)
             ids_design = getattr(self.tableWidget_design_data, "_default_param_ids", None)
-            #ids_general = getattr(self.tableWidget_general_data, "_default_param_ids", None)
-            #if ids_std:
-                #apply_mode_param_order(self.tableWidget_product_std, [i for i in ids_std if i is not None])
+            # ids_general = getattr(self.tableWidget_general_data, "_default_param_ids", None)
+            # if ids_std:
+            # apply_mode_param_order(self.tableWidget_product_std, [i for i in ids_std if i is not None])
             if ids_design:
                 apply_mode_param_order(self.tableWidget_design_data, [i for i in ids_design if i is not None])
-            #if ids_general:
-                #apply_mode_param_order(self.tableWidget_general_data, [i for i in ids_general if i is not None])
+            # if ids_general:
+            # apply_mode_param_order(self.tableWidget_general_data, [i for i in ids_general if i is not None])
             return
 
         # 其他模式：查表里的“参数顺序”并应用
@@ -1123,9 +1139,9 @@ class DesignConditionInputViewer(QWidget):
             return
 
         # 仅重排三张含“参数ID”的表
-        #apply_mode_param_order(self.tableWidget_product_std, target_ids)
+        # apply_mode_param_order(self.tableWidget_product_std, target_ids)
         apply_mode_param_order(self.tableWidget_design_data, target_ids)
-        #apply_mode_param_order(self.tableWidget_general_data, target_ids)
+        # apply_mode_param_order(self.tableWidget_general_data, target_ids)
 
         # ===== 新增：模式切换后，将设计数据表格的序号列设为不可编辑 =====
         print(f"[DEBUG] 正在设置设计数据表格（tableWidget_design_data）的序号列（第0列）为不可编辑")  # ✅ 调试打印

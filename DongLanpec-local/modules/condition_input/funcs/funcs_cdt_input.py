@@ -7,7 +7,8 @@ from modules.cailiaodingyi.funcs.funcs_pdf_input import query_all_guankou_catego
 #     get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions
 from modules.condition_input.funcs.db_cnt import get_connection
 from PyQt5.QtWidgets import (QTableWidgetItem, QTableWidget, QHeaderView, QWidget,
-                             QMessageBox, QUndoStack, QFileDialog, QComboBox, QStyledItemDelegate, QShortcut)
+                             QMessageBox, QUndoStack, QFileDialog, QComboBox, QStyledItemDelegate, QShortcut,
+                             QTabWidget, QStackedWidget)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QStandardItemModel, QStandardItem, QBrush, QKeySequence
 import re
@@ -33,6 +34,332 @@ db_config_1 = {
     'password': '123456',
     'database': '产品条件库'
 }
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+# === 新增：外径自动填充映射表（DN → {系列: 外径}） ===
+# 依据提供的对照表：美标系列/欧标系列
+OUTER_D_MAP = {
+    150: {"美标系列": "168.3", "欧标系列": "159"},
+    200: {"美标系列": "219.1", "欧标系列": "219"},
+    250: {"美标系列": "273",   "欧标系列": "273"},
+    300: {"美标系列": "323.9", "欧标系列": "325"},
+    350: {"美标系列": "355.6", "欧标系列": "377"},
+    400: {"美标系列": "406.4", "欧标系列": "426"},
+    450: {"美标系列": "457",   "欧标系列": "480"},
+    500: {"美标系列": "508",   "欧标系列": "530"},
+    600: {"美标系列": "610",   "欧标系列": "630"},
+    700: {"美标系列": "711",   "欧标系列": "720"},
+    800: {"美标系列": "813",   "欧标系列": "820"},
+    900: {"美标系列": "914",   "欧标系列": "920"},
+    1000:{"美标系列": "1016",  "欧标系列": "1020"},
+    1200:{"美标系列": "1219",  "欧标系列": "1220"},
+    1400:{"美标系列": "1422",  "欧标系列": "1420"},
+    1600:{"美标系列": "1626",  "欧标系列": "1620"},
+    1800:{"美标系列": "1829",  "欧标系列": "1820"},
+    2000:{"美标系列": "2032",  "欧标系列": "2020"},
+}
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _parse_int_safe(text: str):
+    """从字符串中提取整数（忽略非数字），失败返回 None。"""
+    try:
+        import re
+        m = re.findall(r"\d+", str(text))
+        if not m:
+            return None
+        return int(m[0])
+    except Exception:
+        return None
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _warn_once(viewer: QWidget, message: str, key: str, window_ms: int = 1500):
+    """在给定时间窗口内仅弹一次同类提示（以 key 区分）。"""
+    try:
+        import time
+        store = getattr(viewer, "_outer_warn_times", None)
+        if store is None:
+            store = {}
+            setattr(viewer, "_outer_warn_times", store)
+        now = int(time.time() * 1000)
+        last = store.get(key, 0)
+        if now - last < window_ms:
+            return
+        store[key] = now
+        QMessageBox.warning(viewer, "提示", message)
+    except Exception:
+        pass
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _choose_dn_with_prompt(viewer: QWidget):
+    """
+    检查“公称直径*”壳程/管程是否填写完整：
+    - 任一侧缺失则弹窗点名提示；
+    - 返回用于外径计算的 DN（两侧都空返回 None；两侧都有且不一致优先管程）。
+    """
+    table = getattr(viewer, "tableWidget_design_data", None)
+    if table is None:
+        return None
+    target_row = None
+    for r in range(table.rowCount()):
+        it = table.item(r, 1)
+        if it and it.text().strip() == "公称直径*":
+            target_row = r
+            break
+    if target_row is None:
+        return None
+
+    shell_text = table.item(target_row, 3).text().strip() if table.item(target_row, 3) else ""
+    tube_text  = table.item(target_row, 4).text().strip() if table.item(target_row, 4) else ""
+    shell_dn = _parse_int_safe(shell_text) if shell_text else None
+    tube_dn  = _parse_int_safe(tube_text) if tube_text else None
+
+    # 仅提示一次：若任一侧缺失，仅在首次发现时提示；当两侧都补齐时重置提示标记
+    missing = []
+    if shell_dn is None:
+        missing.append("壳程")
+    if tube_dn is None:
+        missing.append("管程")
+
+    if missing:
+        warned = getattr(viewer, "_dn_missing_warned", False)
+        if not warned and not getattr(viewer, "_is_loading_data", False) and getattr(viewer, "_outer_autofill_ready", False):
+            _warn_once(viewer, f"{'/'.join(missing)}公称直径未输入，请核对！", key="dn_missing")
+            try:
+                setattr(viewer, "_dn_missing_warned", True)
+            except Exception:
+                pass
+            # 在首次确认提示后：切换到“设计数据”页签（tab_design_data），并定位缺失单元格
+            try:
+                if getattr(viewer, "_is_loading_data", False):
+                    raise Exception("skip during loading")
+                # 先确定目标页面：优先使用命名的 tab_design_data，否则回退到设计数据表所属页面
+                page = getattr(viewer, "tab_design_data", None)
+                # 如果没有提供页面对象，尝试从表控件向上找到归属页面
+                if page is None:
+                    try:
+                        tbl = getattr(viewer, "tableWidget_design_data", None)
+                        p = tbl.parent() if tbl is not None else None
+                        while p is not None and not isinstance(p, (QTabWidget, QStackedWidget)):
+                            page = p  # 记录可能的页面部件
+                            p = p.parent()
+                    except Exception:
+                        pass
+
+                switched = False
+                # 优先切换 QTabWidget，这将同步更新顶部“选中”标签状态
+                try:
+                    for tw in viewer.findChildren(QTabWidget):
+                        idx = tw.indexOf(page) if page is not None else -1
+                        if idx == -1 and page is not None:
+                            # 若 page 不是直接子项，尝试沿 page 的父链寻找 tw 的子页
+                            pp = page
+                            while pp is not None and idx == -1:
+                                idx = tw.indexOf(pp)
+                                pp = pp.parent()
+                        if idx != -1:
+                            tw.setCurrentIndex(idx)
+                            switched = True
+                            break
+                except Exception:
+                    pass
+
+                # 若未找到 QTabWidget，再回退切换 QStackedWidget（无标签栏，仅内容切换）
+                if not switched:
+                    try:
+                        for sw in viewer.findChildren(QStackedWidget):
+                            idx = sw.indexOf(page) if page is not None else -1
+                            if idx == -1 and page is not None:
+                                pp = page
+                                while pp is not None and idx == -1:
+                                    idx = sw.indexOf(pp)
+                                    pp = pp.parent()
+                            if idx != -1:
+                                sw.setCurrentIndex(idx)
+                                switched = True
+                                break
+                    except Exception:
+                        pass
+
+                # 优先定位到第一个缺失侧
+                target_col = 3 if ("壳程" in missing and "管程" not in missing) else 4 if ("管程" in missing and "壳程" not in missing) else (3 if "壳程" in missing else 4)
+                if table is not None and target_row is not None and target_row >= 0:
+                    table.setCurrentCell(target_row, target_col)
+                    table.scrollToItem(table.item(target_row, target_col))
+                    table.setFocus()
+            except Exception:
+                pass
+    else:
+        # 两侧DN都已补齐，清除一次性提示标记
+        if getattr(viewer, "_dn_missing_warned", False):
+            try:
+                setattr(viewer, "_dn_missing_warned", False)
+            except Exception:
+                pass
+
+    # 选择用于计算的 DN
+    if shell_dn is None and tube_dn is None:
+        return None
+    if shell_dn is not None and tube_dn is not None:
+        return tube_dn if tube_dn != shell_dn else shell_dn
+    return tube_dn if tube_dn is not None else shell_dn
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _get_product_type_safe(viewer: QWidget) -> str:
+    """安全获取产品类型；无 product_id 或查询失败则返回空串。"""
+    try:
+        pid = getattr(viewer, "product_id", None)
+        if not pid:
+            return ""
+        return get_product_type_from_db(pid) or ""
+    except Exception:
+        return ""
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _is_shell_and_tube(viewer: QWidget) -> bool:
+    """仅对管壳式热交换器启用外径相关逻辑。"""
+    return _get_product_type_safe(viewer) == "管壳式热交换器"
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _get_dn_from_design(viewer: QWidget):
+    """读取设计数据表中的“公称直径*”，按优先级选择 DN 整数。"""
+    table = getattr(viewer, "tableWidget_design_data", None)
+    if table is None:
+        return None
+    target_row = None
+    for r in range(table.rowCount()):
+        it = table.item(r, 1)
+        if it and it.text().strip() == "公称直径*":
+            target_row = r
+            break
+    if target_row is None:
+        return None
+    shell_text = table.item(target_row, 3).text().strip() if table.item(target_row, 3) else ""
+    tube_text  = table.item(target_row, 4).text().strip() if table.item(target_row, 4) else ""
+    shell_dn = _parse_int_safe(shell_text) if shell_text else None
+    tube_dn  = _parse_int_safe(tube_text) if tube_text else None
+    if shell_dn is not None and tube_dn is not None:
+        if shell_dn == tube_dn:
+            return shell_dn
+        # 不一致时优先管程
+        return tube_dn
+    return tube_dn if tube_dn is not None else shell_dn
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _get_series_from_general(viewer: QWidget):
+    table = getattr(viewer, "tableWidget_general_data", None)
+    if table is None:
+        return None
+    for r in range(table.rowCount()):
+        it = table.item(r, 1)
+        if it and it.text().strip() == "外径系列":
+            v_item = table.item(r, 3)
+            return v_item.text().strip() if v_item else ""
+    return None
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _is_outer_by_diameter_enabled(viewer: QWidget) -> bool:
+    """读取“是否以外径为基准*”是否为“是”。"""
+    table = getattr(viewer, "tableWidget_general_data", None)
+    if table is None:
+        return False
+    for r in range(table.rowCount()):
+        it = table.item(r, 1)
+        if it and it.text().strip() == "是否以外径为基准*":
+            v_item = table.item(r, 3)
+            val = v_item.text().strip() if v_item else ""
+            return val == "是"
+    return False
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def _set_general_outer_diameter(viewer: QWidget, text_val: str):
+    """把值写入通用数据表“外径”的“数值”列，带撤销与防递归。"""
+    table = getattr(viewer, "tableWidget_general_data", None)
+    if table is None:
+        return
+    target_row = None
+    for r in range(table.rowCount()):
+        it = table.item(r, 1)
+        if it and it.text().strip() == "外径":
+            target_row = r
+            break
+    if target_row is None:
+        return
+    item = table.item(target_row, 3)
+    if item is None:
+        item = QTableWidgetItem()
+        table.setItem(target_row, 3, item)
+    old_val = item.text()
+    if old_val == text_val:
+        return
+    try:
+        table.blockSignals(True)
+        item.setText(text_val)
+    finally:
+        table.blockSignals(False)
+    undo_stack = getattr(viewer, "undo_stack", None)
+    if undo_stack is not None:
+        try:
+            undo_stack.push(CellEditCommand(table, target_row, 3, old_val, text_val))
+        except Exception:
+            pass
+
+#1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+def autofill_outer_diameter(viewer: QWidget):
+    """
+    基于 设计数据表“公称直径*” 与 通用数据表“外径系列”，自动填充“外径”。
+    规则：DN<150 或映射不存在 → 写入“—”；其余按 OUTER_D_MAP 匹配；前提：基准开关为“是”。
+    """
+    # 未就绪时不进行自动填充（避免界面进入前弹窗）
+    if not getattr(viewer, "_outer_autofill_ready", False):
+        return
+    # 仅针对管壳式热交换器
+    if not _is_shell_and_tube(viewer):
+        return
+    if not _is_outer_by_diameter_enabled(viewer):
+        return
+    # 防重入：避免一次用户操作导致多次调用
+    if getattr(viewer, "_outer_autofill_lock", False):
+        return
+    setattr(viewer, "_outer_autofill_lock", True)
+    try:
+        dn = _choose_dn_with_prompt(viewer)
+        series = _get_series_from_general(viewer)
+
+        # 若与上一次处理的 (dn, series) 完全一致，直接返回，避免重复弹窗
+        last_pair = getattr(viewer, "_outer_last_pair", None)
+        cur_pair = (dn, series)
+        if last_pair == cur_pair:
+            return
+        # 若DN缺失（例如首次从“否”切“是”而未填DN），不再额外弹“非标准值”提示，直接写入“—”。
+        if dn is None:
+            _set_general_outer_diameter(viewer, "—")
+            setattr(viewer, "_outer_last_pair", cur_pair)
+            return
+        # 若系列缺失，同样不弹“DN非标准”提示（与DN无关），仅写入“—”。
+        if not series:
+            _set_general_outer_diameter(viewer, "—")
+            setattr(viewer, "_outer_last_pair", cur_pair)
+            return
+        if dn < 150:
+            _set_general_outer_diameter(viewer, "—")
+            _warn_once(viewer, "公称直径非标准值，无法推荐外径，请自定义外径！", key="dn_not_standard")
+            setattr(viewer, "_outer_last_pair", cur_pair)
+            return
+        series_map = OUTER_D_MAP.get(dn)
+        if not series_map:
+            _set_general_outer_diameter(viewer, "—")
+            _warn_once(viewer, "公称直径非标准值，无法推荐外径，请自定义外径！", key="dn_not_standard")
+            setattr(viewer, "_outer_last_pair", cur_pair)
+            return
+        val = series_map.get(series)
+        if not val:
+            _set_general_outer_diameter(viewer, "—")
+            _warn_once(viewer, "公称直径非标准值，无法推荐外径，请自定义外径！", key="dn_not_standard")
+        else:
+            _set_general_outer_diameter(viewer, val)
+        setattr(viewer, "_outer_last_pair", cur_pair)
+    finally:
+        setattr(viewer, "_outer_autofill_lock", False)
 
 db_config_2 = {
     'host': 'localhost',
@@ -319,7 +646,8 @@ def load_design_data_if_exists(product_id, product_form="all"):
                     has_form_column = any(col['Field'] == form_column_name for col in columns)
 
                     if is_form_dependent_table and has_form_column:
-                        if product_form == 'NEN':
+                        # 1216新修改-bem也显示两个金属温度的参数
+                        if product_form in ['NEN', 'BEM']:
                             sql_query += f" WHERE `{form_column_name}` IN (%s, %s)"
                             params.extend(['all', 'NEN'])
                         else:
@@ -1288,7 +1616,7 @@ def save_all_tables(viewer, product_id):
 
         sync_design_params_to_element_params(product_id)
 
-        # 1124新修改-保存时增加元件定义腐蚀裕量同步
+        # 1124新修改-保存时增加元件定义腐蚀余量同步
         try:
             labels = query_all_guankou_categories(product_id) or ["管口材料分类1"]
             for label in labels:
@@ -1319,6 +1647,15 @@ def save_all_tables(viewer, product_id):
             viewer.design_data_source
         )
         viewer.design_data_source = "设计活动库"
+        try:
+            invalidate_caches_for_product(product_id)
+        except Exception as e:
+            print(f"[警告] 条件输入保存后的缓存失效失败: {e}")
+        try:
+            clear_all_pn_user_input_for_product(product_id)
+            force_recompute_and_update_pn(product_id)
+        except Exception as e:
+            print(f"[警告] 条件输入保存后的PN刷新失败: {e}")
     except Exception as e:
         QMessageBox.critical(viewer, "保存失败", f"保存数据时发生错误：{str(e)}")
 
@@ -2401,6 +2738,13 @@ def validate_all_tables_after_import(viewer: QWidget):
     viewer.line_tip.setToolTip(tip_message)
     viewer.line_tip.setStyleSheet("color: black;")  # ✅ 强制黑色字体
 
+    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+    # === 新增：导入完成后触发一次外径自动填充（若开启“以外径为基准”） ===
+    try:
+        autofill_outer_diameter(viewer)
+    except Exception:
+        pass
+
 def trigger_all_cross_table_relations(viewer: QWidget):
     """
     仅触发“绝热层类型”联动，避免影响焊接接头等其他联动逻辑。
@@ -2735,6 +3079,16 @@ def handle_cross_table_triggers(viewer: QWidget, changed_table: QTableWidget, ro
 
             show_info_tip(viewer, f"[设计数据]{side}绝热项状态已更新")
 
+        # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+        # ✅ 公称直径* 变化 → 触发外径自动填充（仅当“是否以外径为基准*”为“是”时）
+        elif param_name == "公称直径*" and col in (3, 4):
+            if _is_shell_and_tube(viewer) and _is_outer_by_diameter_enabled(viewer):
+                try:
+                    autofill_outer_diameter(viewer)
+                    # show_info_tip(viewer, "[通用数据]外径已根据公称直径与外径系列自动更新。")
+                except Exception:
+                    pass
+
     # ✅ 检测比例 → 联动补齐 技术等级 和 合格级别（仅当为空）
     # ✅ 新增：清空其中任一字段 → 自动清空其余两个字段
     elif changed_table == viewer.tableWidget_trail_data:
@@ -2773,6 +3127,32 @@ def handle_cross_table_triggers(viewer: QWidget, changed_table: QTableWidget, ro
                             if undo_stack:
                                 from modules.condition_input.funcs.undo_command import CellEditCommand
                                 undo_stack.push(CellEditCommand(changed_table, row, col_idx, old_val, ""))
+
+    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
+    # ✅ 通用数据：外径系列 变化 → 触发外径自动填充
+    elif changed_table == viewer.tableWidget_general_data:
+        name_item = changed_table.item(row, 1)
+        if not name_item:
+            return
+        param_name = name_item.text().strip()
+        # 外径系列变更
+        if param_name == "外径系列" and col == 3:
+            # 防抖：避免代理与 itemChanged 双路径导致短时间重复触发
+            try:
+                import time
+                last_ts = getattr(viewer, "_outer_series_ts", 0)
+                now_ts = int(time.time() * 1000)
+                if now_ts - last_ts < 800:
+                    return
+                setattr(viewer, "_outer_series_ts", now_ts)
+            except Exception:
+                pass
+            try:
+                autofill_outer_diameter(viewer)
+                # show_info_tip(viewer, "[通用数据]外径已根据公称直径与外径系列自动更新。")
+            except Exception:
+                pass
+        # 基准开关切换的情况由 view.update_general_diameter_linkage 统一处理（避免重复触发）
 
 def update_trail_table_side_only(table: QTableWidget, side: str, factor_val: str, undo_stack=None):
     """

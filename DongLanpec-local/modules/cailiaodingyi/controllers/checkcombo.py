@@ -4,16 +4,24 @@ from PyQt5.QtCore import Qt, QTimer, QItemSelectionModel, QEvent, QModelIndex
 
 
 class CheckComboDelegate(QStyledItemDelegate):
-    def __init__(self, options=None, table=None, sep="、"):
+    def __init__(self, options=None, table=None, sep="、", enable_select_all=False):
         """
         options: list[str]  复选项（作为兜底）；实际会优先读取 table.property('gk_code_candidates')
         table:   QTableWidget 用于行高亮（可为 None）
         sep:     显示/存储分隔符
+        enable_select_all: bool  是否启用"全选"功能（默认False）
+        
+        说明：enable_select_all 参数用于控制是否在下拉框中显示"全选"选项。
+        - 管口元件（管口号）：传入 enable_select_all=True，显示"全选"功能，方便一键选择所有管口号
+        - 其他元件（支座、铭牌、保温支撑等的元件名称）：使用默认值 False，不显示"全选"功能
         """
         super().__init__(table)
         self.options = options or []
         self.table = table
         self.sep = sep
+        # 控制是否启用"全选"功能：True=管口元件有全选，False=其他元件无全选
+        self.enable_select_all = enable_select_all
+        self.select_all_label = "全选"
 
     # ---------- QStyledItemDelegate ----------
     def createEditor(self, parent, option, index):
@@ -30,6 +38,16 @@ class CheckComboDelegate(QStyledItemDelegate):
         display_item = QStandardItem("")         # 显示聚合文本
         display_item.setFlags(Qt.NoItemFlags)    # 不可选
         model.appendRow(display_item)
+
+        # 追加"全选"行（仅在启用时）
+        # 说明：只有管口元件（enable_select_all=True）才会添加"全选"选项
+        #       其他元件（支座、铭牌、保温支撑等）不会显示"全选"
+        if self.enable_select_all and cands:
+            select_all_item = QStandardItem(self.select_all_label)
+            select_all_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+            select_all_item.setData(Qt.Unchecked, Qt.CheckStateRole)
+            select_all_item.setData(True, Qt.UserRole)  # 标记为全选行
+            model.appendRow(select_all_item)
 
         for opt in cands:
             it = QStandardItem(str(opt))
@@ -67,9 +85,11 @@ class CheckComboDelegate(QStyledItemDelegate):
         # 把单元格里的 "N1、N6" 回写为勾选状态
         text = (index.model().data(index, Qt.EditRole) or "").strip()
         selected = [t for t in text.split(self.sep) if t]
-        for row in range(1, editor.model().rowCount()):
-            it = editor.model().item(row)
+        for it in self._iter_option_items(editor):
             it.setCheckState(Qt.Checked if it.text() in selected else Qt.Unchecked)
+        # 只有管口元件才需要同步"全选"状态，其他元件无需此操作
+        if self.enable_select_all:
+            self._sync_select_all_state(editor)
         self._update_display_text(editor)
 
     def setModelData(self, editor: QComboBox, model, index):
@@ -93,7 +113,19 @@ class CheckComboDelegate(QStyledItemDelegate):
             combo.setCurrentIndex(0)
             return
         it = combo.model().item(row)
-        it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
+        # "全选"行：全开/全关（仅在启用时）
+        # 说明：只有管口元件（enable_select_all=True）才会处理"全选"点击事件
+        #       其他元件（支座、铭牌、保温支撑等）不会进入此分支
+        if self.enable_select_all and self._is_select_all_item(it):
+            target = Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked
+            it.setCheckState(target)
+            for opt in self._iter_option_items(combo):
+                opt.setCheckState(target)
+        else:
+            it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
+            # 只有管口元件才需要同步"全选"状态，其他元件无需此操作
+            if self.enable_select_all:
+                self._sync_select_all_state(combo)
         self._update_display_text(combo)
         #11.19 设备法兰复选框新增
         # 立即提交数据，避免必须回车/切焦
@@ -126,8 +158,7 @@ class CheckComboDelegate(QStyledItemDelegate):
 
     def _selected_text(self, combo: QComboBox) -> str:
         vals = []
-        for row in range(1, combo.model().rowCount()):
-            it = combo.model().item(row)
+        for it in self._iter_option_items(combo):
             if it.checkState() == Qt.Checked:
                 vals.append(it.text())
         return self.sep.join(vals)
@@ -135,6 +166,33 @@ class CheckComboDelegate(QStyledItemDelegate):
     def _update_display_text(self, combo: QComboBox):
         combo.model().item(0).setText(self._selected_text(combo))
         combo.setCurrentIndex(0)
+
+    def _iter_option_items(self, combo: QComboBox):
+        """跳过显示行和“全选”行，返回真正的选项 items。"""
+        model = combo.model()
+        for row in range(1, model.rowCount()):
+            it = model.item(row)
+            if it and not self._is_select_all_item(it):
+                yield it
+
+    def _is_select_all_item(self, item: QStandardItem) -> bool:
+        try:
+            return bool(item.data(Qt.UserRole))
+        except Exception:
+            return False
+
+    def _sync_select_all_state(self, combo: QComboBox):
+        """根据实际选中情况更新“全选”行的勾选状态。"""
+        model = combo.model()
+        # “全选”行位于第1行（如果存在）
+        all_item = model.item(1) if model.rowCount() > 1 else None
+        if all_item and self._is_select_all_item(all_item):
+            opts = list(self._iter_option_items(combo))
+            if not opts:
+                all_item.setCheckState(Qt.Unchecked)
+            else:
+                all_checked = all(opt.checkState() == Qt.Checked for opt in opts)
+                all_item.setCheckState(Qt.Checked if all_checked else Qt.Unchecked)
 
     def _highlight_row(self, row: int):
         if not self.table:

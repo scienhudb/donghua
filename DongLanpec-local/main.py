@@ -330,6 +330,11 @@ def get_product_form_from_db(product_id: str) -> str:
                 # 如果是 NEN，就返回 NEN
                 print(f"    ↳ 逻辑转换: 保持为 'NEN'")
                 return 'NEN'
+            # 1216新修改-BEM产品形式
+            if raw_product_form == 'BEM':
+                # 如果是 BEM，就返回 BEM
+                print(f"    ↳ 逻辑转换: 保持为 'BEM'")
+                return 'BEM'
             else:
                 # 如果是其他任何值 (AES, BES, 空值等)，都统一视为 'all'
                 print(f"    ↳ 逻辑转换: 将 '{raw_product_form}' 视为 'all'")
@@ -556,6 +561,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if btn:
                 btn.clicked.connect(lambda _, t=title, w=widget_class: self.safe_open_tab(t, w))
                 btn.setEnabled(False)  # 初始禁用
+
+    # 1112新修改-切换产品提示优化
+    def build_product_switch_message(self, product_name, device_tag, product_number):
+        """构建产品切换确认消息，只显示非空字段"""
+        parts = [f"设备名称为 {product_name} "]
+        
+        if device_tag and device_tag.strip():
+            parts.append(f"设备位号为 {device_tag} ")
+        
+        if product_number and product_number.strip():
+            parts.append(f"产品编号为 {product_number} ")
+        
+        return f"是否切换为{', '.join(parts)}的产品？"
 
     def select_product(self, product_id):
         """
@@ -867,8 +885,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if "cursor" in locals(): cursor.close()
                 if "conn" in locals(): conn.close()
 
-            # 弹窗确认切换（中文按钮）
-            msg = f"是否切换为设备名称为 {product_name}, 设备位号为 {device_tag}, 产品编号为 {product_number} 的产品?"
+            # 弹窗确认切换（中文按钮）# 1112新修改-切换产品提示优化
+            msg = self.build_product_switch_message(product_name, device_tag, product_number)
             if not show_confirm_dialog(self, "切换产品确认", msg):
                 # 用户取消 → 恢复产品ID为原产品 #1106新修改
                 import modules.chanpinguanli.bianl as bianl
@@ -1105,8 +1123,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.tab_widget.setCurrentIndex(last_index)
                         self.tab_widget.blockSignals(False)
                         return
-                
-                msg = f"是否切换为设备名称为 {product_name}, 设备位号为 {device_tag}, 产品编号为 {product_number} 的产品？"
+
+                # 1112新修改-切换产品提示优化
+                msg = self.build_product_switch_message(product_name, device_tag, product_number)
                 if show_confirm_dialog(self, "切换产品确认", msg):
                     # 用户选择“是”，强制关闭旧标签页并继续
                     ctitle = target_tab_title
@@ -1261,8 +1280,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 if "cursor" in locals(): cursor.close()
                                 if "conn" in locals(): conn.close()
                             
-                            # 弹窗确认切换
-                            msg = f"是否切换为设备名称为 {product_name}, 设备位号为 {device_tag}, 产品编号为 {product_number} 的产品？"
+                            # 弹窗确认切换# 1112新修改-切换产品提示优化
+                            msg = self.build_product_switch_message(product_name, device_tag, product_number)
                             if not show_confirm_dialog(self, "切换产品确认", msg):
                                 # 用户取消，恢复产品ID并阻止切换
                                 bianl.current_product_id = self.last_confirmed_product_id

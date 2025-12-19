@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QPixmap
 from PyQt5.QtWidgets import QApplication, QWidget, QTableWidgetItem, QMessageBox, QMenu, QAction, QComboBox, \
     QStyledItemDelegate, QPushButton, QTableWidget, QVBoxLayout, QTabWidget, QLabel, QAbstractItemView, QLineEdit, \
-    QDialog, QCheckBox, QHeaderView, QHBoxLayout, QToolButton
+    QDialog, QCheckBox, QHeaderView, QHBoxLayout, QToolButton, QTabBar
 
 from modules import chanpinguanli
 from modules.cailiaodingyi.controllers.add_tab import PlusTabManager
@@ -116,6 +116,9 @@ class DesignParameterDefineInputerViewer(QWidget):
         self.dynamic_guankou_tabs = []
         self.dynamic_guankou_param_tabs = {}
         self.dynamic_guankou_define_tabs = {}
+        # 映射：元件ID -> 行数据 / 示意图，避免排序后索引错位
+        self.element_data_by_id = {}
+        self.element_image_map = {}
         self.load_original_data()
         # self.product_id = "PD20250526001"
         # self.product_type = "管壳式热交换器"
@@ -277,6 +280,9 @@ class DesignParameterDefineInputerViewer(QWidget):
         self.lineEdit_template = self.findChild(QtWidgets.QLineEdit, "lineEdit_2")
         self.lineEdit_template.returnPressed.connect(self.on_template_name_entered)
 
+        # 为第0个tab添加放大按钮（延迟执行，确保tab已完全初始化）
+        QTimer.singleShot(100, lambda: self._add_enlarge_button_to_tab(0) if self.guankou_tabWidget.count() > 0 else None)
+
 
         # self.tableWidget_parts.installEventFilter(ReturnKeyJumpFilter(self.tableWidget_parts))
         self.tableWidget_parts.installEventFilter(
@@ -425,6 +431,9 @@ class DesignParameterDefineInputerViewer(QWidget):
         # 记录映射
         self.dynamic_guankou_param_tabs[tab_label] = table_guankou
 
+        # 添加放大按钮
+        self._add_enlarge_button_to_tab(insert_pos)
+
         # —— 5) 加载并渲染：严格用“拷贝源 tab 名”加载相同内容 ——
         select_template = self.comboBox_template.currentText() or 'None'
         guankou_para_info = load_guankou_param_leibie(source_tab_name, self.product_id, select_template)
@@ -479,12 +488,8 @@ class DesignParameterDefineInputerViewer(QWidget):
         real_count = total - (1 if has_plus else 0)
 
         menu = QMenu(self)
-        act_enlarge = menu.addAction("放大查看参数表格")
         act_delete = menu.addAction("删除此分类")
         act = menu.exec_(bar.mapToGlobal(pos))
-        if act is act_enlarge:
-            self.show_floating_table(index)  # ← 用上面新版
-            return
         if act is act_delete:
             self.remove_guankou_tab(index)
 
@@ -872,6 +877,78 @@ class DesignParameterDefineInputerViewer(QWidget):
             # 有模板
             self.lineEdit_template.setEnabled(True)
 
+    def _add_enlarge_button_to_tab(self, tab_index: int):
+        """为指定的tab页添加放大图标按钮"""
+        tw = self.guankou_tabWidget
+        if tab_index < 0 or tab_index >= tw.count():
+            return
+        
+        tab_text = tw.tabText(tab_index).strip()
+        # 不为"+"tab添加按钮
+        if tab_text in {"+", "＋"}:
+            return
+        
+        # 检查是否已经存在按钮
+        bar = tw.tabBar()
+        existing_btn = bar.tabButton(tab_index, QTabBar.RightSide)
+        if existing_btn is not None:
+            return  # 已存在，不重复添加
+        
+        # 创建放大按钮
+        btn = QToolButton(bar)
+        # 使用图片文件作为图标
+        # 获取项目根目录（当前文件在 modules/cailiaodingyi/ 下，向上两级到项目根目录）
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(current_dir, "..", "..", "icons", "管口放大.png")
+        icon_path = os.path.normpath(icon_path)
+        
+        if os.path.exists(icon_path):
+            btn.setIcon(QtGui.QIcon(icon_path))
+        else:
+            # 如果图片不存在，回退到绘制方式
+            pm = QtGui.QPixmap(22, 22)
+            pm.fill(QtCore.Qt.transparent)
+            painter = QtGui.QPainter(pm)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            pen = QtGui.QPen(QtGui.QColor("#000000"))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.drawRoundedRect(8, 3, 11, 11, 2, 2)
+            painter.drawRoundedRect(4, 8, 11, 11, 2, 2)
+            painter.end()
+            btn.setIcon(QtGui.QIcon(pm))
+        
+        btn.setIconSize(QtCore.QSize(18, 18))
+        btn.setText("")
+        btn.setToolTip("放大查看参数表格")
+        btn.setAutoRaise(True)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedSize(22, 22)
+        
+        # 按钮样式：透明背景 + 白色图标，更贴近示例
+        btn.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                border: none;
+                padding: 0;
+            }
+            QToolButton:hover {
+                background: rgba(255, 255, 255, 0.12);
+            }
+            QToolButton:pressed {
+                background: rgba(255, 255, 255, 0.18);
+            }
+        """)
+        
+        # 连接点击事件
+        def on_enlarge_clicked():
+            self.show_floating_table(tab_index)
+        
+        btn.clicked.connect(on_enlarge_clicked)
+        
+        # 将按钮添加到tab的右侧
+        bar.setTabButton(tab_index, QTabBar.RightSide, btn)
+
     def _new_param_tab_like_default(self, label: str, insert_pos: int = None):
         """创建一个和第0个tab外观完全一致的新页，返回 (page, table)"""
         tw = self.guankou_tabWidget
@@ -920,6 +997,9 @@ class DesignParameterDefineInputerViewer(QWidget):
             self.dynamic_guankou_param_tabs = {}
         self.dynamic_guankou_param_tabs[label] = table
 
+        # 添加放大按钮
+        self._add_enlarge_button_to_tab(insert_pos)
+
         return page, table
 
     def patch_codes_for_current_tab(self, table, tab_name: str):
@@ -940,8 +1020,13 @@ class DesignParameterDefineInputerViewer(QWidget):
         assigned = query_assigned_codes_by_tab(self.product_id, tab_name) or []  # 本 tab 已分配
         unassigned = query_unassigned_codes(self.product_id) or []  # 未分类（天然已排除其它 tab）
 
-        # 显示：把“已分配”的值写到第1列，用 '、' 连接
-        _set_text_center(table, row, 1, "、".join(assigned))
+        # 显示：把"已分配"的值写到第1列，用 '、' 连接
+        # 先读取当前选中的管口号，用于后续全选状态更新检查
+        current_item = table.item(row, 1)
+        current_text = (current_item.text().strip() if current_item else "") or "、".join(assigned)
+        current_selected = [t.strip() for t in current_text.split("、") if t.strip()]
+        
+        _set_text_center(table, row, 1, current_text)
 
         # 候选：已分配 + 未分类（去重但保序）
         merged, seen = [], set()
@@ -950,12 +1035,56 @@ class DesignParameterDefineInputerViewer(QWidget):
                 seen.add(code)
                 merged.append(code)
 
+        # 全选状态更新检查：
+        # 1. 如果之前选择了"全选"，但现在候选选项增加了，取消全选状态（保持之前选中的管口号不变）
+        # 2. 如果之前不是全选，但删除管口号后，当前选中的等于所有候选选项，此时应该视为全选
+        # 说明：当用户在管口附件那新增或删除管口号后，需要自动更新全选状态
+        last_cands_prop = table.property("last_gk_code_candidates")
+        current_selected_set = set(current_selected)
+        merged_set = set(merged)
+        
+        if last_cands_prop:
+            last_cands = set(list(last_cands_prop))
+            
+            # 情况1：之前选择了"全选"（当前选中的管口号等于上一次的所有候选选项），但现在候选选项增加了
+            # 说明：新增管口号后，应该取消全选状态，保持之前选中的管口号不变，不自动选中新增的
+            if last_cands and current_selected_set == last_cands and merged_set > last_cands:
+                print(f"[全选更新] 检测到之前选择了全选，但候选选项已增加，取消全选状态")
+                print(f"[全选更新] 上一次候选: {sorted(last_cands)}, 当前候选: {sorted(merged_set)}")
+                print(f"[全选更新] 新增的管口号: {sorted(merged_set - last_cands)}")
+                # 保持之前选中的管口号不变（不自动选中新增的），这样全选状态就自动取消了
+                # current_selected 已经是之前选中的，不需要修改
+                # 只需要确保显示的是之前选中的管口号（已经是 current_selected）
+                new_text = "、".join(sorted(list(current_selected_set)))
+                _set_text_center(table, row, 1, new_text)
+                current_selected = sorted(list(current_selected_set))
+        
+        # 情况2：之前不是全选，但删除管口号后，当前选中的等于所有候选选项（此时应该视为全选）
+        # 例如：之前有 N1、N2、N3、N4，用户选择了 N1、N2、N3，然后删除了 N4
+        # 此时候选选项变成 N1、N2、N3，用户选中的也等于所有候选选项，应该更新显示
+        if merged_set and current_selected_set == merged_set:
+            # 检查是否是因为删除导致的（当前候选选项少于上一次的候选选项）
+            if last_cands_prop:
+                last_cands = set(list(last_cands_prop))
+                if last_cands and merged_set < last_cands:
+                    print(f"[全选更新] 检测到删除管口号后，当前选中等于所有候选选项（全选状态）")
+                    print(f"[全选更新] 上一次候选: {sorted(last_cands)}, 当前候选: {sorted(merged_set)}")
+                    print(f"[全选更新] 删除的管口号: {sorted(last_cands - merged_set)}")
+                    # 确保显示的是所有候选选项（已经是全选状态，但确保显示正确）
+                    new_text = "、".join(sorted(list(merged_set)))
+                    _set_text_center(table, row, 1, new_text)
+                    current_selected = sorted(list(merged_set))
+
         # 写到表属性，CheckComboDelegate 会优先读这里
         table.setProperty("gk_code_candidates", merged)
+        # 保存当前候选选项集合，供下次比较使用
+        table.setProperty("last_gk_code_candidates", tuple(sorted(set(merged))))
 
         # 重新设置代理（先清掉可能存在的旧代理，避免悬空引用引发崩溃）
         table.setItemDelegateForRow(row, None)
-        table.setItemDelegateForRow(row, CheckComboDelegate(options=merged, table=table))
+        # 说明：管口元件启用"全选"功能（enable_select_all=True），方便用户一键选择所有管口号
+        #       其他元件（支座、铭牌、保温支撑等）使用默认值 False，不显示"全选"功能
+        table.setItemDelegateForRow(row, CheckComboDelegate(options=merged, table=table, enable_select_all=True))
 
 
     def build_or_refresh_guankou_tabs_from_db(self, param_map: dict):
@@ -985,6 +1114,8 @@ class DesignParameterDefineInputerViewer(QWidget):
                     _, table = self._new_param_tab_like_default(label, insert_pos=0)
                     tw.removeTab(1)
                 page0.setProperty("param_table", table)
+                # 为第0个tab添加放大按钮
+                self._add_enlarge_button_to_tab(0)
             else:
                 page, table = self._new_param_tab_like_default(label)
                 page.setProperty("param_table", table)
@@ -999,7 +1130,7 @@ class DesignParameterDefineInputerViewer(QWidget):
             try:
                 render_guankou_param_to_ui(self, data)
                 print(f"[DBG][refresh] 渲染完成 label={label}, data条数={len(data)}")  # ← zhange添加
-                # 渲染完再补“管口号”
+                # 渲染完再补"管口号"
                 self.patch_codes_for_current_tab(table, label)
 
             finally:
@@ -1059,6 +1190,16 @@ class DesignParameterDefineInputerViewer(QWidget):
                 # 渲染表格
                 element_original_info = move_guankou_to_first(element_original_info)
                 self.element_data = element_original_info
+                self.element_data_by_id = {
+                    row.get("元件ID"): row
+                    for row in element_original_info
+                    if row.get("元件ID")
+                }
+                self.element_image_map = {
+                    row.get("元件ID"): row.get("零件示意图", "")
+                    for row in element_original_info
+                    if row.get("元件ID")
+                }
                 self.render_data_to_table(element_original_info)
 
                 # 渲染示意图
@@ -1145,6 +1286,16 @@ class DesignParameterDefineInputerViewer(QWidget):
         # 渲染零件列表数据(包括零件示意图)
         element_original_info = move_guankou_to_first(element_original_info)
         self.element_data = element_original_info
+        self.element_data_by_id = {
+            row.get("元件ID"): row
+            for row in element_original_info
+            if row.get("元件ID")
+        }
+        self.element_image_map = {
+            row.get("元件ID"): row.get("零件示意图", "")
+            for row in element_original_info
+            if row.get("元件ID")
+        }
         self.render_data_to_table(element_original_info)
 
         # 示意图
@@ -1241,6 +1392,7 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         # 遍历数据并填入表格
         for row_index, row_data in enumerate(element_original_info):
+            element_id = row_data.get("元件ID")
             for col_idx, key in enumerate(headers):
                 if key == "序号":
                     item = QTableWidgetItem(f"{row_index + 1:02d}")
@@ -1248,12 +1400,41 @@ class DesignParameterDefineInputerViewer(QWidget):
                     item = QTableWidgetItem(str(row_data.get(key, "")))
                 item.setTextAlignment(Qt.AlignCenter)
                 item.setToolTip(item.text())  # ✅ 添加悬浮提示
+                if element_id:
+                    item.setData(Qt.UserRole, element_id)
                 table.setItem(row_index, col_idx, item)
 
         # ✅ 视觉分隔效果【核心】
         table.setShowGrid(True)
         table.setGridStyle(QtCore.Qt.SolidLine)
         table.setStyleSheet("QTableWidget { gridline-color: lightgray; }")
+
+    def _get_element_id_from_row(self, row: int):
+        """根据当前表格行拿到元件ID（排序/过滤后仍然有效）"""
+        item = self.tableWidget_parts.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _get_element_data_by_row(self, row: int):
+        """优先用元件ID映射回真实数据，兜底按原始顺序"""
+        element_id = self._get_element_id_from_row(row)
+        if element_id and getattr(self, "element_data_by_id", None):
+            data = self.element_data_by_id.get(element_id)
+            if data:
+                return data
+        if 0 <= row < len(getattr(self, "element_data", [])):
+            return self.element_data[row]
+        return {}
+
+    def _get_image_by_row(self, row: int):
+        """按行返回示意图路径，兼容排序/过滤"""
+        element_id = self._get_element_id_from_row(row)
+        if element_id and getattr(self, "element_image_map", None):
+            img = self.element_image_map.get(element_id)
+            if img:
+                return img
+        if 0 <= row < len(getattr(self, "image_paths", [])):
+            return self.image_paths[row]
+        return ""
 
     def on_header_clicked(self, column):
         """表头点击事件：显示筛选菜单"""
@@ -1344,14 +1525,8 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         if selected_row:
             row = selected_row[0].row()  # 获取选中行的索引
-            # print(f"Selected row index: {row}")
-
-            # 从内存中获取零件示意图的路径
-            if row < len(self.image_paths):  # 确保索引有效
-                image_path = self.image_paths[row]
-                # print(f"Image path: {image_path}")
-
-                # 显示图片到右侧的QTextBrowser控件
+            image_path = self._get_image_by_row(row)
+            if image_path:
                 self.display_image(image_path)
             else:
                 self.show_error_message("无效的行索引", "所选行没有有效的图片路径。")
