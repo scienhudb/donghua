@@ -156,6 +156,22 @@ def move_guankou_to_first(element_list):
     return element_list
 
 
+def move_guankou_attachment_to_second(element_list):
+    """将零件名称为'管口附件'的元素移动到第二行（索引1），前提是列表长度>1"""
+    if not element_list or len(element_list) <= 1:
+        return element_list
+
+    for idx, item in enumerate(element_list):
+        if item.get("零件名称") == "管口附件":
+            # 找到了管口附件，把它移到第1个（第二行）
+            element = element_list.pop(idx)
+            # 如果原来就在首行之后，则不需要特别处理，直接插入索引1
+            insert_index = 1 if len(element_list) >= 1 else 0
+            element_list.insert(insert_index, element)
+            break
+    return element_list
+
+
 def load_guankou_define_data(product_type, product_form, template_id):
     """根据产品类型、产品形式、模板ID查询管口定义表"""
     connection = get_connection(**db_config_2)

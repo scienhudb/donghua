@@ -5,6 +5,7 @@ import traceback
 from collections import defaultdict
 from urllib.parse import urljoin
 from urllib.request import pathname2url
+import time
 
 from PyQt5 import QtWidgets, uic, QtCore, QtGui
 from PyQt5.QtCore import Qt, QTimer
@@ -31,6 +32,7 @@ from modules.cailiaodingyi.controllers.datamanager import (
     on_confirm_guankouparam, apply_paramname_dependent_combobox, apply_paramname_combobox,
     apply_gk_paramname_combobox, bind_define_table_click, on_clear_param_update, load_data_by_template, on_clear_guankou_param_update,
 )
+from modules.cailiaodingyi.db_cnt import get_connection
 from modules.cailiaodingyi.funcs.funcs_pdf_change import load_guankou_para_data_leibie, load_guankou_define_leibie, \
     load_updated_guankou_define_data, load_update_element_data, load_update_guankou_define_data, \
     load_update_guankou_para_data, get_design_params_by_product_id, \
@@ -41,6 +43,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_input import (
     load_elementoriginal_data,
     load_element_details,
     move_guankou_to_first,
+    move_guankou_attachment_to_second,
     load_guankou_define_data,
     load_guankou_material_detail,
     insert_element_data,
@@ -82,6 +85,219 @@ def on_product_id_changed(new_id):
 
 # 测试用产品 ID（真实情况中由外部输入）
 product_manager.product_id_changed.connect(on_product_id_changed)
+
+
+def load_pipe_attachment_from_template(product_id, template_name, force_reload=False):
+    """
+    从模板加载管口附件附加参数表数据到产品活动库
+    1. 从产品设计活动表_管口表统计当前附件选择
+    2. 读取模板参数结构
+    3. 清空并按附件类型分组写入产品活动库
+    
+    :param product_id: 产品ID
+    :param template_name: 模板名称
+    :param force_reload: 是否强制重新加载（切换模板时为True，首次加载时为False）
+    """
+    try:
+        import pymysql
+        import time
+        from modules.guankoudingyi.db_cnt import db_config_2
+        
+        # 材料库配置（用于查询模板）
+        db_config_material = {
+            'host': 'localhost',
+            'port': 3306,
+            'user': 'root',
+            'password': '123456',
+            'database': '材料库'
+        }
+
+        # 非强制时，如果已有数据则跳过
+        if not force_reload:
+            conn_check = pymysql.connect(**db_config_2)
+            try:
+                with conn_check.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM 产品设计活动表_管口附件附加参数表
+                        WHERE 产品ID = %s
+                    """, (product_id,))
+                    cnt = cursor.fetchone()
+                    cnt_val = cnt[0] if isinstance(cnt, tuple) else (cnt.get('COUNT(*)') if isinstance(cnt, dict) else 0)
+                    if cnt_val > 0:
+                        print(f"[管口附件][模板加载] 已有数据({cnt_val})，跳过加载，force_reload={force_reload}")
+                        return
+            finally:
+                conn_check.close()
+
+        # 强制重新加载时：完全按模板重建
+        conn = pymysql.connect(**db_config_2)
+        cur = conn.cursor(pymysql.cursors.DictCursor)
+        try:
+            # 1. 先删除该产品ID的所有管口附件附加参数表数据
+            if force_reload:
+                cur.execute("""
+                    DELETE FROM 产品设计活动表_管口附件附加参数表
+                    WHERE 产品ID = %s
+                """, (product_id,))
+                print(f"[管口附件][模板加载] 已清空产品活动库数据，准备按模板重建")
+
+            # 2. 统计哪些管口选择了哪些附件类型
+            cur.execute("""
+                SELECT 管口代号, 管口附件
+                FROM 产品设计活动表_管口表
+                WHERE 产品ID = %s AND 管口附件 IS NOT NULL AND 管口附件 != ''
+            """, (product_id,))
+            pipe_attachments = cur.fetchall()
+
+            if not pipe_attachments:
+                print("[管口附件][模板加载] 没有管口选择附件类型，无需加载")
+                conn.commit()
+                return
+
+            # 按附件类型分组管口号
+            attachment_groups = {}
+            for row in pipe_attachments:
+                pipe_code = row.get('管口代号') if isinstance(row, dict) else row[0]
+                raw_attachment = row.get('管口附件') if isinstance(row, dict) else row[1]
+
+                if not raw_attachment:
+                    continue
+
+                attachment_list = [
+                    a.strip() for a in str(raw_attachment).split(";") if a.strip()
+                ]
+
+                for attachment_type in attachment_list:
+                    if attachment_type not in attachment_groups:
+                        attachment_groups[attachment_type] = []
+                    attachment_groups[attachment_type].append(pipe_code)
+
+            if not attachment_groups:
+                print("[管口附件][模板加载] 没有有效的附件类型分组，无需加载")
+                conn.commit()
+                return
+
+            # 3. 获取模板ID和模板参数结构
+            conn_material = pymysql.connect(**db_config_material)
+            try:
+                cur_material = conn_material.cursor(pymysql.cursors.DictCursor)
+                cur_material.execute("""
+                    SELECT 模板ID
+                    FROM 元件材料模板表
+                    WHERE 模板名称 = %s
+                    LIMIT 1
+                """, (template_name,))
+                template_id_row = cur_material.fetchone()
+                if not template_id_row:
+                    print(f"[管口附件][模板加载] 未找到模板名称 '{template_name}' 对应的模板ID")
+                    conn.commit()
+                    return
+
+                template_id = template_id_row.get('模板ID') if isinstance(template_id_row, dict) else template_id_row[0]
+                
+                # 读取该模板的全部附件参数结构
+                cur_material.execute("""
+                    SELECT Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位
+                    FROM 管口附件附加参数表
+                    WHERE 模板ID = %s
+                    ORDER BY Tab分类, 标题分组, 参数ID
+                """, (template_id,))
+                template_params = cur_material.fetchall() or []
+
+                if not template_params:
+                    print(f"[管口附件][模板加载] 模板ID={template_id} 无参数结构")
+                    conn.commit()
+                    return
+
+                # 4. 获取当前最大的参数ID
+                cur.execute("""
+                    SELECT COALESCE(MAX(参数ID), 0) as max_id
+                    FROM 产品设计活动表_管口附件附加参数表
+                """)
+                max_id_row = cur.fetchone()
+                if isinstance(max_id_row, dict):
+                    max_param_id = max_id_row.get('max_id', 0)
+                elif isinstance(max_id_row, (list, tuple)) and max_id_row:
+                    max_param_id = max_id_row[0] or 0
+                else:
+                    max_param_id = 0
+                next_param_id = max_param_id + 1
+
+                # 5. 按附件类型分组，从模板插入数据
+                base_timestamp = int(time.time() * 1000)
+                tab_id_counter = 0
+                insert_count = 0
+
+                for attachment_type, pipe_codes in attachment_groups.items():
+                    if not pipe_codes:
+                        continue
+
+                    tab_id = base_timestamp + tab_id_counter
+                    tab_id_counter += 1
+
+                    # 从模板参数中筛出对应 Tab分类 的行
+                    type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
+                    if not type_params:
+                        print(f"[管口附件][模板加载] 附件类型 '{attachment_type}' 在模板中没有找到参数结构")
+                        continue
+
+                    pipe_codes_str = '、'.join(pipe_codes)
+                    
+                    # 插入该附件类型的所有参数行
+                    for param in type_params:
+                        param_name = param.get('参数名称')
+                        title_group = param.get('标题分组', '')
+                        attachment_type_from_template = param.get('附件类型', '')
+
+                        # 管口号字段使用当前管口表的管口号，其他字段使用模板的空值
+                        if param_name == '管口号':
+                            param_value = pipe_codes_str
+                        else:
+                            param_value = param.get('参数数值', '')  # 模板里的值（可能是空）
+
+                        cur.execute("""
+                            INSERT INTO 产品设计活动表_管口附件附加参数表
+                            (参数ID, 产品ID, Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位, 模板名称, 模板ID, Tab_ID)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            next_param_id,
+                            product_id,
+                            attachment_type,
+                            attachment_type_from_template,
+                            title_group,
+                            param_name,
+                            param_value,
+                            param.get('参数单位'),
+                            template_name,
+                            template_id,
+                            tab_id
+                        ))
+                        next_param_id += 1
+                        insert_count += 1
+
+                if insert_count > 0:
+                    print(f"[管口附件][模板加载] 按模板重建完成，插入了 {insert_count} 条参数记录")
+                else:
+                    print(f"[管口附件][模板加载] 未插入任何数据")
+
+            finally:
+                try:
+                    conn_material.close()
+                except Exception:
+                    pass
+
+            # 提交事务
+            conn.commit()
+            print(f"[管口附件][模板加载] 事务已提交")
+
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        print(f"[管口附件][模板加载] 失败: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 class DesignParameterDefineInputerViewer(QWidget):
     def __init__(self, line_tip=None, main_window=None):
@@ -202,6 +418,17 @@ class DesignParameterDefineInputerViewer(QWidget):
             from modules.cailiaodingyi.controllers.datamanager import on_confirm_fastener_param
             self.pushButton_fastener_confirm.clicked.connect(lambda: on_confirm_fastener_param(self))
 
+        # 管口附件 清空/确定
+        self.pushButton_attachment_clear = self.findChild(QPushButton, "pushButton_14")
+        if self.pushButton_attachment_clear:
+            from modules.cailiaodingyi.funcs.funcs_attachment_render import on_clear_attachment_param_update
+            self.pushButton_attachment_clear.clicked.connect(lambda: on_clear_attachment_param_update(self))
+
+        self.pushButton_attachment_confirm = self.findChild(QPushButton, "pushButton_15")
+        if self.pushButton_attachment_confirm:
+            from modules.cailiaodingyi.funcs.funcs_attachment_render import on_confirm_attachment_param_update
+            self.pushButton_attachment_confirm.clicked.connect(lambda: on_confirm_attachment_param_update(self))
+
 
 
         # # 绘制管口定义表格
@@ -258,6 +485,17 @@ class DesignParameterDefineInputerViewer(QWidget):
         bar.setElideMode(Qt.ElideNone)  # 不要省略号
         bar.setContextMenuPolicy(Qt.CustomContextMenu)
         bar.customContextMenuRequested.connect(self.on_guankou_tab_right_menu)
+        # 设置左右导航按钮背景为白色（背景色），边框也为白色
+        bar.setStyleSheet("""
+            QTabBar::scroller {
+                background: white;
+                border: none;
+            }
+            QTabBar QAbstractButton {
+                background: white;
+                border: 1px solid white;
+            }
+        """)
 
         # 挂上管理器（只保留这一句）
         self.plus_mgr = PlusTabManager(
@@ -1189,6 +1427,7 @@ class DesignParameterDefineInputerViewer(QWidget):
 
                 # 渲染表格
                 element_original_info = move_guankou_to_first(element_original_info)
+                element_original_info = move_guankou_attachment_to_second(element_original_info)
                 self.element_data = element_original_info
                 self.element_data_by_id = {
                     row.get("元件ID"): row
@@ -1230,6 +1469,9 @@ class DesignParameterDefineInputerViewer(QWidget):
                 self.lineEdit_template.setEnabled(False)
             else:
                 self.lineEdit_template.setEnabled(True)
+
+            # 如果产品库里还没有管口附件附加参数数据，按模板初始化一次（只在首次）
+            load_pipe_attachment_from_template(product_id, template_name_from_db, force_reload=False)
 
 
             guankou_define_dict = {}
@@ -1285,6 +1527,7 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         # 渲染零件列表数据(包括零件示意图)
         element_original_info = move_guankou_to_first(element_original_info)
+        element_original_info = move_guankou_attachment_to_second(element_original_info)
         self.element_data = element_original_info
         self.element_data_by_id = {
             row.get("元件ID"): row
@@ -1503,21 +1746,265 @@ class DesignParameterDefineInputerViewer(QWidget):
         table.clearSelection()  # 清除表格单元格的选中状态（可选）
 
     def filter_table_globally(self, keyword):
-        """全局筛选：匹配所有列的任意单元格"""
-        table = self.tableWidget_parts
-        keyword = keyword.strip().lower()  # 忽略大小写和前后空格
-        # 遍历所有行（跳过表头筛选行）
-        for row in range(0, table.rowCount()):  # 假设第0行是筛选行
-            row_visible = False
-            # 检查当前行的每一列是否匹配关键词
-            for col in range(table.columnCount()):
-                item = table.item(row, col)
-                if item and keyword in item.text().lower():
-                    row_visible = True
-                    break  # 只要有一列匹配就显示该行
+        print("筛选（数据库 + UI 融合版）")
 
-            # 设置行可见性
-            table.setRowHidden(row, not row_visible)
+        table = self.tableWidget_parts
+        keyword = (keyword or "").strip().lower()
+
+        # ========= 0. keyword 为空：全部显示 =========
+        if not keyword:
+            for row in range(table.rowCount()):
+                table.setRowHidden(row, False)
+            return
+
+        # 先重置行状态
+        for row in range(table.rowCount()):
+            table.setRowHidden(row, False)
+
+        product_id = self.product_id
+        from modules.cailiaodingyi.funcs.funcs_pdf_input import (
+            db_config_1, get_connection
+        )
+
+        conn = get_connection(**db_config_1)
+        cursor = conn.cursor()
+
+        try:
+            # =====================================================
+            # 1. 特殊父组定义
+            # =====================================================
+            SPECIAL_GROUPS = {
+                "支座": ["底板", "腹板", "筋板"],
+                "铭牌": ["铭牌垫板", "铭牌支架", "铭牌板", "铆钉"],
+                "保温支撑": ["支撑板", "支撑条", "支撑环", "螺母", "螺柱"],
+                "设备法兰紧固件": ["设备法兰紧固件"],
+            }
+
+            # =====================================================
+            # 2. 覆层语义
+            # =====================================================
+            COATING_PARAM_NAMES = (
+                "是否添加覆层",
+                "管程侧是否添加覆层",
+                "壳程侧是否添加覆层",
+                "接管是否添加覆层",
+                "接管法兰是否添加覆层",
+            )
+            TRUE_SET = ("是", "1", "true", "yes")
+            FALSE_SET = ("否", "0", "false", "no")
+
+            # =====================================================
+            # 3. UI 行 → 元件ID
+            # =====================================================
+            def get_component_ids_for_row(component_name: str):
+                component_name = (component_name or "").strip()
+                if not component_name:
+                    return set()
+
+                # 管口元件 - 直接返回特殊标记，后续在 keyword_hits_in_component_ids 中查询产品设计活动表_管口附加参数表
+                if component_name == "管口":
+                    # 管口元件的参数直接存储在 产品设计活动表_管口附加参数表 中，不需要元件ID
+                    return {"__GUANKOU__"}
+                
+                # 管口附件元件 - 直接返回特殊标记，后续在 keyword_hits_in_component_ids 中查询产品设计活动表_管口附件附加参数表
+                if component_name == "管口附件":
+                    # 管口附件元件的参数直接存储在 产品设计活动表_管口附件附加参数表 中，不需要元件ID
+                    return {"__GUANKOU_ATTACHMENT__"}
+
+                # 父组
+                if component_name in SPECIAL_GROUPS:
+                    names = SPECIAL_GROUPS[component_name]
+                    like_parts = []
+                    params = [product_id]
+
+                    for n in names:
+                        like_parts.append("参数值 LIKE %s")
+                        params.append(f"%{n}%")
+
+                    sql = f"""
+                        SELECT DISTINCT 元件ID
+                        FROM 产品设计活动表_元件附加参数合并表
+                        WHERE 产品ID = %s
+                          AND 参数名称 = '元件名称'
+                          AND 参数值 LIKE '[%%'
+                          AND ({' OR '.join(like_parts)})
+                    """
+                    cursor.execute(sql, params)
+                    return {r["元件ID"] for r in cursor.fetchall()}
+
+                # 普通元件（等值）
+                sql = """
+                    SELECT DISTINCT 元件ID
+                    FROM 产品设计活动表_元件附加参数表
+                    WHERE 产品ID = %s
+                      AND 参数名称 = '元件名称'
+                      AND 参数值 = %s
+                """
+                cursor.execute(sql, (product_id, component_name))
+                ids = {r["元件ID"] for r in cursor.fetchall()}
+
+                if not ids:
+                    sql = """
+                        SELECT DISTINCT 元件ID
+                        FROM 产品设计活动表_元件附加参数合并表
+                        WHERE 产品ID = %s
+                          AND 参数名称 = '元件名称'
+                          AND 参数值 = %s
+                          AND 参数值 NOT LIKE '[%%'
+                    """
+                    cursor.execute(sql, (product_id, component_name))
+                    ids = {r["元件ID"] for r in cursor.fetchall()}
+
+                return ids
+
+            # =====================================================
+            # 4. 数据库侧命中判断
+            # =====================================================
+            def keyword_hits_in_component_ids(component_ids: set):
+                if not component_ids:
+                    return False
+
+                # 处理管口元件 - 查询产品设计活动表_管口附加参数表（支持多列参数和分tab页）
+                if "__GUANKOU__" in component_ids:
+                    # 查询产品设计活动表_管口附加参数表
+                    # 支持多列参数（如接管材料类型1、接管材料类型2、接管材料类型3、接管法兰材料类型1、接管法兰材料类型2等）
+                    # 参数名称本身可能包含数字后缀，所以需要匹配参数名称和参数值
+                    # 需要查询所有类别（tab页）的数据
+                    sql = """
+                        SELECT 1
+                        FROM 产品设计活动表_管口附加参数表
+                        WHERE 产品ID = %s
+                          AND (
+                            参数值 LIKE %s
+                            OR 参数名称 LIKE %s
+                    """
+                    # 匹配参数值（如"Q345R"、"S30403"等）
+                    # 匹配参数名称（如"接管材料类型1"、"接管法兰材料类型2"中包含"材料类型"或"材料"）
+                    params = [product_id, f"%{keyword}%", f"%{keyword}%"]
+                    
+                    # 覆层语义（模仿普通元件的逻辑）
+                    if keyword in ("有覆层", "无覆层"):
+                        yn_set = TRUE_SET if keyword == "有覆层" else FALSE_SET
+                        name_ph = ",".join(["%s"] * len(COATING_PARAM_NAMES))
+                        val_ph = ",".join(["%s"] * len(yn_set))
+                        
+                        sql += f"""
+                            OR (
+                                参数名称 IN ({name_ph})
+                                AND 参数值 IN ({val_ph})
+                            )
+                        """
+                        params.extend(list(COATING_PARAM_NAMES))
+                        params.extend(list(yn_set))
+                    
+                    sql += """
+                          )
+                        LIMIT 1
+                    """
+                    cursor.execute(sql, params)
+                    return cursor.fetchone() is not None
+
+                # 处理管口附件元件 - 模仿合并元件的逻辑，查询产品设计活动表_管口附件附加参数表
+                if "__GUANKOU_ATTACHMENT__" in component_ids:
+                    # 查询产品设计活动表_管口附件附加参数表
+                    # 模仿合并元件的逻辑，使用 UNION ALL 结构（虽然这里只有一个表，但保持结构一致）
+                    sql = """
+                        SELECT 1
+                        FROM 产品设计活动表_管口附件附加参数表
+                        WHERE 产品ID = %s
+                          AND (
+                            参数数值 LIKE %s
+                            OR 参数名称 LIKE %s
+                            OR Tab分类 LIKE %s
+                            OR 附件类型 LIKE %s
+                          )
+                        LIMIT 1
+                    """
+                    params = [product_id, f"%{keyword}%", f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"]
+                    cursor.execute(sql, params)
+                    return cursor.fetchone() is not None
+
+                # 处理普通元件和合并元件
+                id_list = list(component_ids)
+                placeholders = ",".join(["%s"] * len(id_list))
+
+                sql = f"""
+                    SELECT 1
+                    FROM (
+                        SELECT 产品ID, 元件ID, 参数名称, 参数值
+                        FROM 产品设计活动表_元件附加参数表
+                        UNION ALL
+                        SELECT 产品ID, 元件ID, 参数名称, 参数值
+                        FROM 产品设计活动表_元件附加参数合并表
+                    ) t
+                    WHERE 产品ID = %s
+                      AND 元件ID IN ({placeholders})
+                      AND (
+                            参数值 LIKE %s
+                """
+                params = [product_id, *id_list, f"%{keyword}%"]
+
+                # 覆层语义
+                if keyword in ("有覆层", "无覆层"):
+                    yn_set = TRUE_SET if keyword == "有覆层" else FALSE_SET
+                    name_ph = ",".join(["%s"] * len(COATING_PARAM_NAMES))
+                    val_ph = ",".join(["%s"] * len(yn_set))
+
+                    sql += f"""
+                            OR (
+                                参数名称 IN ({name_ph})
+                                AND 参数值 IN ({val_ph})
+                            )
+                    """
+                    params.extend(list(COATING_PARAM_NAMES))
+                    params.extend(list(yn_set))
+
+                sql += """
+                      )
+                    LIMIT 1
+                """
+                cursor.execute(sql, params)
+                return cursor.fetchone() is not None
+
+            # =====================================================
+            # 5. 逐行融合判断（数据库 OR UI 最后两列）
+            # =====================================================
+            col_count = table.columnCount()
+            ui_only_cols = [col_count - 2, col_count - 1]  # 最后两列
+
+            for row in range(table.rowCount()):
+                name_item = table.item(row, 1)
+                if not name_item:
+                    table.setRowHidden(row, True)
+                    continue
+
+                component_name = name_item.text().strip()
+
+                # A. 数据库语义筛选
+                row_component_ids = get_component_ids_for_row(component_name)
+                db_visible = keyword_hits_in_component_ids(row_component_ids)
+
+                # B. UI 本地筛选（最后两列）
+                ui_visible = False
+                for col in ui_only_cols:
+                    if col < 0:
+                        continue
+                    item = table.item(row, col)
+                    if item and keyword in item.text().lower():
+                        ui_visible = True
+                        break
+
+                visible = db_visible or ui_visible
+                table.setRowHidden(row, not visible)
+
+                print(
+                    f"Row {row} | {component_name} | "
+                    f"db={db_visible} ui={ui_visible} visible={visible}"
+                )
+
+        finally:
+            cursor.close()
+            conn.close()
 
     def show_image_in_text_browser(self, selected, deselected):
         # 获取选中的行
@@ -1525,6 +2012,40 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         if selected_row:
             row = selected_row[0].row()  # 获取选中行的索引
+            
+            # 检查是否是"管口附件"元件
+            try:
+                if row < len(self.element_data):
+                    part_name_item = self.tableWidget_parts.item(row, 1)
+                    if part_name_item:
+                        part_name = part_name_item.text().strip()
+                        if part_name == "管口附件":
+                            # 对于管口附件，检查是否有数据
+                            from modules.cailiaodingyi.funcs.funcs_pdf_input import db_config_1
+                            import pymysql
+                            
+                            connection = pymysql.connect(**db_config_1)
+                            has_data = False
+                            try:
+                                with connection.cursor() as cursor:
+                                    cursor.execute("""
+                                        SELECT COUNT(*) as cnt
+                                        FROM 产品设计活动表_管口附件附加参数表
+                                        WHERE 产品ID = %s
+                                    """, (self.product_id,))
+                                    result = cursor.fetchone()
+                                    if result:
+                                        cnt = result[0] if isinstance(result, tuple) else result.get('cnt', 0)
+                                        has_data = cnt > 0
+                            finally:
+                                connection.close()
+                            
+                            # 如果没有数据，不显示图片，也不显示错误提示
+                            if not has_data:
+                                return
+            except Exception as e:
+                print(f"[图片显示] 检查管口附件数据失败: {e}")
+            
             image_path = self._get_image_by_row(row)
             if image_path:
                 self.display_image(image_path)
@@ -1852,6 +2373,59 @@ class DesignParameterDefineInputerViewer(QWidget):
 
                 except Exception as e:
                     print(f"[设备法兰紧固件] 数据加载失败: {e}")
+                    return
+            elif part_name == "管口附件":
+                # 先检查产品活动库中是否有管口附件数据（在切换页面之前检查）
+                from modules.cailiaodingyi.funcs.funcs_pdf_input import db_config_1
+                import pymysql
+                
+                connection = pymysql.connect(**db_config_1)
+                has_data = False
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute("""
+                            SELECT COUNT(*) as cnt
+                            FROM 产品设计活动表_管口附件附加参数表
+                            WHERE 产品ID = %s
+                        """, (self.product_id,))
+                        result = cursor.fetchone()
+                        if result:
+                            cnt = result[0] if isinstance(result, tuple) else result.get('cnt', 0)
+                            has_data = cnt > 0
+                        print(f"[管口附件] 数据检查结果: cnt={cnt}, has_data={has_data}")
+                finally:
+                    connection.close()
+                
+                # 如果没有数据，不切换页面、不清空当前元件表格，保持上一个元件的显示
+                if not has_data:
+                    if hasattr(self, 'line_tip'):
+                        self.line_tip.setText("无管口附件，保持当前元件")
+                        self.line_tip.setStyleSheet("color: orange;")
+                    print("[管口附件] 产品活动库中无管口附件数据，保持当前元件界面，不切换页面")
+                    return  # 直接返回，不执行后续代码
+                
+                # 有数据，才进入page_5并渲染
+                try:
+                    element_id = self.element_data[row].get("元件ID")
+                    print(f"[调试] 管口附件元件ID: {element_id}")
+                    
+                    # 有数据时才切换页面
+                    self.stackedWidget.setCurrentIndex(4)  # page_5 - 管口附件页面
+                    # 缓存当前选择的管口附件 元件ID，供"清空/确定"使用
+                    self.current_element_id = element_id
+                    self.current_attachment_element_id = element_id
+
+                    from modules.cailiaodingyi.funcs.funcs_attachment_render import render_attachment_param_to_ui
+                    render_attachment_param_to_ui(self, element_id)
+
+                except Exception as e:
+                    print(f"[管口附件] 数据加载失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # 出错时也显示提示
+                    if hasattr(self, 'line_tip'):
+                        self.line_tip.setText("无管口附件，不出现任何表格")
+                        self.line_tip.setStyleSheet("color: orange;")
                     return
             elif part_name in ["支座", "铭牌", "保温支撑"]:  # 支座和铭牌支架使用同一个UI界面  # 新增保温支撑
                 self.stackedWidget.setCurrentIndex(2)  # 鞍座页面 (page_3)

@@ -1,8 +1,10 @@
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QMessageBox, QLabel, QComboBox
 import pymysql
-from modules.guankoudingyi.db_cnt import get_connection, db_config_2
+import time
+from modules.guankoudingyi.db_cnt import get_connection, db_config_2,db_config_material
 from modules.guankoudingyi.funcs.funcs_pipe_table import ensure_hidden_maps, get_next_pipe_id_runtime
+
 
 def save_all_pipe_data(stats_widget):
     """
@@ -81,6 +83,11 @@ def save_all_pipe_data(stats_widget):
                 DELETE FROM 产品设计活动表_管口类别表
                 WHERE 产品ID=%s AND 管口ID=%s
             """, (product_id, hid))
+            #管口载荷表（补充）
+            cur.execute("""
+                DELETE FROM 产品设计活动表_管口载荷表
+                WHERE 产品ID=%s AND 管口ID=%s
+            """, (product_id, hid))
         stats_widget.deleted_pipe_ids.clear()
 
         # —— 2) 逐行 Upsert（新增/修改）——
@@ -131,6 +138,10 @@ def save_all_pipe_data(stats_widget):
             """, (product_id, hid, port_code, component))
 
         conn.commit()
+
+        # —— 3) 保存管口附件数据 ——
+        save_pipe_attachment_data(product_id, conn, cur)
+
         # 在line_tip中显示保存成功信息
         if hasattr(stats_widget, 'line_tip'):
             stats_widget.line_tip.setText("保存成功！")
@@ -242,6 +253,491 @@ def save_all_data_combined(stats_widget):
     if save_pipe_type_selection(stats_widget):
         # 再保存管口数据
         save_all_pipe_data(stats_widget)
+
+def save_pipe_attachment_data(product_id, conn, cur):
+    """
+    保存管口附件数据到产品设计活动表_管口附件附加参数表
+    1. 从产品设计活动表_管口表统计哪些管口选择了哪些附件类型
+    2. 从模板库的管口附件附加参数表获取模板参数结构
+    3. 根据附件类型分组，写入到产品活动库
+    """
+    try:
+        # 1. 统计哪些管口选择了哪些附件类型
+        cur.execute("""
+            SELECT 管口代号, 管口附件
+            FROM 产品设计活动表_管口表
+            WHERE 产品ID = %s AND 管口附件 IS NOT NULL AND 管口附件 != ''
+        """, (product_id,))
+        pipe_attachments = cur.fetchall()
+
+        if not pipe_attachments:
+            print("[管口附件] 没有管口选择附件类型，清理旧数据后退出")
+            cur.execute("""
+                DELETE FROM 产品设计活动表_管口附件附加参数表
+                WHERE 产品ID = %s
+            """, (product_id,))
+            conn.commit()
+            return
+
+        # 按附件类型分组管口号
+        # 现在“管口附件”字段支持多选，数据库中以";"分隔，如："接管法兰配对法兰;接管拉筋"
+        # 因此需要先按";"拆分，再把同一个管口编号添加到多个附件类型分组里
+        attachment_groups = {}
+        for row in pipe_attachments:
+            pipe_code = row.get('管口代号') if isinstance(row, dict) else row[0]
+            raw_attachment = row.get('管口附件') if isinstance(row, dict) else row[1]
+
+            if not raw_attachment:
+                continue
+
+            # 解析多选附件，和前端下拉框保持一致，使用 ";" 作为分隔符
+            # 同时去掉首尾空格，过滤掉空字符串
+            attachment_list = [
+                a.strip() for a in str(raw_attachment).split(";") if a.strip()
+            ]
+
+            for attachment_type in attachment_list:
+                if attachment_type not in attachment_groups:
+                    attachment_groups[attachment_type] = []
+                attachment_groups[attachment_type].append(pipe_code)
+
+        if not attachment_groups:
+            print("[管口附件] 没有有效的附件类型分组，清理旧数据后退出")
+            cur.execute("""
+                DELETE FROM 产品设计活动表_管口附件附加参数表
+                WHERE 产品ID = %s
+            """, (product_id,))
+            conn.commit()
+            return
+
+        # 3. 获取当前最大的参数ID，用于生成新的参数ID
+        cur.execute("""
+            SELECT COALESCE(MAX(参数ID), 0) as max_id
+            FROM 产品设计活动表_管口附件附加参数表
+        """)
+        max_id_row = cur.fetchone()
+        if isinstance(max_id_row, dict):
+            max_param_id = max_id_row.get('max_id', 0)
+        elif isinstance(max_id_row, (list, tuple)) and max_id_row:
+            max_param_id = max_id_row[0] or 0
+        else:
+            max_param_id = 0
+        next_param_id = max_param_id + 1
+
+        # 4. 差异化同步：只处理受影响的附件类型
+        # 查询现有各 Tab分类/Tab_ID/附件类型 的管口号
+        cur.execute("""
+            SELECT Tab分类, Tab_ID, 附件类型, 参数数值
+            FROM 产品设计活动表_管口附件附加参数表
+            WHERE 产品ID = %s AND 参数名称 = '管口号'
+        """, (product_id,))
+        existing_tabs = cur.fetchall() or []
+
+        current_types = set(attachment_groups.keys())
+        
+        # 按附件类型分组统计现有的tab页（用于判断是否需要新建tab）
+        existing_tabs_by_attachment_type = {}
+        for row in existing_tabs:
+            attachment_type = row.get('附件类型')
+            if attachment_type:
+                if attachment_type not in existing_tabs_by_attachment_type:
+                    existing_tabs_by_attachment_type[attachment_type] = []
+                existing_tabs_by_attachment_type[attachment_type].append(row)
+
+
+
+
+
+
+        # # 如果产品设计活动表_管口附件附加参数表里没有任何数据，按模板加载逻辑处理所有附件类型
+        # if not existing_tabs:
+        #     print("[管口附件] 产品活动库中无管口附件附加参数数据，按模板加载逻辑处理所有附件类型")
+        #     # 获取模板名称（来自产品设计活动表_元件材料表）
+        #     cur.execute("""
+        #         SELECT 模板名称
+        #         FROM 产品设计活动表_元件材料表
+        #         WHERE 产品ID = %s
+        #         LIMIT 1
+        #     """, (product_id,))
+        #     template_result = cur.fetchone()
+        #     template_name = None
+        #     if template_result:
+        #         template_name = template_result.get('模板名称') if isinstance(template_result, dict) else template_result[0]
+            
+        #     if not template_name:
+        #         print("[管口附件] 未找到模板名称，无法按模板加载，跳过")
+        #     else:
+        #         # 从材料库获取模板ID和模板参数结构
+        #         conn_material = pymysql.connect(**db_config_material)
+        #         try:
+        #             cur_material = conn_material.cursor(pymysql.cursors.DictCursor)
+        #             cur_material.execute("""
+        #                 SELECT 模板ID
+        #                 FROM 元件材料模板表
+        #                 WHERE 模板名称 = %s
+        #                 LIMIT 1
+        #             """, (template_name,))
+        #             template_id_row = cur_material.fetchone()
+        #             if not template_id_row:
+        #                 print(f"[管口附件] 未找到模板名称 '{template_name}' 对应的模板ID")
+        #             else:
+        #                 template_id = template_id_row.get('模板ID') if isinstance(template_id_row, dict) else template_id_row[0]
+        #                 # 读取该模板的全部附件参数结构
+        #                 cur_material.execute("""
+        #                     SELECT Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位
+        #                     FROM 管口附件附加参数表
+        #                     WHERE 模板ID = %s
+        #                     ORDER BY Tab分类, 标题分组, 参数ID
+        #                 """, (template_id,))
+        #                 template_params = cur_material.fetchall() or []
+
+        #                 if not template_params:
+        #                     print(f"[管口附件] 模板ID={template_id} 无参数结构")
+        #                 else:
+        #                     base_timestamp = int(time.time() * 1000)
+        #                     tab_id_counter = 0
+        #                     insert_count_all = 0
+
+        #                     # 处理所有附件类型（不只是新增的）
+        #                     for attachment_type, pipe_codes in attachment_groups.items():
+        #                         if not pipe_codes:
+        #                             continue
+
+        #                         tab_id = base_timestamp + tab_id_counter
+        #                         tab_id_counter += 1
+
+        #                         # 从模板参数中筛出对应 Tab分类 的行
+        #                         type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
+        #                         if not type_params:
+        #                             print(f"[管口附件] 附件类型 '{attachment_type}' 在模板中没有找到参数结构")
+        #                             continue
+
+        #                         pipe_codes_str = '、'.join(pipe_codes)
+                                
+        #                         # 插入该附件类型的所有参数行
+        #                         for param in type_params:
+        #                             param_name = param.get('参数名称')
+        #                             title_group = param.get('标题分组', '')
+        #                             attachment_type_from_template = param.get('附件类型', '')
+
+        #                             # 管口号字段使用当前管口表的管口号，其他字段使用模板的空值
+        #                             if param_name == '管口号':
+        #                                 param_value = pipe_codes_str
+        #                             else:
+        #                                 param_value = param.get('参数数值', '')  # 模板里的值（可能是空）
+
+        #                             cur.execute("""
+        #                                 INSERT INTO 产品设计活动表_管口附件附加参数表
+        #                                 (参数ID, 产品ID, Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位, 模板名称, 模板ID, Tab_ID)
+        #                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        #                             """, (
+        #                                 next_param_id,
+        #                                 product_id,
+        #                                 attachment_type,
+        #                                 attachment_type_from_template,
+        #                                 title_group,
+        #                                 param_name,
+        #                                 param_value,
+        #                                 param.get('参数单位'),
+        #                                 template_name,
+        #                                 template_id,
+        #                                 tab_id
+        #                             ))
+        #                             next_param_id += 1
+        #                             insert_count_all += 1
+
+        #                     if insert_count_all > 0:
+        #                         print(f"[管口附件] 按模板加载完成，插入了 {insert_count_all} 条参数记录")
+        #                     else:
+        #                         print(f"[管口附件] 未插入任何数据")
+        #         finally:
+        #             try:
+        #                 conn_material.close()
+        #             except Exception:
+        #                 pass
+            
+        #     # 提交事务并返回（首次加载时不需要执行后续的差异化更新逻辑）
+        #     conn.commit()
+        #     print(f"[管口附件] 事务已提交")
+        #     return
+
+
+        # 如果产品设计活动表_管口附件附加参数表里没有任何数据，按模板加载逻辑处理所有附件类型
+        if not existing_tabs:
+            print("[管口附件] 产品活动库中无管口附件附加参数数据，按模板加载逻辑处理所有附件类型（使用模板ID=9）")
+            # 模板ID写死为9（因为不进入元件定义时没有模板ID）
+            template_id = 9
+
+            # 从材料库获取模板参数结构
+            conn_material = pymysql.connect(**db_config_material)
+            try:
+                cur_material = conn_material.cursor(pymysql.cursors.DictCursor)
+                # 读取该模板的全部附件参数结构
+                cur_material.execute("""
+                    SELECT Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位
+                    FROM 管口附件附加参数表
+                    WHERE 模板ID = %s
+                    ORDER BY Tab分类, 标题分组, 参数ID
+                """, (template_id,))
+                template_params = cur_material.fetchall() or []
+
+                if not template_params:
+                    print(f"[管口附件] 模板ID={template_id} 无参数结构")
+                else:
+                    base_timestamp = int(time.time() * 1000)
+                    tab_id_counter = 0
+                    insert_count_all = 0
+
+                    # 处理所有附件类型（不只是新增的）
+                    for attachment_type, pipe_codes in attachment_groups.items():
+                        if not pipe_codes:
+                            continue
+
+                        tab_id = base_timestamp + tab_id_counter
+                        tab_id_counter += 1
+
+                        # 从模板参数中筛出对应 Tab分类 的行
+                        type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
+                        if not type_params:
+                            print(f"[管口附件] 附件类型 '{attachment_type}' 在模板中没有找到参数结构")
+                            continue
+
+                        pipe_codes_str = '、'.join(pipe_codes)
+
+                        # 插入该附件类型的所有参数行
+                        for param in type_params:
+                            param_name = param.get('参数名称')
+                            title_group = param.get('标题分组', '')
+                            attachment_type_from_template = param.get('附件类型', '')
+
+                            # 管口号字段使用当前管口表的管口号，其他字段使用模板的空值
+                            if param_name == '管口号':
+                                param_value = pipe_codes_str
+                            else:
+                                param_value = param.get('参数数值', '')  # 模板里的值（可能是空）
+
+                            cur.execute("""
+                                INSERT INTO 产品设计活动表_管口附件附加参数表
+                                (参数ID, 产品ID, Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位, 模板名称, 模板ID, Tab_ID)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                next_param_id,
+                                product_id,
+                                attachment_type,
+                                attachment_type_from_template,
+                                title_group,
+                                param_name,
+                                param_value,
+                                param.get('参数单位'),
+                                '',  # 模板名称为空（因为未进入元件定义）
+                                template_id,
+                                tab_id
+                            ))
+                            next_param_id += 1
+                            insert_count_all += 1
+
+                    if insert_count_all > 0:
+                        print(f"[管口附件] 按模板加载完成，插入了 {insert_count_all} 条参数记录")
+                    else:
+                        print(f"[管口附件] 未插入任何数据")
+            finally:
+                try:
+                    conn_material.close()
+                except Exception:
+                    pass
+
+            # 提交事务并返回（首次加载时不需要执行后续的差异化更新逻辑）
+            conn.commit()
+            print(f"[管口附件] 事务已提交")
+            return
+
+
+
+
+        # # 如果已有数据，执行差异化更新逻辑
+
+        
+        # 遍历所有现有的tab页，更新或删除
+        # 对于每个tab页：
+        # 1. 如果这个tab页的附件类型在管口表中还存在，则根据管口号更新（去掉不再存在的管口号）
+        # 2. 如果更新后管口号为空，则删除整个tab页
+        # 3. 如果这个tab页的附件类型在管口表中不存在了，则删除整个tab页
+        handled_attachment_types = set()
+        for row in existing_tabs:
+            attachment_type = row.get('附件类型')
+            tab_id = row.get('Tab_ID')
+            
+            if not attachment_type:
+                continue
+            
+            # 获取该tab页当前的管口号列表
+            current_codes = [c.strip() for c in (row.get('参数数值') or '').split('、') if c.strip()]
+            
+            # 如果该附件类型在管口表中还存在
+            if attachment_type in current_types:
+                handled_attachment_types.add(attachment_type)
+                
+                # 获取该附件类型在管口表中的所有可用管口号
+                available_pipe_codes = set(attachment_groups.get(attachment_type, []))
+                
+                # 只保留那些既在当前tab页中，又在管口表中可用的管口号
+                new_codes = [c for c in current_codes if c in available_pipe_codes]
+                
+                # 如果更新后还有管口号，则更新；否则删除整个tab页
+                if new_codes:
+                    new_codes_str = '、'.join(new_codes)
+                    cur.execute("""
+                        UPDATE 产品设计活动表_管口附件附加参数表
+                        SET 参数数值 = %s
+                        WHERE 产品ID = %s AND Tab_ID = %s AND 参数名称 = '管口号'
+                    """, (new_codes_str, product_id, tab_id))
+                else:
+                    # 管口号为空，删除整个tab页
+                    cur.execute("""
+                        DELETE FROM 产品设计活动表_管口附件附加参数表
+                        WHERE 产品ID = %s AND Tab_ID = %s
+                    """, (product_id, tab_id))
+                    print(f"[管口附件] 删除了Tab_ID={tab_id}（因为管口号为空）")
+            else:
+                # 该附件类型在管口表中不存在了，删除整个tab页
+                cur.execute("""
+                    DELETE FROM 产品设计活动表_管口附件附加参数表
+                    WHERE 产品ID = %s AND Tab_ID = %s
+                """, (product_id, tab_id))
+                print(f"[管口附件] 删除了Tab_ID={tab_id}（因为附件类型'{attachment_type}'在管口表中已不存在）")
+
+        # 新增的附件类型：如果该附件类型在活动库里完全没有Tab，则按模板结构创建一个Tab
+        types_to_add = current_types - handled_attachment_types
+        if types_to_add:
+            try:
+                # 获取模板名称（来自产品设计活动表_元件材料表）
+                cur.execute("""
+                    SELECT 模板名称
+                    FROM 产品设计活动表_元件材料表
+                    WHERE 产品ID = %s
+                    LIMIT 1
+                """, (product_id,))
+                template_result = cur.fetchone()
+                template_name = None
+                if template_result:
+                    template_name = template_result.get('模板名称') if isinstance(template_result, dict) else template_result[0]
+                if not template_name:
+                    print("[管口附件] 新增附件类型时未找到模板名称，跳过模板字段填充")
+                else:
+                    # 从材料库获取模板ID和模板参数结构
+                    conn_material = pymysql.connect(**db_config_material)
+                    try:
+                        cur_material = conn_material.cursor(pymysql.cursors.DictCursor)
+                        cur_material.execute("""
+                            SELECT 模板ID
+                            FROM 元件材料模板表
+                            WHERE 模板名称 = %s
+                            LIMIT 1
+                        """, (template_name,))
+                        template_id_row = cur_material.fetchone()
+                        if not template_id_row:
+                            print(f"[管口附件] 新增附件类型时未找到模板名称 '{template_name}' 对应的模板ID")
+                        else:
+                            template_id = template_id_row.get('模板ID') if isinstance(template_id_row, dict) else template_id_row[0]
+                            # 读取该模板的全部附件参数结构
+                            cur_material.execute("""
+                                SELECT Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位
+                                FROM 管口附件附加参数表
+                                WHERE 模板ID = %s
+                                ORDER BY Tab分类, 标题分组, 参数ID
+                            """, (template_id,))
+                            template_params = cur_material.fetchall() or []
+
+                            if not template_params:
+                                print(f"[管口附件] 新增附件类型时模板ID={template_id} 无参数结构")
+                            else:
+                                base_timestamp = int(time.time() * 1000)
+                                tab_id_counter = 0
+                                insert_count_new = 0
+
+                                for attachment_type in types_to_add:
+                                    # 只为完全没有任何 Tab 的附件类型创建一个新的 Tab
+                                    # 检查该附件类型是否在现有tab页中存在（按附件类型判断）
+                                    if attachment_type in existing_tabs_by_attachment_type:
+                                        print(f"[管口附件] 附件类型'{attachment_type}'已有tab页，跳过新建")
+                                        continue
+
+                                    pipe_codes = attachment_groups.get(attachment_type, [])
+                                    if not pipe_codes:
+                                        # 虽然类型存在，但没有管口号，跳过
+                                        continue
+
+                                    tab_id = base_timestamp + tab_id_counter
+                                    tab_id_counter += 1
+
+                                    # 从模板参数中筛出对应附件类型的行（按附件类型筛选，而不是按Tab分类）
+                                    type_params = [p for p in template_params if p.get('附件类型') == attachment_type]
+                                    # 如果按附件类型没找到，再尝试按Tab分类查找（兼容旧模板）
+                                    if not type_params:
+                                        type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
+                                    if not type_params:
+                                        print(f"[管口附件] 新增附件类型 '{attachment_type}' 在模板中没有找到参数结构")
+                                        continue
+
+                                    pipe_codes_str = '、'.join(pipe_codes)
+                                    for param in type_params:
+                                        param_name = param.get('参数名称')
+                                        title_group = param.get('标题分组', '')
+                                        attachment_type_from_template = param.get('附件类型', '')
+
+                                        if param_name == '管口号':
+                                            param_value = pipe_codes_str
+                                        else:
+                                            param_value = param.get('参数数值', '')
+
+                                        cur.execute("""
+                                            INSERT INTO 产品设计活动表_管口附件附加参数表
+                                            (参数ID, 产品ID, Tab分类, 附件类型, 标题分组, 参数名称, 参数数值, 参数单位, 模板名称, 模板ID, Tab_ID)
+                                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                        """, (
+                                            next_param_id,
+                                            product_id,
+                                            attachment_type,
+                                            attachment_type_from_template,
+                                            title_group,
+                                            param_name,
+                                            param_value,
+                                            param.get('参数单位'),
+                                            template_name,
+                                            template_id,
+                                            tab_id
+                                        ))
+                                        next_param_id += 1
+                                        insert_count_new += 1
+
+                                if insert_count_new:
+                                    print(f"[管口附件] 为新增附件类型 {types_to_add} 创建了 {insert_count_new} 条参数记录")
+                    finally:
+                        try:
+                            conn_material.close()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[管口附件] 处理新增附件类型时出错: {e}")
+                import traceback
+                traceback.print_exc()
+
+        print(f"[管口附件] 同步完成：更新附件类型 {len(handled_attachment_types)}，待新增附件类型 {len(types_to_add)}")
+
+        # 提交事务（使用主连接）
+        conn.commit()
+        print(f"[管口附件] 事务已提交")
+
+    except Exception as e:
+        print(f"[管口附件] 保存失败: {e}")
+        import traceback
+        traceback.print_exc()
+        # 回滚事务（使用主连接）
+        if conn:
+            conn.rollback()
+            print(f"[管口附件] 事务已回滚")
+        # 不抛出异常，避免影响主保存流程
+
 
 def connect_save_button(stats_widget):
     """

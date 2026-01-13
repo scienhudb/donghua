@@ -155,7 +155,6 @@ def move_guankou_to_first(element_list):
             break
     return element_list
 
-
 def load_guankou_define_data(product_type, product_form, template_id):
     """根据产品类型、产品形式、模板ID查询管口定义表"""
     connection = get_connection(**db_config_2)

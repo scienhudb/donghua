@@ -50,6 +50,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
 from modules.cailiaodingyi.funcs.funcs_pdf_input import (
     load_elementoriginal_data,
     move_guankou_to_first,
+    move_guankou_attachment_to_second,
     load_guankou_material_detail,
     query_template_guankou_para_data,
     query_template_element_para_data,
@@ -418,9 +419,10 @@ def on_clear_param_update(viewer_instance):
         update_param_table_data(param_table, viewer_instance.product_id, element_id)
         update_left_table_db_from_param_table(param_table, viewer_instance.product_id, element_id, part_name)
 
-    # 刷新左表
+    # 刷新左表：管口放第一行，管口附件放第二行
     updated = load_element_data_by_product_id(viewer_instance.product_id)
     updated = move_guankou_to_first(updated)
+    updated = move_guankou_attachment_to_second(updated)
     viewer_instance.element_data = updated
     viewer_instance.render_data_to_table(updated)
 
@@ -616,6 +618,7 @@ def on_combo_changed(viewer_instance, table, col, category_label):
     update_guankou_define_status(viewer_instance.product_id, element_name, define_status)
     update_element_info = load_element_data_by_product_id(viewer_instance.product_id)
     update_element_info = move_guankou_to_first(update_element_info)
+    update_element_info = move_guankou_attachment_to_second(update_element_info)
     viewer_instance.render_data_to_table(update_element_info)
     # 存为模板
     # update_template_input_editable_state(viewer_instance)
@@ -858,6 +861,7 @@ _head_state_cache = {}
 _fangchongban_state_cache = {}
 _fenchenggeban_state_cache ={}
 _jiedizhuangzhi_state_cache = {}
+_zhizuo_state_cache = {}
 def make_on_head_type_changed(component_info_copy, viewer_instance_copy, row_index):
     """封头类型代号 → 图片刷新（缓存 head_type_code）"""
 
@@ -1199,6 +1203,70 @@ def _query_jiedizhuangzhi_image(device_type_name, component_name):
                 connection.close()
             except Exception:
                 pass
+def make_on_zhizuo_type_changed(component_info_copy, viewer_instance_copy, row_index):
+    """支座型式 → 图片刷新（缓存 support_type）"""
+
+    def handler(value, pname):
+        def _do():
+            try:
+                comp_name = (component_info_copy.get("零件名称") or "").strip()
+                if "支座" not in comp_name:
+                    return
+
+                # 取/初始化缓存
+                state = _zhizuo_state_cache.setdefault(comp_name, {
+                    "support_type": "",
+                })
+
+                # 根据当前行更新状态
+                if pname == "支座型式":
+                    state["support_type"] = (value or "").strip()
+
+                # 使用缓存里的值
+                support_type_name = state["support_type"]
+
+                if not support_type_name or not viewer_instance_copy:
+                    return
+
+                image_path = _query_zhizuo_image(support_type_name, comp_name)
+
+                _set_pixmap_if_changed(viewer_instance_copy, image_path)
+
+            except Exception as e:
+                print(f"[错误] 第{row_index}行处理支座型式图片失败: {e}")
+
+        QTimer.singleShot(60, _do)
+
+    return handler
+
+def _query_zhizuo_image(support_type_name, component_name):
+    """材料库：支座示意图表 → 匹配支座型式 + 元件名称"""
+    connection = None
+    try:
+        connection = get_connection(**db_config_2)
+        with connection.cursor() as cursor:
+            sql = """
+                SELECT 示意图 FROM 支座示意图表
+                WHERE 支座型式=%s AND 元件名称=%s
+                LIMIT 1
+            """
+            cursor.execute(sql, (support_type_name, component_name))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        if isinstance(row, dict):
+            return row.get("示意图")
+        return row[0] if len(row) > 0 else None
+
+    except Exception as e:
+        print(f"[错误] 支座示意图查询失败: {e}")
+        return None
+    finally:
+        if connection:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 # ✅ 封装处理函数：绑定每行独立信息，避免闭包错误
 def make_on_covering_changed(component_info_copy, viewer_instance_copy, row_index, table=None):
@@ -1228,6 +1296,8 @@ def make_on_covering_changed(component_info_copy, viewer_instance_copy, row_inde
                     make_on_fenchenggeban_changed(component_info_copy, viewer_instance_copy, row_index)(value,None)
                 if "接地装置" in comp_name:
                     make_on_jiedizhuangzhi_type_changed(component_info_copy, viewer_instance_copy, row_index)(value,None)
+                # if "支座" in comp_name:
+                #     make_on_zhizuo_type_changed(component_info_copy, viewer_instance_copy, row_index)(value,None)
 
                 if comp_name in ("壳体封头", "管箱封头", "外头盖封头"):
                     make_on_head_type_changed(component_info_copy, viewer_instance_copy, row_index)(value,None)
@@ -2191,6 +2261,7 @@ def load_data_by_template(viewer_instance, template_name):
 
         if element_original_info:
             element_original_info = move_guankou_to_first(element_original_info)
+            element_original_info = move_guankou_attachment_to_second(element_original_info)
             # print(f"选择模板后的元件列表{element_original_info}")
             viewer_instance.element_original_info_template = element_original_info
             # print(f"传入模板的元件列表{viewer_instance.element_original_info_template}")
@@ -2198,6 +2269,14 @@ def load_data_by_template(viewer_instance, template_name):
 
             viewer_instance.image_paths = [item.get('零件示意图', '') for item in element_original_info]
             viewer_instance.render_data_to_table(element_original_info)
+            # ===== 模板切换后，强制重新执行筛选 =====
+            try:
+                keyword = ""
+                if hasattr(viewer_instance, "filterLineEdit"):
+                    keyword = viewer_instance.filterLineEdit.text().strip()
+                viewer_instance.filter_table_globally(keyword)
+            except Exception as e:
+                print(f"[筛选] 模板切换后重跑筛选失败: {e}")
             if len(element_original_info) > 0:
                 first_part_image_path = element_original_info[0].get('零件示意图', '')
                 viewer_instance.display_image(first_part_image_path)
@@ -2224,6 +2303,15 @@ def load_data_by_template(viewer_instance, template_name):
 
             # 将当前模板ID对应的管口参数信息写入到产品设计活动库中
             insert_or_update_guankou_para_data(product_id, guankou_para_info, template_name)
+            # 将管口附件附加参数表也同步一次（按模板结构写入产品活动库，切换模板时强制重新加载）
+            try:
+                from modules.cailiaodingyi.paradefine_view import load_pipe_attachment_from_template
+                load_pipe_attachment_from_template(product_id, template_name, force_reload=True)
+            except Exception as e:
+                print(f"[管口附件] 切换模板时同步失败: {e}")
+                import traceback
+                traceback.print_exc()
+
             # sync_corrosion_to_guankou_param(product_id)
             if viewer_instance.guankou_tabWidget.count() > 0:
                 current_index = viewer_instance.guankou_tabWidget.currentIndex()  # 当前选中 tab
@@ -2885,6 +2973,66 @@ def handle_table_click(viewer_instance, row, col):
             print(f"[管口] 刷新右侧附加参数表失败: {e}")
             import traceback
             traceback.print_exc()
+        return
+
+    # 管口附件：键盘/鼠标切换时也要刷新右侧附件参数表
+    if element_name == "管口附件":
+        product_id = getattr(viewer_instance, "product_id", None)
+        has_data = False
+        if product_id:
+            try:
+                connection = get_connection(**db_config_1)
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT COUNT(*) as cnt
+                            FROM 产品设计活动表_管口附件附加参数表
+                            WHERE 产品ID = %s
+                            """,
+                            (product_id,),
+                        )
+                        result = cursor.fetchone()
+                        if result:
+                            cnt = result[0] if isinstance(result, tuple) else result.get("cnt", 0)
+                            has_data = cnt > 0
+                finally:
+                    connection.close()
+            except Exception as e:
+                print(f"[管口附件] 检查附件数据失败: {e}")
+
+        # 和 paradefine_view 中点击逻辑保持一致：无数据时不进入附件专用页面，保持当前元件界面
+        if not has_data:
+            try:
+                tip = getattr(viewer_instance, "line_tip", None)
+                if tip:
+                    tip.setText("无管口附件，保持当前元件")
+                    tip.setStyleSheet("color: orange;")
+            except Exception:
+                pass
+
+            print("[管口附件] 产品活动库中无管口附件数据（键盘/鼠标切换），保持当前元件界面，不切换页面")
+            return
+
+        # 有数据：切到附件专用页面 page_5，并渲染附件参数
+        if hasattr(viewer_instance, "stackedWidget"):
+            viewer_instance.stackedWidget.setCurrentIndex(4)
+            print("[管口附件] 切换到页面: page_5（键盘/鼠标切换）")
+
+        try:
+            viewer_instance.current_element_id = element_id
+            viewer_instance.current_attachment_element_id = element_id
+            from modules.cailiaodingyi.funcs.funcs_attachment_render import render_attachment_param_to_ui
+
+            render_attachment_param_to_ui(viewer_instance, element_id)
+        except Exception as e:
+            print(f"[管口附件] 数据加载失败（键盘/鼠标切换）: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return
+
+    # 其他元件：走普通元件逻辑
 
         # if not guankou_define_info:
         #     guankou_define_info = query_guankou_define_data_by_category(viewer_instance.product_id, "管口材料分类1")
@@ -3147,6 +3295,44 @@ def on_confirm_param_update(viewer_instance):
         # 清理标记
         table._angle_needs_confirm = None
 
+    # 🚩 保存前检查：覆层材料是否完整定义（只检查，不显示提示，提示放在保存成功后）
+    def _get_cell_value(table, row, col):
+        """读取单元格的值，支持 QComboBox 和 QTableWidgetItem"""
+        widget = table.cellWidget(row, col)
+        if widget and isinstance(widget, QComboBox):
+            return (widget.currentText() or "").strip()
+        item = table.item(row, col)
+        return (item.text() or "").strip() if item else ""
+    
+    param_col = _col_index_by_header(table, {"参数名称", "参数名", "名称"}, default=0)
+    value_col = _col_index_by_header(table, {"参数值", "值", "当前值", "参数数值"}, default=1)
+    
+    # 初始化覆层材料检查标志
+    has_cladding_missing = False
+    
+    # 查找"是否添加覆层"这一行
+    add_overlay_row = find_row_by_param_name(table, "是否添加覆层", param_col)
+    if add_overlay_row is not None:
+        add_overlay_value = _get_cell_value(table, add_overlay_row, value_col)
+        # 检查是否选择了添加覆层（值为"是"）
+        if add_overlay_value and add_overlay_value.strip() == "是":
+            # 需要检查的四个字段
+            check_fields = [
+                "覆层材料类型",
+                "覆层材料牌号",
+                "覆层材料级别",
+                "覆层材料标准"
+            ]
+            
+            # 检查任意一个字段是否为空
+            for field_name in check_fields:
+                field_row = find_row_by_param_name(table, field_name, param_col)
+                if field_row is not None:
+                    field_value = _get_cell_value(table, field_row, value_col)
+                    if not field_value:
+                        has_cladding_missing = True
+                        break
+    
     # 🚩 到这里统一进入保存流程（不再中断）
     table._saving_now = True
     save_ok = False
@@ -3197,6 +3383,7 @@ def on_confirm_param_update(viewer_instance):
         # 刷新左表（放在所有写库动作之后，这样一次刷新拿到两边的最新值）
         updated_element_info = load_element_data_by_product_id(viewer_instance.product_id)
         updated_element_info = move_guankou_to_first(updated_element_info)
+        updated_element_info = move_guankou_attachment_to_second(updated_element_info)
         viewer_instance.element_data = updated_element_info
         viewer_instance.render_data_to_table(updated_element_info)
 
@@ -3208,7 +3395,15 @@ def on_confirm_param_update(viewer_instance):
     finally:
         table._saving_now = False
 
-    # ★★★ 新增：统一在这里给底部提示栏写“保存成功”
+    # 定义显示覆层材料警告的辅助函数
+    def _show_cladding_warning(tip_widget):
+        """显示覆层材料缺失警告"""
+        if tip_widget:
+            tip_widget.setStyleSheet("color: #FFA500;")  # 橘色提示
+            tip_widget.setText("用户未定义覆层材料，请添加")
+            QTimer.singleShot(5000, lambda: tip_widget.setText("") if tip_widget else None)
+
+    # ★★★ 新增：统一在这里给底部提示栏写"保存成功"
     try:
         tip = getattr(viewer_instance, "line_tip", None)
         if tip:
@@ -3231,8 +3426,13 @@ def on_confirm_param_update(viewer_instance):
                     msg = f"保存成功（批量 {n} 项：{'、'.join(preview)}{'' if len(names) <= 8 else '…'}）"
                 tip.setStyleSheet("color:black;")
                 tip.setText(msg)
-                # 5秒后自动清空（如果你不想自动清空，删掉这三行）
-                QTimer.singleShot(5000, lambda: tip.setText(""))
+                # 如果存在覆层材料缺失，延迟显示覆层材料提示（覆盖保存成功提示）
+                if has_cladding_missing:
+                    # 保存成功后延迟2秒显示覆层材料提示
+                    QTimer.singleShot(2000, lambda: _show_cladding_warning(tip))
+                else:
+                    # 5秒后自动清空（如果你不想自动清空，删掉这三行）
+                    QTimer.singleShot(5000, lambda: tip.setText("") if tip else None)
             else:
                 # 若刷新左表中途失败，可给红色错误提示（可选）
                 tip.setStyleSheet("color:red;")
@@ -6698,6 +6898,7 @@ def on_clear_element_merged_para_update(viewer_instance):
                 update_nameplate_material_status(product_id, element_id, bool(is_complete))
                 updated = load_element_data_by_product_id(product_id)
                 updated = move_guankou_to_first(updated)
+                updated = move_guankou_attachment_to_second(updated)
                 viewer_instance.element_data = updated
                 viewer_instance.render_data_to_table(updated)
             except Exception as e:
@@ -6710,6 +6911,7 @@ def on_clear_element_merged_para_update(viewer_instance):
                 update_insulation_support_material_status(product_id, element_id, bool(is_complete))
                 updated = load_element_data_by_product_id(product_id)
                 updated = move_guankou_to_first(updated)
+                updated = move_guankou_attachment_to_second(updated)
                 viewer_instance.element_data = updated
                 viewer_instance.render_data_to_table(updated)
             except Exception as e:
@@ -6722,6 +6924,7 @@ def on_clear_element_merged_para_update(viewer_instance):
                 update_fixed_saddle_material_status(product_id, element_id, bool(is_complete))
                 updated = load_element_data_by_product_id(product_id)
                 updated = move_guankou_to_first(updated)
+                updated = move_guankou_attachment_to_second(updated)
                 viewer_instance.element_data = updated
                 viewer_instance.render_data_to_table(updated)
             except Exception as e:
@@ -6965,6 +7168,7 @@ def on_confirm_element_merged_para_param(viewer_instance):
                 update_nameplate_material_status(product_id, element_id, bool(is_complete))
                 updated = load_element_data_by_product_id(viewer_instance.product_id)
                 updated = move_guankou_to_first(updated)
+                updated = move_guankou_attachment_to_second(updated)
                 viewer_instance.element_data = updated
                 viewer_instance.render_data_to_table(updated)
             except Exception as e:
@@ -6977,6 +7181,7 @@ def on_confirm_element_merged_para_param(viewer_instance):
                 update_insulation_support_material_status(product_id, element_id, bool(is_complete))
                 updated = load_element_data_by_product_id(viewer_instance.product_id)
                 updated = move_guankou_to_first(updated)
+                updated = move_guankou_attachment_to_second(updated)
                 viewer_instance.element_data = updated
                 viewer_instance.render_data_to_table(updated)
             except Exception as e:
@@ -6989,6 +7194,7 @@ def on_confirm_element_merged_para_param(viewer_instance):
                 update_fixed_saddle_material_status(product_id, element_id, bool(is_complete))
                 updated = load_element_data_by_product_id(viewer_instance.product_id)
                 updated = move_guankou_to_first(updated)
+                updated = move_guankou_attachment_to_second(updated)
                 viewer_instance.element_data = updated
                 viewer_instance.render_data_to_table(updated)
             except Exception as e:
@@ -7161,6 +7367,7 @@ def _remove_element_merged_para_tab(viewer_instance, index):
             # 刷新左表（放在所有写库动作之后）
             updated = load_element_data_by_product_id(viewer_instance.product_id)
             updated = move_guankou_to_first(updated)
+            updated = move_guankou_attachment_to_second(updated)
             viewer_instance.element_data = updated
             viewer_instance.render_data_to_table(updated)
         except Exception as e:
@@ -7180,6 +7387,7 @@ def _remove_element_merged_para_tab(viewer_instance, index):
                 update_fixed_saddle_material_status(product_id, element_id, False)
             updated = load_element_data_by_product_id(viewer_instance.product_id)
             updated = move_guankou_to_first(updated)
+            updated = move_guankou_attachment_to_second(updated)
             viewer_instance.element_data = updated
             viewer_instance.render_data_to_table(updated)
         except Exception as e:
@@ -7200,6 +7408,7 @@ def _remove_element_merged_para_tab(viewer_instance, index):
                 update_insulation_support_material_status(product_id, element_id, False)
             updated = load_element_data_by_product_id(viewer_instance.product_id)
             updated = move_guankou_to_first(updated)
+            updated = move_guankou_attachment_to_second(updated)
             viewer_instance.element_data = updated
             viewer_instance.render_data_to_table(updated)
         except Exception as e:
@@ -9183,6 +9392,14 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
                     update_component_name_options(table, val, param_col, value_col, auto_update=True)
                     # 控制鞍座高度的显隐
                     control_saddle_height_visibility(table, val, param_col, value_col)
+                    # 刷新支座示意图
+                    try:
+                        sel_ids = getattr(viewer_instance, "selected_element_ids", []) or []
+                        if len(sel_ids) <= 1:
+                            handler = make_on_zhizuo_type_changed(viewer_instance.clicked_element_data, viewer_instance, r)
+                            handler(val, pname)
+                    except Exception as e:
+                        print(f"[支座示意图刷新] 失败: {e}")
                     # 保存当前值
                     setattr(table, f"_old_{pname}", val)
                 else:
@@ -9359,6 +9576,35 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
         control_surface_treatment_visibility(table, mt, param_col, value_col)
         control_forging_grade_visibility(table, mt, param_col, value_col)
         control_insulation_support_stud_type_visibility(viewer_instance, param_col, value_col)
+    elif element_name == "支座":
+        # 在渲染完成后，根据当前支座型式刷新示意图
+        def _refresh_zhizuo_image():
+            try:
+                support_type = ""
+                for row in range(table.rowCount()):
+                    pitem = table.item(row, param_col)
+                    if pitem and pitem.text().strip() == "支座型式":
+                        vitem = table.item(row, value_col)
+                        if vitem:
+                            support_type = vitem.text().strip()
+                        break
+                
+                if support_type:
+                    comp_name = getattr(viewer_instance, 'clicked_element_data', {}).get('零件名称', '').strip()
+                    if comp_name and "支座" in comp_name:
+                        # 更新缓存
+                        _zhizuo_state_cache.setdefault(comp_name, {})["support_type"] = support_type
+                        # 查询并刷新示意图
+                        image_path = _query_zhizuo_image(support_type, comp_name)
+                        _set_pixmap_if_changed(viewer_instance, image_path)
+                        print(f"[支座示意图] 加载完成后刷新: 支座型式={support_type}, 图片={image_path}")
+            except Exception as e:
+                print(f"[支座示意图刷新] 失败: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # 延迟执行，确保UI渲染完成
+        QTimer.singleShot(100, _refresh_zhizuo_image)
 
 
 def update_support_standard_options(table, support_type, param_col, value_col, auto_update=True, is_readonly=False):
@@ -10506,6 +10752,7 @@ def on_clear_fastener_param_update(viewer_instance):
         update_fastener_material_status(product_id, element_id, is_complete)
         updated = load_element_data_by_product_id(viewer_instance.product_id)
         updated = move_guankou_to_first(updated)
+        updated = move_guankou_attachment_to_second(updated)
         viewer_instance.element_data = updated
         viewer_instance.render_data_to_table(updated)
         try:
@@ -10721,6 +10968,7 @@ def on_confirm_fastener_param(viewer_instance):
         update_fastener_material_status(product_id, element_id, is_complete)
         updated = load_element_data_by_product_id(viewer_instance.product_id)
         updated = move_guankou_to_first(updated)
+        updated = move_guankou_attachment_to_second(updated)
         viewer_instance.element_data = updated
         viewer_instance.render_data_to_table(updated)
     except Exception as e:
@@ -10924,6 +11172,7 @@ def _remove_fastener_tab(viewer_instance, index):
         update_fastener_material_status(product_id, element_id, is_complete)
         updated = load_element_data_by_product_id(viewer_instance.product_id)
         updated = move_guankou_to_first(updated)
+        updated = move_guankou_attachment_to_second(updated)
         viewer_instance.element_data = updated
         viewer_instance.render_data_to_table(updated)
         try:
