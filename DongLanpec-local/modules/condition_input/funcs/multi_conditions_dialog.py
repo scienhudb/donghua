@@ -2,9 +2,17 @@
 import os
 from PyQt5.QtCore import Qt, QEvent
 from PyQt5 import uic
-from PyQt5.QtWidgets import QDialog, QMessageBox, QTableWidgetItem
+from PyQt5.QtWidgets import (
+    QDialog,
+    QMessageBox,
+    QTableWidgetItem,
+    QAbstractItemView,
+    QPushButton,
+    QToolButton,
+    QSizePolicy,
+    QHeaderView,
+)
 from modules.condition_input.funcs.ctrl_helper import enable_full_undo
-from PyQt5.QtWidgets import QSizePolicy, QHeaderView
 
 # PARAM_UNITS = ["MPa", "℃", "MPa", "℃", "℃", "MPa"]  # 按参数名称顺序给单位
 
@@ -88,9 +96,17 @@ class MultiConditionsDialog(QDialog):
         for r, name in enumerate(self.PARAM_NAMES):
             self.tableWidget.setVerticalHeaderItem(r, QTableWidgetItem(name))
 
-        # ✅ 安装 undo + 校核代理
+        # ✅ 安装 undo + 校核代理（本地文件未恢复只读时不安装，避免代理下拉仍可编辑）
         parent_viewer = self.parent()
-        if parent_viewer:
+        try:
+            import modules.chanpinguanli.bianl as bianl
+            self._readonly_local_files = bool(
+                getattr(bianl, "product_local_files_missing_readonly", False)
+            )
+        except Exception:
+            self._readonly_local_files = False
+
+        if parent_viewer and not self._readonly_local_files:
             try:
                 enable_full_undo(self.tableWidget, parent_viewer, mode="design")
             except Exception as e:
@@ -107,6 +123,9 @@ class MultiConditionsDialog(QDialog):
         # 默认加载工况1数据
         self.load_gongkuang_data(1)
         self.fill_table(1)
+
+        if self._readonly_local_files:
+            self._apply_readonly_for_missing_local_files()
 
         # ✅ 根据表格内容动态设置初始大小（高度正好能显示所有行）
         vh = self.tableWidget.verticalHeader()
@@ -132,7 +151,28 @@ class MultiConditionsDialog(QDialog):
         self.tableWidget.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tableWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+    def _apply_table_readonly_only(self):
+        """仅锁定表格与单元格内嵌控件（切换工况重新 fill 后需再调用）。"""
+        self.tableWidget.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        for r in range(self.tableWidget.rowCount()):
+            for c in range(self.tableWidget.columnCount()):
+                it = self.tableWidget.item(r, c)
+                if it:
+                    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                cw = self.tableWidget.cellWidget(r, c)
+                if cw is not None:
+                    cw.setEnabled(False)
 
+    def _apply_readonly_for_missing_local_files(self):
+        """产品本地文件夹未恢复时：禁止编辑表格与保存按钮；工况下拉可切换以浏览各工况数据。"""
+        try:
+            self._apply_table_readonly_only()
+            for btn in self.findChildren(QPushButton):
+                btn.setEnabled(False)
+            for btn in self.findChildren(QToolButton):
+                btn.setEnabled(False)
+        except Exception as e:
+            print(f"[多工况] 只读应用失败: {e}")
 
     def _make_param_field(self, param_name, gongkuang_no):
         if gongkuang_no == 1:
@@ -209,6 +249,8 @@ class MultiConditionsDialog(QDialog):
 
 
     def save_current_gongkuang(self):
+        if getattr(self, "_readonly_local_files", False):
+            return
         gongkuang_no = self.current_gongkuang
         self._save_to_cache(gongkuang_no)
         if gongkuang_no == 1:
@@ -278,11 +320,19 @@ class MultiConditionsDialog(QDialog):
             conn.close()
             # ❌ 不再 self.accept()，保持窗口打开
             QMessageBox.information(self, "保存成功", f"工况{gongkuang_no} 已保存")
+            
+            # 0209新修改-多工况输入标识显示
+            # ✅ 通知父窗口更新多工况状态并刷新显示
+            parent = self.parent()
+            if parent and hasattr(parent, "update_multi_conditions_status"):
+                parent.update_multi_conditions_status()
         except Exception as e:
             QMessageBox.critical(self, "保存失败", f"保存工况{gongkuang_no} 数据失败：{e}")
 
     def _auto_save_current_gongkuang(self, gongkuang_no):
         """静默保存当前工况（无弹窗）"""
+        if getattr(self, "_readonly_local_files", False):
+            return
         self._save_to_cache(gongkuang_no)
 
         if gongkuang_no == 1:
@@ -341,6 +391,13 @@ class MultiConditionsDialog(QDialog):
                         """, (max_sn, self.product_id, db_field, kc_val, gc_val))
             conn.commit()
             conn.close()
+            
+            # 0209新修改-多工况输入标识显示
+            # ✅ 自动保存后也更新父窗口的多工况状态（静默更新，不弹窗）
+            if gongkuang_no in [2, 3]:  # 只有工况2/3才需要更新状态
+                parent = self.parent()
+                if parent and hasattr(parent, "update_multi_conditions_status"):
+                    parent.update_multi_conditions_status()
         except Exception as e:
             print(f"[多工况][AutoSave] 工况{gongkuang_no} 自动保存失败: {e}")
 
@@ -368,6 +425,9 @@ class MultiConditionsDialog(QDialog):
         self.fill_table(gongkuang_no)
 
         self.current_gongkuang = gongkuang_no
+
+        if getattr(self, "_readonly_local_files", False):
+            self._apply_table_readonly_only()
 
 # 已改
     def _save_to_cache(self, gongkuang_no):

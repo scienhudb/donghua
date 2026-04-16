@@ -1,8 +1,10 @@
 import atexit
 import ctypes
 import glob
+import json
 import multiprocessing
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +84,7 @@ _force_qt_paths()
 
 import pymysql
 from PyQt5 import QtWidgets, uic, Qt, QtCore
+from PyQt5 import QtGui
 from PyQt5.QtGui import QDesktopServices, QPixmap
 
 from register import RegisterDialog, LoginWindow
@@ -130,6 +133,223 @@ def app_persistent_home() -> str:
     path = os.path.join(base, APP_NAME)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+# ===============================
+# 0226新修改-字体大小：全局字号缩放（方案2：字体 + 样式表 font-size/font 同步缩放）
+# ===============================
+APP_FONT_SCALE_CTRL = None  # 在 __main__ 中初始化
+
+
+def _ui_prefs_path() -> str:
+    return os.path.join(app_persistent_home(), "ui_prefs.json")
+
+
+class _FontScaleController(QtCore.QObject):
+    _PROP_BASE_SS = "_font_scale_base_stylesheet"
+    _PROP_BASE_FONT_PT = "_font_scale_base_font_pt"
+
+    _re_font_size = re.compile(r"(font-size\s*:\s*)(\d+(?:\.\d+)?)(\s*)(pt|px)\b", re.IGNORECASE)
+    _re_font_shorthand = re.compile(r"(\bfont\s*:\s*)(\d+(?:\.\d+)?)(\s*)(pt|px)\b", re.IGNORECASE)
+
+    def __init__(self, app: QtWidgets.QApplication, settings_path: str, default_scale: float = 1.0):
+        super().__init__(app)
+        self._app = app
+        self._settings_path = settings_path
+        self._default_scale = float(default_scale)
+        self._scale = self._load_scale() or self._default_scale
+
+        self._base_app_font = QtGui.QFont(self._app.font())
+        try:
+            self._base_tooltip_font = QtGui.QFont(QtWidgets.QToolTip.font())
+        except Exception:
+            self._base_tooltip_font = QtGui.QFont(self._base_app_font)
+
+    @property
+    def scale(self) -> float:
+        return float(self._scale)
+
+    def install(self):
+        self._app.installEventFilter(self)
+        self.apply_all()
+        self._relayout_top_levels()
+
+    def set_scale(self, new_scale: float, persist: bool = True):
+        new_scale = float(new_scale)
+        # 经验范围：既能看清，也不至于把布局撑爆
+        new_scale = max(0.6, min(1.6, new_scale))
+        if abs(new_scale - self._scale) < 1e-6:
+            return
+        self._scale = new_scale
+        self._apply_app_fonts()
+        self.apply_all()
+        self._relayout_top_levels()
+        if persist:
+            self._save_scale()
+
+    def increase(self, step: float = 0.1):
+        self.set_scale(self._scale + float(step))
+
+    def decrease(self, step: float = 0.1):
+        self.set_scale(self._scale - float(step))
+
+    def reset(self):
+        self.set_scale(self._default_scale)
+
+    def apply_all(self):
+        # allWidgets() 可能包含已被销毁的对象，防御性处理
+        for w in list(self._app.allWidgets()):
+            try:
+                self.apply_widget(w)
+            except Exception:
+                pass
+
+    def _relayout_top_levels(self):
+        """
+        强制让主窗口和内部复杂布局（如 tab 页）重新布局一次，
+        避免出现“空白大间隙，最小化再最大化才恢复”的现象。
+        """
+        try:
+            # 1) 所有顶层窗口
+            for w in self._app.topLevelWidgets():
+                try:
+                    lay = w.layout()
+                    if lay is not None:
+                        lay.invalidate()
+                        lay.activate()
+                    # 触发布局重新计算 sizeHint / minimumSizeHint
+                    w.updateGeometry()
+                    # 模拟一次轻微 resize（+1/-1 像素），等价于你手动最小化/最大化触发布局，
+                    # 但肉眼几乎察觉不到尺寸变化。
+                    sz = w.size()
+                    w.resize(sz.width(), sz.height() + 1)
+                    w.resize(sz.width(), sz.height())
+                except Exception:
+                    pass
+            # 2) 所有带 layout 的子控件（例如 Tab 页、分组框内部）
+            for w in list(self._app.allWidgets()):
+                try:
+                    lay = w.layout()
+                    if lay is not None:
+                        lay.invalidate()
+                        lay.activate()
+                        w.updateGeometry()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            et = event.type()
+            # Polish: 控件完成初始化；Show: 弹窗/Tab 打开
+            if et in (QEvent.Polish, QEvent.Show):
+                if isinstance(obj, QtWidgets.QWidget):
+                    self.apply_widget(obj)
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def apply_widget(self, widget: QtWidgets.QWidget):
+        # 1) 缩放控件字体（保留字体族，只调整字号）
+        try:
+            base_pt = widget.property(self._PROP_BASE_FONT_PT)
+            if base_pt is None:
+                pt = float(widget.font().pointSizeF())
+                # pointSizeF<=0 代表字号由样式表/系统接管
+                if pt > 0:
+                    widget.setProperty(self._PROP_BASE_FONT_PT, pt)
+                    base_pt = pt
+            if base_pt is not None:
+                f = QtGui.QFont(widget.font())
+                f.setPointSizeF(max(1.0, float(base_pt) * self._scale))
+                widget.setFont(f)
+        except Exception:
+            pass
+
+        # 2) 缩放样式表里的 font-size / font: xxpx/pt
+        try:
+            base_ss = widget.property(self._PROP_BASE_SS)
+            if base_ss is None:
+                base_ss = widget.styleSheet() or ""
+                widget.setProperty(self._PROP_BASE_SS, base_ss)
+            if base_ss:
+                scaled = self._scale_stylesheet(base_ss)
+                if scaled != widget.styleSheet():
+                    widget.setStyleSheet(scaled)
+        except Exception:
+            pass
+
+    def _scale_stylesheet(self, ss: str) -> str:
+        def _scale_num(num_s: str, unit: str) -> str:
+            try:
+                base = float(num_s)
+            except Exception:
+                return num_s
+            scaled = base * self._scale
+            # Qt 样式表字号一般用整数更稳（避免布局抖动）
+            v = int(round(scaled))
+            if v < 1:
+                v = 1
+            return str(v)
+
+        def _sub(m):
+            return f"{m.group(1)}{_scale_num(m.group(2), m.group(4))}{m.group(3)}{m.group(4)}"
+
+        ss2 = self._re_font_size.sub(_sub, ss)
+        ss2 = self._re_font_shorthand.sub(_sub, ss2)
+        return ss2
+
+    def _apply_app_fonts(self):
+        # 应用默认字体缩放（对非样式表控件有效）
+        try:
+            base_pt = float(self._base_app_font.pointSizeF())
+            if base_pt > 0:
+                f = QtGui.QFont(self._base_app_font)
+                f.setPointSizeF(max(1.0, base_pt * self._scale))
+                self._app.setFont(f)
+        except Exception:
+            pass
+
+        # ToolTip 字体（你项目里有显式 setFont 的点）
+        try:
+            base_pt = float(self._base_tooltip_font.pointSizeF())
+            if base_pt > 0:
+                f = QtGui.QFont(self._base_tooltip_font)
+                f.setPointSizeF(max(1.0, base_pt * self._scale))
+                QtWidgets.QToolTip.setFont(f)
+        except Exception:
+            pass
+
+    def _load_scale(self):
+        try:
+            if not os.path.exists(self._settings_path):
+                return None
+            with open(self._settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            v = data.get("font_scale")
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _save_scale(self):
+        try:
+            os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
+            data = {}
+            try:
+                if os.path.exists(self._settings_path):
+                    with open(self._settings_path, "r", encoding="utf-8") as f:
+                        data = json.load(f) or {}
+            except Exception:
+                data = {}
+            data["font_scale"] = float(self._scale)
+            with open(self._settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
 def verify_mysql_datadir():
     """
     查询 @@datadir 并与我们指定的 MYSQL_DATA 做严格、健壮的比较。
@@ -335,6 +555,11 @@ def get_product_form_from_db(product_id: str) -> str:
                 # 如果是 BEM，就返回 BEM
                 print(f"    ↳ 逻辑转换: 保持为 'BEM'")
                 return 'BEM'
+            # 0120新修改-AEM产品形式
+            if raw_product_form == 'AEM':
+                # 如果是 AEM，就返回 AEM
+                print(f"    ↳ 逻辑转换: 保持为 'AEM'")
+                return 'AEM'
             else:
                 # 如果是其他任何值 (AES, BES, 空值等)，都统一视为 'all'
                 print(f"    ↳ 逻辑转换: 将 '{raw_product_form}' 视为 'all'")
@@ -532,6 +757,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.action_18:
             self.action_18.triggered.connect(self.yudingyi)  # 新增
 
+        # ✅ 字体大小（方案2）：放在“配置 -> 偏好设置”下，风格延续原菜单结构
+        try:
+            self._init_font_size_menu()
+        except Exception as e:
+            print(f"[font menu] init failed: {e}")
+
         # 获取图片控件并添加点击事件
         self.login_image = self.findChild(QLabel, "label_2")  # 替换为你的图片控件的实际对象名称
         if self.login_image:
@@ -618,6 +849,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if dialog.exec_():
             self.process_output_selection(dialog)
 
+    def _init_font_size_menu(self):
+        # 0226新修改-字体大小：配置菜单中的字体大小三档（大/默认/小）
+        global APP_FONT_SCALE_CTRL
+        ctrl = APP_FONT_SCALE_CTRL
+        if ctrl is None:
+            return
+
+        # 偏好设置 submenu（objectName 在 ui 里叫 "menu"）
+        prefs_menu = self.findChild(QtWidgets.QMenu, "menu")
+        if prefs_menu is None:
+            # 兜底：直接挂到菜单栏
+            prefs_menu = self.menuBar().addMenu("偏好设置")
+
+        font_menu = prefs_menu.addMenu("字体大小")
+
+        # === 仅提供三档：大 / 默认字体 / 小 ===
+        # 小：0.8 倍；默认：1.0 倍；大：1.2 倍
+
+        act_big = QtWidgets.QAction("大", self)
+        act_big.triggered.connect(lambda: ctrl.set_scale(1.2))
+
+        act_default = QtWidgets.QAction("默认字体", self)
+        act_default.triggered.connect(ctrl.reset)
+
+        act_small = QtWidgets.QAction("小", self)
+        act_small.triggered.connect(lambda: ctrl.set_scale(0.8))
+
+        font_menu.addAction(act_big)
+        font_menu.addAction(act_default)
+        font_menu.addAction(act_small)
+
+        # 保留引用，避免被 GC
+        self._font_scale_actions = (act_big, act_default, act_small)
+
+    def _font_scale_custom(self, ctrl: "_FontScaleController"):
+        # 用百分比表达更直观：60%~160%
+        try:
+            from PyQt5.QtWidgets import QInputDialog
+            cur = int(round(ctrl.scale * 100))
+            v, ok = QInputDialog.getInt(self, "字体大小", "请输入缩放百分比（60~160）", cur, 60, 160, 5)
+            if ok:
+                ctrl.set_scale(v / 100.0)
+        except Exception as e:
+            print(f"[font menu] custom failed: {e}")
+
 
 # 新增 -- 在本地浏览器中打开
     def show_help_document(self):
@@ -641,6 +917,96 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stats_page_instance = cpgl_Stats(line_tip=self.line_tip)
 
         return self.stats_page_instance
+
+    def apply_readonly_to_widget_tree(self, root, readonly: bool):
+        """业务界面只读：输入框、表格、表内控件、按钮等。"""
+        if root is None:
+            return
+        from PyQt5.QtWidgets import (
+            QAbstractItemView,
+            QAbstractSpinBox,
+            QComboBox,
+            QDateEdit,
+            QTimeEdit,
+            QLineEdit,
+            QTextEdit,
+            QPlainTextEdit,
+            QPushButton,
+            QToolButton,
+            QTableWidget,
+            QTreeWidget,
+            QCheckBox,
+            QRadioButton,
+        )
+        from PyQt5.QtCore import Qt
+
+        edit_triggers_default = (
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+
+        for w in root.findChildren(QLineEdit):
+            w.setReadOnly(readonly)
+        for w in root.findChildren(QTextEdit):
+            w.setReadOnly(readonly)
+        for w in root.findChildren(QPlainTextEdit):
+            w.setReadOnly(readonly)
+        for w in root.findChildren(QComboBox):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QAbstractSpinBox):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QDateEdit):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QTimeEdit):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QPushButton):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QToolButton):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QCheckBox):
+            w.setEnabled(not readonly)
+        for w in root.findChildren(QRadioButton):
+            w.setEnabled(not readonly)
+
+        for w in root.findChildren(QTableWidget):
+            if readonly:
+                w.setEditTriggers(QAbstractItemView.NoEditTriggers)
+                for r in range(w.rowCount()):
+                    for c in range(w.columnCount()):
+                        it = w.item(r, c)
+                        if it:
+                            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                        cw = w.cellWidget(r, c)
+                        if cw is not None:
+                            cw.setEnabled(False)
+            else:
+                w.setEditTriggers(edit_triggers_default)
+                for r in range(w.rowCount()):
+                    for c in range(w.columnCount()):
+                        cw = w.cellWidget(r, c)
+                        if cw is not None:
+                            cw.setEnabled(True)
+
+        for w in root.findChildren(QTreeWidget):
+            if readonly:
+                w.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            else:
+                w.setEditTriggers(edit_triggers_default)
+
+    def refresh_all_tabs_readonly_state(self):
+        import modules.chanpinguanli.bianl as bianl
+
+        ro = getattr(bianl, "product_local_files_missing_readonly", False)
+        for i in range(self.tab_widget.count()):
+            title = self.tab_widget.tabText(i)
+            w = self.tab_widget.widget(i)
+            if not w:
+                continue
+            if title in ("", "项目管理"):
+                self.apply_readonly_to_widget_tree(w, False)
+            else:
+                self.apply_readonly_to_widget_tree(w, ro)
 
     def safe_open_tab(self, title, widget_class):
         """安全地打开tab，处理widget创建失败的情况"""
@@ -958,12 +1324,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(self.tab_widget.count()):
             if self.tab_widget.tabText(i) == title:
                 self.tab_widget.setCurrentIndex(i)
+                self._last_tab_index = i
+                self.refresh_all_tabs_readonly_state()
                 return
 
         # 添加新 tab
         idx = self.tab_widget.addTab(widget, title)
         self.tab_widget.setCurrentIndex(idx)
         self._last_tab_index = idx
+        self.refresh_all_tabs_readonly_state()
 
     # === on_tab_changed 改进版 ===
     def on_tab_changed(self, index):
@@ -1056,6 +1425,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tab_widget.setCurrentIndex(new_idx)
                     self._last_tab_index = new_idx
                     print(f"[DEBUG] 已打开新产品界面: {ctitle}")
+                    try:
+                        self.refresh_all_tabs_readonly_state()
+                    except Exception:
+                        pass
                 # 重新连接信号
                 self.tab_widget.currentChanged.connect(self.on_tab_changed)
                 return
@@ -1152,6 +1525,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.tab_widget.setCurrentIndex(new_idx)
                         self._last_tab_index = new_idx  # 更新 last_index
                         print(f"[DEBUG] 已打开新产品界面: {ctitle}")
+                        try:
+                            self.refresh_all_tabs_readonly_state()
+                        except Exception:
+                            pass
                     else:
                         print(f"[ERROR] 找不到要创建的界面: {ctitle}")
 
@@ -1183,6 +1560,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(
                     f"[DEBUG][on_tab_changed] 无需关闭界面，直接同步 last_confirmed → {self.last_confirmed_product_id}")
         self._last_tab_index = index
+        try:
+            self.refresh_all_tabs_readonly_state()
+        except Exception as _ro_e:
+            print(f"[on_tab_changed] refresh_all_tabs_readonly_state: {_ro_e}")
         # 1107新修改
         if target_tab_title != "管口及附件定义":
             self._tip_timer.start(5000)  # 设置定时器，用于显示提示信息
@@ -1977,6 +2358,15 @@ if __name__ == "__main__":
         pass
     
     splash = show_splash()
+
+    # ✅ 初始化全局字体缩放控制器（方案2）
+    try:
+        # 0226新修改-字体大小：启动时加载并应用上次保存的字体缩放
+        APP_FONT_SCALE_CTRL = _FontScaleController(app, _ui_prefs_path(), default_scale=1.0)
+        APP_FONT_SCALE_CTRL.install()
+    except Exception as e:
+        APP_FONT_SCALE_CTRL = None
+        print(f"[font scale] init failed: {e}")
 
     # ok = ensure_mysql_ready()
     # if not ok:

@@ -770,6 +770,7 @@ def on_product_row_clicked(row, column):
     reset_product_definition_controls()
 
     product_id = row_status.get("product_id", None)
+    definition_status = row_status.get("definition_status", "edit")
     # 修改的检测
     bianl.product_id = product_id
     # 获取不到 获取到了
@@ -778,18 +779,31 @@ def on_product_row_clicked(row, column):
         clear_product_definition_fields()
         # 新增：点击空白行时，发射None信号来清空左下角产品信息
         product_manager.update_product_id(None)  # 发射None信号清空产品信息
+        bianl.product_local_files_missing_readonly = False
+        try:
+            from modules.chanpinguanli import local_product_folder
+            local_product_folder._refresh_main_window_tabs_readonly()
+        except Exception:
+            pass
     else:
         PRODUCT_ID = bianl.product_id  # 加载产品定义字段内容（只更新界面，不判断状态）
         fetch_and_update_product_definition_by_id(bianl.product_id)
         print(f"点击第{row + 1}行，获取到的产品ID: {PRODUCT_ID}")
         product_manager.update_product_id(PRODUCT_ID)  # 第二个文件会自动收到新值改66
-    definition_status = row_status.get("definition_status", "edit")
+        # 行切换后强制刷新示意图：若类型/型式与上一行相同，setCurrentText 不会触发 currentTextChanged，try_show_image 不会跑
+        try_show_image()
+        try:
+            from modules.chanpinguanli import local_product_folder
+            local_product_folder.maybe_prompt_local_product_recovery(
+                bianl.main_window, PRODUCT_ID, definition_status
+            )
+        except Exception as _e_rec:
+            print(f"[on_product_row_clicked] 本地文件夹检查: {_e_rec}")
 
     # 根据状态锁定或解锁定义区控件 改77
     if definition_status == "view":
         lock_combo(bianl.product_type_combo)
         lock_combo(bianl.product_form_combo)
-
 
 
     elif definition_status == "edit":
@@ -1387,18 +1401,45 @@ def confirm_product_definition():
         conn.commit()
 
         # =========================
-        # B) 活动库：UPSERT 写“产品设计活动表”（允许多次更新工作信息）
+        # B) 活动库：UPSERT 写“产品设计活动表”（允许多次更新工作信息，含产品文件夹绝对路径）
         # =========================
         conn2 = common_usage.get_mysql_connection_active()
         cursor2 = conn2.cursor()
 
+        # 计算当前产品的文件夹绝对路径（与表格行一致）
+        row = bianl.product_table.currentRow()
+        product_folder_abs = ""
+        try:
+            _conn_p = common_usage.get_mysql_connection_project()
+            _cur_p = _conn_p.cursor()
+            _cur_p.execute("SELECT 项目保存路径 FROM 项目需求表 WHERE 项目ID = %s", (bianl.current_project_id,))
+            _r_p = _cur_p.fetchone()
+            _cur_p.close()
+            _conn_p.close()
+            if _r_p and _r_p.get("项目保存路径"):
+                project_root = os.path.join(
+                    _r_p["项目保存路径"],
+                    f"{bianl.owner_input.text().strip()}_{bianl.project_name_input.text().strip()}"
+                )
+                serial_raw = (bianl.product_table.item(row, 0).text() or "").strip() if bianl.product_table.item(row, 0) else ""
+                # 序号与新建产品时一致：纯数字时按 3 位补零（006），避免 06 导致路径少一位
+                serial = serial_raw.zfill(3) if serial_raw and serial_raw.isdigit() else serial_raw
+                name = (bianl.product_table.item(row, 1).text() or "").strip() if bianl.product_table.item(row, 1) else ""
+                position = (bianl.product_table.item(row, 2).text() or "").strip() if bianl.product_table.item(row, 2) else ""
+                number = (bianl.product_table.item(row, 3).text() or "").strip() if bianl.product_table.item(row, 3) else ""
+                folder_name = product_confirm_qianzhi.build_pd_folder_name(serial, name, position, number)
+                if folder_name:
+                    product_folder_abs = os.path.abspath(os.path.join(project_root, folder_name))
+        except Exception as _e_path:
+            print(f"[confirm_product_definition] 计算产品文件夹路径失败: {_e_path}")
+
         upsert_sql = """
             INSERT INTO 产品设计活动表
               (产品ID, 项目ID, 产品类型, 产品型式,
-               设计, 校对, 审核, 标准化, 批准, 会签)
+               设计, 校对, 审核, 标准化, 批准, 会签, 产品文件夹绝对路径)
             VALUES
               (%s, %s, %s, %s,
-               %s, %s, %s, %s, %s, %s)
+               %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               项目ID = VALUES(项目ID),
               产品类型 = VALUES(产品类型),
@@ -1408,11 +1449,13 @@ def confirm_product_definition():
               审核 = VALUES(审核),
               标准化 = VALUES(标准化),
               批准 = VALUES(批准),
-              会签 = VALUES(会签)
+              会签 = VALUES(会签),
+              产品文件夹绝对路径 = VALUES(产品文件夹绝对路径)
         """
         upsert_vals = (
             bianl.product_id, bianl.current_project_id, product_type, product_form,
-            design, proofread, review, standardization, approval, co_signature
+            design, proofread, review, standardization, approval, co_signature,
+            product_folder_abs if product_folder_abs else None
         )
         print(f"执行的 SQL 语句: {upsert_sql}, 参数: {upsert_vals}")
         cursor2.execute(upsert_sql, upsert_vals)
@@ -1508,61 +1551,122 @@ def try_show_image():
 
 # 示意图  被调用显示的
 def fetch_and_display_image_by_type_form(product_type, product_form):
-    """根据产品类型和产品形式从数据库加载并显示示意图（自动补全图片扩展名）"""
+    """示意图加载：产品快照-产品需求表优先，模板-产品类型型式表兜底。"""
     try:
         print(f"尝试加载示意图，产品类型: {product_type}, 产品形式: {product_form}")
-        conn = common_usage.get_mysql_connection_def()
+        base_path = os.path.dirname(os.path.abspath(__file__))
 
-        cursor = conn.cursor()
+        def try_apply_relative_path(relative_path, source_tag):
+            if not relative_path:
+                return False
+            normalized_path = relative_path.replace("\\", os.sep).strip()
+            image_path = os.path.join(base_path, normalized_path)
+            print(f"[{source_tag}] 尝试图片路径: {image_path}")
+            if not os.path.exists(image_path):
+                print(f"[{source_tag}] 图片文件不存在")
+                return False
 
-        sql = """
+            pixmap = QPixmap(image_path)
+            if pixmap.isNull():
+                print(f"[{source_tag}] QPixmap 加载失败，文件格式可能不支持")
+                return False
+
+            bianl.confirm_curr_image_relative_path = normalized_path
+            scaled_pixmap = pixmap.scaled(
+                bianl.image_area.width() - 20,
+                bianl.image_area.height() - 20,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            bianl.image_label.setPixmap(scaled_pixmap)
+            bianl.image_label.setText("")
+            print(f"[{source_tag}] 图片加载并显示成功")
+            return True
+
+        # 1) 产品快照优先：从产品需求表读取当前产品已保存的示意图路径
+        snapshot_relative_path = ""
+        if getattr(bianl, "product_id", None):
+            conn_pd = common_usage.get_mysql_connection_product()
+            cursor_pd = conn_pd.cursor()
+            sql_pd = "SELECT 产品示意图 FROM 产品需求表 WHERE 产品ID = %s"
+            cursor_pd.execute(sql_pd, (bianl.product_id,))
+            result_pd = cursor_pd.fetchone()
+            cursor_pd.close()
+            conn_pd.close()
+            snapshot_relative_path = (result_pd or {}).get("产品示意图", "")
+            print(f"[快照来源] 查询结果: {snapshot_relative_path}")
+
+        if try_apply_relative_path(snapshot_relative_path, "快照来源"):
+            return
+
+        # 2) 模板兜底：按产品类型+产品型式读取模板图
+        conn_def = common_usage.get_mysql_connection_def()
+        cursor_def = conn_def.cursor()
+        sql_def = """
             SELECT 产品示意图 FROM 产品类型型式表
             WHERE 产品类型 = %s AND 产品型式 = %s
         """
-        cursor.execute(sql, (product_type, product_form))
-        result = cursor.fetchone()
-        print(f"数据库查询结果: {result}")
-        cursor.close()
-        conn.close()
+        cursor_def.execute(sql_def, (product_type, product_form))
+        result_def = cursor_def.fetchone()
+        cursor_def.close()
+        conn_def.close()
 
-        if result and result.get("产品示意图"):
-            relative_path = result["产品示意图"].replace("\\", os.sep).strip()
-            print(f"数据库中读取到的相对路径: {relative_path}")
-
-            base_path = os.path.dirname(os.path.abspath(__file__))
-            image_path = os.path.join(base_path, relative_path)
-            print(f"拼接后的基础路径: {image_path}")
-
-            if os.path.exists(image_path):
-
-                print("图片路径存在，开始加载")
-                bianl.confirm_curr_image_relative_path = relative_path
-                pixmap = QPixmap(image_path)
-                if pixmap.isNull():
-                    print("QPixmap 加载失败，文件格式可能不支持")
-                    # bianl.image_label.setText("图片格式不支持")
-                    return
-                scaled_pixmap = pixmap.scaled(
-                    bianl.image_area.width() - 20,
-                    bianl.image_area.height() - 20,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-                bianl.image_label.setPixmap(scaled_pixmap)
-                bianl.image_label.setText("")
-                print("图片加载并显示成功")
-            else:
-                print(f"数据库图片文件最终未找到: {image_path}")
-                # bianl.image_label.setText("数据库没有存此样图")
-        else:
-            print("未找到对应的示意图路径字段")
-            # bianl.image_label.setText("无对应示意图")
+        template_relative_path = (result_def or {}).get("产品示意图", "")
+        print(f"[模板来源] 查询结果: {template_relative_path}")
+        if not try_apply_relative_path(template_relative_path, "模板来源"):
+            print("示意图未找到可用路径（快照与模板均不可用）")
     except Exception as e:
         print(f"加载示意图失败: {e}")
         # bianl.image_label.setText("数据库连接失败")
 
 
 """删除产品"""
+# 1112新修改 - 关闭产品的所有已打开界面（除了项目管理界面）
+def close_product_related_tabs(product_id):
+    """
+    关闭指定产品的所有相关界面（除了项目管理界面）
+    模仿主程序中切换产品时关闭其他界面的方法
+    """
+    try:
+        # 获取主窗口实例
+        from PyQt5.QtWidgets import QApplication
+        app = QApplication.instance()
+        if not app:
+            print("[关闭界面] 无法获取应用实例")
+            return
+            
+        # 查找主窗口
+        main_window = None
+        for widget in app.topLevelWidgets():
+            if hasattr(widget, 'tab_widget') and hasattr(widget, 'close_tab'):
+                main_window = widget
+                break
+                
+        if not main_window:
+            print("[关闭界面] 无法找到主窗口")
+            return
+            
+        # 定义所有产品相关的标签页（与主程序保持一致）
+        all_product_tabs = {"条件输入", "元件定义", "管口及附件定义", "管束设计", "设计运算", "图纸绘制", "文本说明生成", "模型创建"}
+        
+        # 从后往前遍历，关闭所有产品相关的标签页
+        for i in reversed(range(main_window.tab_widget.count())):
+            tab_text = main_window.tab_widget.tabText(i)
+            if tab_text in all_product_tabs:
+                widget_to_close = main_window.tab_widget.widget(i)
+                main_window.tab_widget.removeTab(i)
+                if widget_to_close:
+                    widget_to_close.deleteLater()
+                print(f"[删除产品] 关闭界面: {tab_text}")
+                
+        print(f"[删除产品] 已关闭产品ID {product_id} 的所有相关界面")
+        
+    except Exception as e:
+        print(f"[删除产品] 关闭相关界面时出错: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 # 文件夹名称重命名 可以用来找文件夹
 def build_pd_folder_name(serial, name, position, number):
     # 统一清洗 & 顺序：序号_产品名称_产品编号_设备位号（空值自动跳过）
@@ -1621,10 +1725,9 @@ def rename_remaining_product_folders(project_root):
                 print(f"[重命名失败] {old_folder} -> {new_folder}: {e}")
 
 
-# 删除产品的函数
-def delete_selected_product():
+def prepare_product_table_old_status_for_delete() -> bool:
+    """删除前同步各 view 行的 old_*，供后续文件夹重命名逻辑使用。失败返回 False。"""
     total_rows = bianl.product_table.rowCount()
-    # 把删除之前的序号记下来
     for row in range(total_rows):
         if row == total_rows - 1:
             print("跳过最后一行（预留空行）")  # 调试信息
@@ -1642,12 +1745,10 @@ def delete_selected_product():
                 old_number = number_item.text().strip() if number_item else ""
                 old_name = name_item.text().strip() if name_item else ""
                 old_position = position_item.text().strip() if position_item else ""
-                # 新增
                 if not isinstance(bianl.product_table_row_status.get(row), dict):
                     print(f"第{row}行状态不是字典，初始化为空字典")  # 调试信息
                     bianl.product_table_row_status[row] = {}
 
-                # 字典的使用
                 bianl.product_table_row_status[row].update({
                     "old_serial": old_serial,
                     "old_number": old_number,
@@ -1660,41 +1761,22 @@ def delete_selected_product():
             bianl.main_window.line_tip.setText(f"更新产品信息时发生错误: {e}")
             bianl.main_window.line_tip.setToolTip(f"更新产品信息时发生错误: {e}")
             bianl.main_window.line_tip.setStyleSheet("color: black;")
-            # QMessageBox.critical(bianl.main_window, "错误", f"更新产品信息时发生错误: {e}")
-            return
+            return False
+    return True
 
-    print("=" * 50)
-    print("[删除操作] >>> 准备删除当前产品")
-    row = bianl.product_table.currentRow()
-    product_id = bianl.product_id
-    # 加上的
-    row_status = bianl.product_table_row_status.get(row, {}) if row >= 0 else {}
-    print(f"[删除操作] 当前选中表格行: {row}")
-    print(f"[删除操作] 获取到的产品ID: {product_id}")
-    print(f"[删除操作] 当前项目ID: {bianl.current_project_id}")
 
-    if row < 0 or not product_id:
-        print("[删除操作] 错误：未选中有效行或产品ID为空")
-        bianl.main_window.line_tip.setText("当前产品未新建，无需删除")
-        bianl.main_window.line_tip.setToolTip("当前产品未新建，无需删除")
-        bianl.main_window.line_tip.setStyleSheet("color: black;")
-        # 5秒后自动清除提示1014
-        QTimer.singleShot(5000, clear_line_tip)
-        # QMessageBox.warning(bianl.main_window, "提示", "当前产品未新建，无需删除")
-        return
-    # 删除弹窗提示（中文按钮）
-    if not project_confirm_btn.show_confirm_dialog(
-            bianl.main_window,
-            "确认删除",
-            "是否确认删除此产品？"
-    ):
-        print("用户取消删除操作")
-        return
-    print("用户确认删除操作")
+def find_product_table_row_by_product_id(product_id) -> int:
+    pid = str(product_id)
+    for row in sorted(bianl.product_table_row_status.keys()):
+        st = bianl.product_table_row_status.get(row)
+        if isinstance(st, dict) and str(st.get("product_id")) == pid:
+            return row
+    return -1
 
+
+def perform_product_delete(row: int, product_id) -> bool:
+    """执行删库、删本地文件夹、刷新产品表与定义区。不含确认弹窗。成功返回 True。"""
     try:
-        # 删除数据库
-        # Step 1: 删除产品需求库
         print("[删除操作] 正在连接产品数据库...")
         conn = common_usage.get_mysql_connection_product()
         cursor = conn.cursor()
@@ -1704,10 +1786,8 @@ def delete_selected_product():
         print(f"[删除操作] 数据库中产品ID {product_id} 删除成功")
         cursor.close()
         conn.close()
-        # 删除产品设计活动库
         delete_product_from_activity_db(product_id)
 
-        # Step 2: 查询项目保存路径
         print("[删除操作] 正在获取项目保存路径...")
         conn = common_usage.get_mysql_connection_project()
         cursor = conn.cursor()
@@ -1716,6 +1796,7 @@ def delete_selected_product():
         cursor.close()
         conn.close()
 
+        folder_root = None
         if result:
             project_path = result["项目保存路径"]
             print(f"[删除操作] 项目路径获取成功: {project_path}")
@@ -1723,8 +1804,6 @@ def delete_selected_product():
             project_name = bianl.project_name_input.text().strip()
             folder_root = os.path.join(project_path, f"{owner}_{project_name}")
             print(f"[删除操作] 构建根路径: {folder_root}")
-            # 只有点击修改产品的时候 才会将当前的产品信息储存到old name里面 如果没有点击就不会储存
-            # 🔹 从表格获取这一行的序号、名称、编号、位号
             serial_item = bianl.product_table.item(row, 0)
             name_item = bianl.product_table.item(row, 1)
             pos_item = bianl.product_table.item(row, 2)
@@ -1740,7 +1819,6 @@ def delete_selected_product():
             print(f"[删除操作] 产品文件夹路径: {folder_path}")
 
             if os.path.exists(folder_path):
-
                 shutil.rmtree(folder_path)
                 print(f"[删除操作] 文件夹删除成功: {folder_path}")
             else:
@@ -1749,84 +1827,74 @@ def delete_selected_product():
         else:
             print("[删除操作] 未能从数据库中获取项目路径")
 
-        # Step 3: 同步界面状态
         print("[删除操作] >>> 开始界面同步操作")
-        """ 本身的字典记录
-        bianl.product_table_row_status = {
-            0: {"product_id": "PD001", "status": "view", "definition_status": "edit"},
-            1: {"product_id": "PD002", "status": "view", "definition_status": "edit"},
-            2: {"product_id": "PD003", "status": "view", "definition_status": "edit"}
-        }
-        """
-        # 删除页面的表格的信息
-        bianl.product_table.removeRow(row)
-        print(f"[删除操作] 表格行 {row} 删除")
-        # 删除字典中的状态
-        if row in bianl.product_table_row_status:
-            print(f"[删除操作] 从状态字典中移除行: {row}")
-            bianl.product_table_row_status.pop(row)
-            """ pop(row)以后字典
-            bianl.product_table_row_status = {
-                1: {"product_id": "PD002", "status": "view", "definition_status": "edit"},
-                2: {"product_id": "PD003", "status": "view", "definition_status": "edit"}
-            }
-            """
-        else:
-            print(f"[删除操作] 行 {row} 不存在于状态字典中")
+        # 整段阻塞：removeRow 会触发 currentCellChanged → on_product_row_clicked → 本地缺失弹窗；
+        # 若仅阻塞最后的 setCurrentCell，删除「最后一个产品」时仍会先弹一次，与末尾显式 on_product_row_clicked 重复。
+        table = bianl.product_table
+        table.blockSignals(True)
+        try:
+            table.removeRow(row)
+            print(f"[删除操作] 表格行 {row} 删除")
+            if row in bianl.product_table_row_status:
+                print(f"[删除操作] 从状态字典中移除行: {row}")
+                bianl.product_table_row_status.pop(row)
+            else:
+                print(f"[删除操作] 行 {row} 不存在于状态字典中")
 
-        # 重新更新 因为pop出去了 所以直接更新key就可以了
-        refresh_product_table_row_status()
-        print("[删除操作] 表格状态刷新完成")
-        # 对应更新了序号
-        # 更新表格中的序号
-        auto_edit_row.update_row_numbers()
-        print("[删除操作] 更新表格序号")
+            refresh_product_table_row_status()
+            print("[删除操作] 表格状态刷新完成")
+            auto_edit_row.update_row_numbers()
+            print("[删除操作] 更新表格序号")
 
-        # Step 4: 若总行数小于3，自动补充空白行
-        current_row_count = bianl.product_table.rowCount()
-        if current_row_count < 3:
-            needed_rows = 3 - current_row_count
-            print(f"[删除操作] 当前行数 {current_row_count} 小于3，需补充 {needed_rows} 行")
-            for i in range(needed_rows):
-                new_row = bianl.product_table.rowCount()
-                bianl.product_table.insertRow(new_row)
-                # 设置序号列（第0列）
-                set_row_number(new_row)
-                # 初始化该行状态为 start/edit，product_id为空
-                bianl.product_table_row_status[new_row] = {
-                    "status": "start",
-                    "definition_status": "edit"
-                }
+            current_row_count = table.rowCount()
+            if current_row_count < 3:
+                needed_rows = 3 - current_row_count
+                print(f"[删除操作] 当前行数 {current_row_count} 小于3，需补充 {needed_rows} 行")
+                for i in range(needed_rows):
+                    new_row = table.rowCount()
+                    table.insertRow(new_row)
+                    set_row_number(new_row)
+                    bianl.product_table_row_status[new_row] = {
+                        "status": "start",
+                        "definition_status": "edit"
+                    }
+                    print(f"[删除操作] 已添加空白行 {new_row}，状态为 start/edit")
+                print(f"[删除操作] 最终表格行数：{table.rowCount()}")
 
-                print(f"[删除操作] 已添加空白行 {new_row}，状态为 start/edit")
+            # 选中删除行的上一行（与未阻塞时 Qt 常见行为一致）；阻塞期间需自行更新 bianl.row/colum
+            focus_row = max(0, row - 1)
+            if focus_row >= table.rowCount():
+                focus_row = max(0, table.rowCount() - 1)
+            ncol = table.columnCount()
+            foc_col = (
+                bianl.colum
+                if isinstance(getattr(bianl, "colum", None), int) and 0 <= bianl.colum < ncol
+                else 1
+            )
+            bianl.row = focus_row
+            bianl.colum = foc_col
+            table.setCurrentCell(focus_row, foc_col)
+        finally:
+            table.blockSignals(False)
 
-            print(f"[删除操作] 最终表格行数：{bianl.product_table.rowCount()}")
-        # 清空产品定义区域
         clear_product_definition_fields()
         bianl.product_id = None
-        # 关键修复：删除产品后，同时清空current_product_id，确保所有模块状态一致
+        close_product_related_tabs(product_id)
         bianl.current_product_id = None
-        # 发射信号通知其他模块产品ID已变为None
         product_manager.product_id_changed.emit(None)
         print("[删除操作] 产品定义区域清空")
-        # todo 需要重新设置其他的文件夹名称 查看是否需要进行重命名
-        # ★ 新增：重命名剩余行的文件夹
-        # ★修改：删除成功后，重命名剩余文件夹
-        if result:
+        if result and folder_root:
             rename_remaining_product_folders(folder_root)
         bianl.main_window.line_tip.setText(f"此产品删除成功！")
         bianl.main_window.line_tip.setToolTip(f"此产品删除成功！")
         bianl.main_window.line_tip.setStyleSheet("color: black;")
-        # 5秒后自动清除提示1014
         QTimer.singleShot(5000, clear_line_tip)
-        # QMessageBox.information(bianl.main_window, "成功", f"此产品删除成功！")
         print("[删除操作] 所有删除操作完成")
         print("=" * 50)
 
-        # 设置焦点和高亮
-        bianl.product_table.setCurrentCell(bianl.row, bianl.colum)
-        bianl.product_table.setFocus()
+        table.setFocus()
         on_product_row_clicked(bianl.row, bianl.colum)
+        return True
 
     except Exception as e:
         import traceback
@@ -1835,7 +1903,38 @@ def delete_selected_product():
         bianl.main_window.line_tip.setText(f"删除失败：{e}")
         bianl.main_window.line_tip.setToolTip(f"删除失败：{e}")
         bianl.main_window.line_tip.setStyleSheet("color: black;")
-        # QMessageBox.critical(bianl.main_window, "错误", f"删除失败：{e}")
+        return False
+
+
+# 删除产品的函数
+def delete_selected_product():
+    if not prepare_product_table_old_status_for_delete():
+        return
+
+    print("=" * 50)
+    print("[删除操作] >>> 准备删除当前产品")
+    row = bianl.product_table.currentRow()
+    product_id = bianl.product_id
+    print(f"[删除操作] 当前选中表格行: {row}")
+    print(f"[删除操作] 获取到的产品ID: {product_id}")
+    print(f"[删除操作] 当前项目ID: {bianl.current_project_id}")
+
+    if row < 0 or not product_id:
+        print("[删除操作] 错误：未选中有效行或产品ID为空")
+        bianl.main_window.line_tip.setText("当前产品未新建，无需删除")
+        bianl.main_window.line_tip.setToolTip("当前产品未新建，无需删除")
+        bianl.main_window.line_tip.setStyleSheet("color: black;")
+        QTimer.singleShot(5000, clear_line_tip)
+        return
+    if not project_confirm_btn.show_confirm_dialog(
+            bianl.main_window,
+            "确认删除",
+            "是否确认删除此产品？"
+    ):
+        print("用户取消删除操作")
+        return
+    print("用户确认删除操作")
+    perform_product_delete(row, product_id)
 
 
 # 删除产品设计活动库
@@ -2242,11 +2341,11 @@ def load_last_project():
                         open_project.unlock_line_edit(bianl.approval_input)
                         open_project.unlock_line_edit(bianl.co_signature_input)
 
-                    # 自动调用on_product_row_clicked方法，获取第一行产品的id 改5
+                    # 自动调用 on_product_row_clicked；setCurrentCell 必须 blockSignals，否则会再触发一次 currentCellChanged 导致本地缺失弹窗重复
                     on_product_row_clicked(0, 1)
-                    # 显式设置产品表格的当前选中行
+                    bianl.product_table.blockSignals(True)
                     bianl.product_table.setCurrentCell(0, 0)
-                    # 确保bianl.row和bianl.colum被正确设置
+                    bianl.product_table.blockSignals(False)
                     bianl.row = 0
                     bianl.colum = 0
 

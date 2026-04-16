@@ -13,7 +13,7 @@ class CheckComboDelegate(QStyledItemDelegate):
         
         说明：enable_select_all 参数用于控制是否在下拉框中显示"全选"选项。
         - 管口元件（管口号）：传入 enable_select_all=True，显示"全选"功能，方便一键选择所有管口号
-        - 其他元件（支座、铭牌、保温支撑等的元件名称）：使用默认值 False，不显示"全选"功能
+        - 其他元件（支座、铭牌、保温装置等的元件名称）：使用默认值 False，不显示"全选"功能
         """
         super().__init__(table)
         self.options = options or []
@@ -41,7 +41,7 @@ class CheckComboDelegate(QStyledItemDelegate):
 
         # 追加"全选"行（仅在启用时）
         # 说明：只有管口元件（enable_select_all=True）才会添加"全选"选项
-        #       其他元件（支座、铭牌、保温支撑等）不会显示"全选"
+        #       其他元件（支座、铭牌、保温装置等）不会显示"全选"
         if self.enable_select_all and cands:
             select_all_item = QStandardItem(self.select_all_label)
             select_all_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
@@ -115,7 +115,7 @@ class CheckComboDelegate(QStyledItemDelegate):
         it = combo.model().item(row)
         # "全选"行：全开/全关（仅在启用时）
         # 说明：只有管口元件（enable_select_all=True）才会处理"全选"点击事件
-        #       其他元件（支座、铭牌、保温支撑等）不会进入此分支
+        #       其他元件（支座、铭牌、保温装置等）不会进入此分支
         if self.enable_select_all and self._is_select_all_item(it):
             target = Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked
             it.setCheckState(target)

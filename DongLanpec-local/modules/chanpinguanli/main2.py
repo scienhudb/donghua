@@ -274,6 +274,25 @@ class cpgl_Stats(QtWidgets.QWidget):
         paste_action.triggered.connect(main.paste_cells_to_table)
         bianl.main_window.addAction(paste_action)
 
+        # 0128新修改-删除产品与delete/backspace键的绑定
+        # Delete / Backspace 删除当前选中产品（仅当焦点在产品表格上时触发）
+        delete_action = QAction(bianl.main_window)
+        delete_action.setShortcut(QKeySequence(Qt.Key_Delete))
+
+        backspace_action = QAction(bianl.main_window)
+        backspace_action.setShortcut(QKeySequence(Qt.Key_Backspace))
+
+        def _handle_delete_shortcut():
+            # 仅在产品表格有焦点时，触发“删除产品”逻辑，避免误删其他区域内容
+            table = getattr(bianl, "product_table", None)
+            if table is not None and table.hasFocus():
+                main.delete_selected_product()
+
+        delete_action.triggered.connect(_handle_delete_shortcut)
+        backspace_action.triggered.connect(_handle_delete_shortcut)
+        bianl.main_window.addAction(delete_action)
+        bianl.main_window.addAction(backspace_action)
+
         # 你也可以在这里执行初始化逻辑：
         # 初始化 产品信息部分的表格
         # 设置表格属性

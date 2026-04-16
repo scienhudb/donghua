@@ -183,6 +183,50 @@ def save_project_to_db():
         bianl.main_window.line_tip.setStyleSheet("color: black;")
         # QMessageBox.critical(bianl.main_window, "错误", f"保存失败: {e}")
 
+# 1112新修改 - 关闭所有产品相关界面（删除项目时使用）
+def close_all_product_related_tabs():
+    """
+    关闭所有产品相关界面（除了项目管理界面）
+    用于删除项目时关闭所有已打开的产品界面
+    """
+    try:
+        from PyQt5.QtWidgets import QApplication
+        app = QApplication.instance()
+        if not app:
+            print("[关闭界面] 无法获取应用实例")
+            return
+        
+        # 查找主窗口
+        main_window = None
+        for widget in app.topLevelWidgets():
+            if hasattr(widget, 'tab_widget') and hasattr(widget, 'close_tab'):
+                main_window = widget
+                break
+        
+        if not main_window:
+            print("[关闭界面] 无法找到主窗口")
+            return
+        
+        # 定义所有产品相关标签页名称
+        all_product_tabs = {"条件输入", "元件定义", "管口及附件定义", "管束设计", "设计运算", "图纸绘制", "文本说明生成", "模型创建"}
+        
+        # 倒序遍历标签页，关闭所有产品相关界面
+        for i in reversed(range(main_window.tab_widget.count())):
+            tab_text = main_window.tab_widget.tabText(i)
+            if tab_text in all_product_tabs:
+                widget_to_close = main_window.tab_widget.widget(i)
+                main_window.tab_widget.removeTab(i)
+                if widget_to_close:
+                    widget_to_close.deleteLater()
+                print(f"[删除项目] 关闭界面: {tab_text}")
+        
+        print("[删除项目] 已关闭所有产品相关界面")
+        
+    except Exception as e:
+        print(f"[删除项目] 关闭相关界面时出错: {e}")
+        import traceback
+        traceback.print_exc()
+
 # 删除项目
 def delete_project_and_related_data():
     """删除整个项目及其相关联的所有数据库和文件数据"""
@@ -200,6 +244,9 @@ def delete_project_and_related_data():
     # 确认弹窗（中文按钮）
     if not show_confirm_dialog(bianl.main_window, "确认删除", "是否确认永久删除当前项目的所有数据和文件？"):
         return
+
+    # 1112新修改 - 删除项目前先关闭所有产品相关界面
+    close_all_product_related_tabs()
 
     try:
         # Step 0: 在删除前，获取该项目下所有产品ID（后续用于删除活动库中仅存有“产品ID”的表数据）

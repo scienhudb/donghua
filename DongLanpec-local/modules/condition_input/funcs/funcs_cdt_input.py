@@ -1,11 +1,16 @@
 from openpyxl.styles import Alignment
 
 from modules.cailiaodingyi.funcs.funcs_pdf_change import update_element_name_data, \
-    get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions, query_guankou_codes
+    get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions, query_guankou_codes, \
+    invalidate_caches_for_product, update_guankou_corrosion_to_category_table, update_guankou_opening_weld_joint_coeff_to_category_table, \
+    sync_yanban_height_if_exceeds_shell_dn,db_config_1 as design_db_config_1
+from modules.cailiaodingyi.controllers.check_dianpian import clear_all_pn_user_input_for_product, force_recompute_and_update_pn
 from modules.cailiaodingyi.funcs.funcs_pdf_input import query_all_guankou_categories
 # from modules.cailiaodingyi.funcs.funcs_pdf_change import update_element_name_data, \
 #     get_design_params_by_product_id, update_guankou_param_flex_db, query_guankou_affiliation, resolve_gasket_dimensions
 from modules.condition_input.funcs.db_cnt import get_connection
+from typing import Dict, Tuple
+import pymysql
 from PyQt5.QtWidgets import (QTableWidgetItem, QTableWidget, QHeaderView, QWidget,
                              QMessageBox, QUndoStack, QFileDialog, QComboBox, QStyledItemDelegate, QShortcut,
                              QTabWidget, QStackedWidget)
@@ -14,6 +19,7 @@ from PyQt5.QtGui import QColor, QStandardItemModel, QStandardItem, QBrush, QKeyS
 import re
 import ast
 import os
+import math
 import pandas as pd
 from openpyxl.cell.cell import MergedCell
 from openpyxl import load_workbook
@@ -26,6 +32,41 @@ from modules.condition_input.funcs.funcs_def_check import check_dn, check_work_p
     check_insulation_material_density, check_def_trail_stand_pressure_lying, check_def_trail_stand_pressure_stand, \
     check_trail_stand_pressure_type, check_pressure_test_temp, check_avg_tube_metal_temp, check_avg_shell_metal_temp
 
+# ============================================================================
+# “所属元件开孔处焊接接头系数”——手动标志（内存态）
+# - key: (product_id, category_label)
+# - value: True/False  表示该分类是否曾被用户在元件定义界面手动修改过
+#
+# 注意：仅在当前进程有效（不落库）。
+# ============================================================================
+_manual_opening_k_flags: Dict[Tuple[str, str], bool] = {}
+
+
+def set_manual_flag(product_id: str, category_label: str, value: bool) -> None:
+    if not product_id or not category_label:
+        return
+    key = (str(product_id), str(category_label))
+    if value:
+        _manual_opening_k_flags[key] = True
+    else:
+        _manual_opening_k_flags.pop(key, None)
+
+
+def get_manual_flag(product_id: str, category_label: str) -> bool:
+    if not product_id or not category_label:
+        return False
+    key = (str(product_id), str(category_label))
+    return bool(_manual_opening_k_flags.get(key, False))
+
+
+def clear_manual_flags_for_product(product_id: str) -> None:
+    if not product_id:
+        return
+    pid = str(product_id)
+    keys_to_del = [k for k in _manual_opening_k_flags if k[0] == pid]
+    for k in keys_to_del:
+        _manual_opening_k_flags.pop(k, None)
+
 #数据库连接
 db_config_1 = {
     'host': 'localhost',
@@ -36,28 +77,7 @@ db_config_1 = {
 }
 
 #1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
-# === 新增：外径自动填充映射表（DN → {系列: 外径}） ===
-# 依据提供的对照表：美标系列/欧标系列
-OUTER_D_MAP = {
-    150: {"美标系列": "168.3", "欧标系列": "159"},
-    200: {"美标系列": "219.1", "欧标系列": "219"},
-    250: {"美标系列": "273",   "欧标系列": "273"},
-    300: {"美标系列": "323.9", "欧标系列": "325"},
-    350: {"美标系列": "355.6", "欧标系列": "377"},
-    400: {"美标系列": "406.4", "欧标系列": "426"},
-    450: {"美标系列": "457",   "欧标系列": "480"},
-    500: {"美标系列": "508",   "欧标系列": "530"},
-    600: {"美标系列": "610",   "欧标系列": "630"},
-    700: {"美标系列": "711",   "欧标系列": "720"},
-    800: {"美标系列": "813",   "欧标系列": "820"},
-    900: {"美标系列": "914",   "欧标系列": "920"},
-    1000:{"美标系列": "1016",  "欧标系列": "1020"},
-    1200:{"美标系列": "1219",  "欧标系列": "1220"},
-    1400:{"美标系列": "1422",  "欧标系列": "1420"},
-    1600:{"美标系列": "1626",  "欧标系列": "1620"},
-    1800:{"美标系列": "1829",  "欧标系列": "1820"},
-    2000:{"美标系列": "2032",  "欧标系列": "2020"},
-}
+# === 旧版：外径自动填充映射表（已废弃，现从user_config的2.2.11.1读取） ===
 
 #1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
 def _parse_int_safe(text: str):
@@ -244,6 +264,129 @@ def _get_dn_from_design(viewer: QWidget):
         return tube_dn
     return tube_dn if tube_dn is not None else shell_dn
 
+# 0221新修改-配置库-外径系列-外径
+# === 新增：从user_config读取配置的函数 ===
+def _get_user_config_value(config_id: str):
+    """
+    从user_config表读取配置值
+    :param config_id: 配置ID，如 "2.2.11.1"
+    :return: 配置值（字符串），失败返回None
+    """
+    try:
+        conn = get_connection(**db_config_config)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT value FROM user_config WHERE id = %s", (config_id,))
+                result = cursor.fetchone()
+                if result:
+                    return result.get('value') if isinstance(result, dict) else result[0] if result else None
+                return None
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[读取user_config失败] id={config_id}, 错误: {e}")
+        return None
+# 0221新修改-配置库-外径系列-外径
+# === 新增：判断外径系列（根据2.2.11.2和2.2.11.3） ===
+def _determine_diameter_series():
+    """
+    根据user_config判断外径系列
+    :return: "英制系列" 或 "公制系列"，失败返回None
+    """
+    try:
+        val_2_2_11_2 = _get_user_config_value("2.2.11.2")
+        val_2_2_11_3 = _get_user_config_value("2.2.11.3")
+        
+        if val_2_2_11_2 is None or val_2_2_11_3 is None:
+            return None
+        
+        # 转换为布尔值（处理字符串"true"/"false"或布尔值）
+        def to_bool(v):
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                v_lower = v.lower().strip()
+                if v_lower in ('true', '1', 'yes'):
+                    return True
+                elif v_lower in ('false', '0', 'no'):
+                    return False
+            return bool(v)
+        
+        bool_2_2_11_2 = to_bool(val_2_2_11_2)
+        bool_2_2_11_3 = to_bool(val_2_2_11_3)
+        
+        # 2.2.11.2为false，2.2.11.3为true → 公制系列
+        if not bool_2_2_11_2 and bool_2_2_11_3:
+            return "公制系列"
+        # 2.2.11.2为true，2.2.11.3为false → 英制系列
+        elif bool_2_2_11_2 and not bool_2_2_11_3:
+            return "英制系列"
+        else:
+            # 其他情况，返回None
+            return None
+    except Exception as e:
+        print(f"[判断外径系列失败] 错误: {e}")
+        return None
+# 0221新修改-配置库-外径系列-外径
+# === 新增：解析映射表并查找外径值 ===
+def _get_outer_diameter_from_mapping(dn: int, series: str):
+    """
+    从user_config的2.2.11.1映射表中查找外径值
+    :param dn: 公称直径（整数）
+    :param series: 外径系列（"英制系列"或"公制系列"）
+    :return: 外径值（字符串），不存在返回None
+    """
+    try:
+        mapping_data = _get_user_config_value("2.2.11.1")
+        if not mapping_data:
+            return None
+        
+        # 解析数据（可能是JSON字符串或已经是列表）
+        import json
+        if isinstance(mapping_data, str):
+            try:
+                mapping_list = json.loads(mapping_data)
+            except:
+                # 如果不是JSON，尝试用ast.literal_eval
+                try:
+                    mapping_list = ast.literal_eval(mapping_data)
+                except:
+                    return None
+        else:
+            mapping_list = mapping_data
+        
+        if not isinstance(mapping_list, list) or len(mapping_list) < 2:
+            return None
+        
+        # 第一行是表头：["DN/OD", "inch", "metric"]
+        # 确定系列对应的列索引
+        header = mapping_list[0]
+        if not isinstance(header, list) or len(header) < 3:
+            return None
+        
+        # 根据系列确定列索引
+        if series == "英制系列":
+            col_index = 1  # "inch"列
+        elif series == "公制系列":
+            col_index = 2  # "metric"列
+        else:
+            return None
+        
+        # 查找匹配的DN值
+        dn_str = str(dn)
+        for row in mapping_list[1:]:  # 跳过表头
+            if not isinstance(row, list) or len(row) < 3:
+                continue
+            if str(row[0]).strip() == dn_str:
+                # 找到匹配的DN，返回对应系列的外径值
+                outer_d = str(row[col_index]).strip()
+                return outer_d if outer_d else None
+        
+        return None
+    except Exception as e:
+        print(f"[从映射表查找外径值失败] DN={dn}, series={series}, 错误: {e}")
+        return None
+
 #1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
 def _get_series_from_general(viewer: QWidget):
     table = getattr(viewer, "tableWidget_general_data", None)
@@ -303,11 +446,43 @@ def _set_general_outer_diameter(viewer: QWidget, text_val: str):
         except Exception:
             pass
 
+# 0221新修改-配置库-外径系列-外径
+# === 新增：设置外径系列到通用数据表 ===
+def _set_general_outer_diameter_series(viewer: QWidget, series: str):
+    """把外径系列值写入通用数据表"外径系列"的"数值"列"""
+    table = getattr(viewer, "tableWidget_general_data", None)
+    if table is None:
+        return
+    target_row = None
+    for r in range(table.rowCount()):
+        it = table.item(r, 1)
+        if it and it.text().strip() == "外径系列":
+            target_row = r
+            break
+    if target_row is None:
+        return
+    item = table.item(target_row, 3)
+    if item is None:
+        item = QTableWidgetItem()
+        table.setItem(target_row, 3, item)
+    old_val = item.text()
+    if old_val == series:
+        return
+    try:
+        table.blockSignals(True)
+        item.setText(series)
+    finally:
+        table.blockSignals(False)
+
 #1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
 def autofill_outer_diameter(viewer: QWidget):
     """
-    基于 设计数据表“公称直径*” 与 通用数据表“外径系列”，自动填充“外径”。
-    规则：DN<150 或映射不存在 → 写入“—”；其余按 OUTER_D_MAP 匹配；前提：基准开关为“是”。
+    基于 设计数据表"公称直径*" 与外径系列，自动填充通用数据表中的"外径"：
+    1. 外径系列优先使用通用数据表当前值；
+       若当前为空，再根据user_config(2.2.11.2 / 2.2.11.3)给一个默认系列；
+    2. 外径值优先从user_config的2.2.11.1映射表查找；
+    3. 映射表没有对应DN时，按公式 round(25.4 * DN / 25, 0) 计算并显示在「外径」；
+       若当前「外径系列」为「-」，则保持「-」；否则保留用户当前选择。
     """
     # 未就绪时不进行自动填充（避免界面进入前弹窗）
     if not getattr(viewer, "_outer_autofill_ready", False):
@@ -323,41 +498,88 @@ def autofill_outer_diameter(viewer: QWidget):
     setattr(viewer, "_outer_autofill_lock", True)
     try:
         dn = _choose_dn_with_prompt(viewer)
-        series = _get_series_from_general(viewer)
 
-        # 若与上一次处理的 (dn, series) 完全一致，直接返回，避免重复弹窗
-        last_pair = getattr(viewer, "_outer_last_pair", None)
-        cur_pair = (dn, series)
-        if last_pair == cur_pair:
-            return
-        # 若DN缺失（例如首次从“否”切“是”而未填DN），不再额外弹“非标准值”提示，直接写入“—”。
+        # 若DN缺失，直接写入"—"
         if dn is None:
             _set_general_outer_diameter(viewer, "—")
-            setattr(viewer, "_outer_last_pair", cur_pair)
+            # 清除计算值缓存
+            if hasattr(viewer, "_calculated_outer_diameter"):
+                viewer._calculated_outer_diameter = None
+            setattr(viewer, "_outer_last_pair", (None, None))
             return
-        # 若系列缺失，同样不弹“DN非标准”提示（与DN无关），仅写入“—”。
-        if not series:
+
+        # === 步骤1：确定外径系列（优先使用界面值，其次配置库默认） ===
+        # ① 先从通用数据表当前值读取外径系列（「-」表示上表未列出 DN 时的公式态，视为已选）
+        series_ui = _get_series_from_general(viewer)
+
+        # ② 若当前没有外径系列，再从user_config读取默认系列
+        if not series_ui:
+            series_from_cfg = _determine_diameter_series()
+            if series_from_cfg:
+                _set_general_outer_diameter_series(viewer, series_from_cfg)
+                series_ui = series_from_cfg
+
+        # ③ 依然没有系列信息，则无法计算外径，只把界面置为"—"
+        if not series_ui:
             _set_general_outer_diameter(viewer, "—")
-            setattr(viewer, "_outer_last_pair", cur_pair)
+            if hasattr(viewer, "_calculated_outer_diameter"):
+                viewer._calculated_outer_diameter = None
+            setattr(viewer, "_outer_last_pair", (dn, None))
             return
-        if dn < 150:
-            _set_general_outer_diameter(viewer, "—")
-            _warn_once(viewer, "公称直径非标准值，无法推荐外径，请自定义外径！", key="dn_not_standard")
-            setattr(viewer, "_outer_last_pair", cur_pair)
-            return
-        series_map = OUTER_D_MAP.get(dn)
-        if not series_map:
-            _set_general_outer_diameter(viewer, "—")
-            _warn_once(viewer, "公称直径非标准值，无法推荐外径，请自定义外径！", key="dn_not_standard")
-            setattr(viewer, "_outer_last_pair", cur_pair)
-            return
-        val = series_map.get(series)
-        if not val:
-            _set_general_outer_diameter(viewer, "—")
-            _warn_once(viewer, "公称直径非标准值，无法推荐外径，请自定义外径！", key="dn_not_standard")
+
+        # 查映射表用的系列：界面为「-」时用配置库默认系列尝试（否则 DN 回到表内时无法命中）
+        if series_ui == "-":
+            lookup_series = _determine_diameter_series() or "公制系列"
         else:
-            _set_general_outer_diameter(viewer, val)
-        setattr(viewer, "_outer_last_pair", cur_pair)
+            lookup_series = series_ui
+
+        # 若与上一次处理的 (dn, 界面系列) 完全一致，直接返回，避免重复计算
+        last_pair = getattr(viewer, "_outer_last_pair", None)
+        cur_pair = (dn, series_ui)
+        if last_pair == cur_pair:
+            return
+
+        # === 步骤2：从映射表查找外径值 ===
+        outer_d_from_mapping = _get_outer_diameter_from_mapping(dn, lookup_series)
+
+        if outer_d_from_mapping:
+            # 映射表中存在，直接使用映射值
+            _set_general_outer_diameter(viewer, outer_d_from_mapping)
+            if hasattr(viewer, "_calculated_outer_diameter"):
+                viewer._calculated_outer_diameter = None
+            # 一旦命中映射表，清除“上一次不在表内DN”标记
+            try:
+                setattr(viewer, "_outer_last_non_table_dn", None)
+            except Exception:
+                pass
+            # 公式态（外径系列为「-」）下查表命中后，恢复为英制/公制显示
+            if series_ui == "-":
+                _set_general_outer_diameter_series(viewer, lookup_series)
+            setattr(viewer, "_outer_last_pair", (dn, lookup_series))
+        else:
+            # 映射表中不存在：外径显示公式计算值。
+            # 规则：
+            # - 如果仍是“同一个不在表内的 DN”，允许保留用户手动修改过的外径系列（英制/公制）。
+            # - 如果 DN 变成了“另一个不在表内的值”，则强制外径系列显示为「-」（公式态）。
+            calculated_value = round(25.4 * dn / 25, 0)
+            calculated_value_str = str(int(calculated_value))
+            _set_general_outer_diameter(viewer, calculated_value_str)
+            if hasattr(viewer, "_calculated_outer_diameter"):
+                viewer._calculated_outer_diameter = None
+            last_non_table_dn = getattr(viewer, "_outer_last_non_table_dn", None)
+            # 第一次进入“公式态”（例如：切换“是否以外径为基准*”为“是”后、或首次输入不在表内DN）
+            # 以及从一个不在表内DN切到另一个不在表内DN时，都强制外径系列显示为「-」。
+            should_force_dash = (last_non_table_dn is None) or (last_non_table_dn != dn)
+            if should_force_dash:
+                _set_general_outer_diameter_series(viewer, "-")
+                series_effective = "-"
+            else:
+                series_effective = series_ui
+            setattr(viewer, "_outer_last_non_table_dn", dn)
+            print(
+                f"[外径计算] DN={dn}, 映射无此行，公式外径={calculated_value_str}, 外径系列={series_effective}, last_non_table_dn={last_non_table_dn}"
+            )
+            setattr(viewer, "_outer_last_pair", (dn, series_effective))
     finally:
         setattr(viewer, "_outer_autofill_lock", False)
 
@@ -383,6 +605,15 @@ db_config_4 = {
     'user': 'root',
     'password': '123456',
     'database': '项目需求库'
+}
+# 0221新修改-配置库-外径系列-外径
+# 配置库连接配置（用于读取user_config表）
+db_config_config = {
+    'host': 'localhost',
+    'port': 3306,
+    'user': 'root',
+    'password': '123456',
+    'database': '配置库'
 }
 
 # === 新增：模式顺序相关工具  开始 ========================================= 新增
@@ -475,9 +706,85 @@ def capture_default_order(table_widget):
             id2row[pid] = r
     table_widget._default_id2row = id2row
 
-def apply_mode_param_order(table_widget, target_id_seq):
+def restore_default_order(table_widget):
+    # 0103新修改
     """
-    按照 target_id_seq 对表格进行“界面行顺序”的重排（不改单元格内容）。
+    恢复表格到默认顺序（严格按照 _default_param_ids 的顺序，不做任何分组处理）。
+    用于从工作模式切换回设计模式时恢复原始顺序。
+    """
+    if table_widget.rowCount() == 0 or table_widget.columnCount() == 0:
+        return
+    
+    # 获取默认顺序
+    default_ids = getattr(table_widget, "_default_param_ids", None)
+    if not default_ids:
+        return
+    
+    # 🔒 关键：关闭排序 & 冻结刷新
+    was_sorting = table_widget.isSortingEnabled()
+    if was_sorting:
+        table_widget.setSortingEnabled(False)
+    table_widget.setUpdatesEnabled(False)
+    
+    # 读取当前所有行
+    all_rows = [_read_row_as_list(table_widget, r) for r in range(table_widget.rowCount())]
+    
+    # 建立当前行的 ID 到行的映射（每个ID只映射一次，取第一个匹配的行）
+    id_to_row = {}
+    none_rows = []  # 存储ID为None的行
+    
+    for idx, row_data in enumerate(all_rows):
+        if len(row_data) > 0 and row_data[0]:  # 第0列是参数ID
+            try:
+                param_id = int(row_data[0].strip()) if row_data[0].strip().isdigit() else None
+                if param_id is not None:
+                    if param_id not in id_to_row:
+                        id_to_row[param_id] = row_data
+                else:
+                    none_rows.append(row_data)
+            except Exception:
+                none_rows.append(row_data)
+        else:
+            none_rows.append(row_data)
+    
+    # 按照 default_ids 的顺序重建行
+    new_rows = []
+    used_ids = set()
+    
+    # 第一步：按照 default_ids 的顺序添加行（严格按顺序）
+    for param_id in default_ids:
+        if param_id is not None:
+            if param_id in id_to_row and param_id not in used_ids:
+                new_rows.append(id_to_row[param_id])
+                used_ids.add(param_id)
+        else:
+            # 如果是None，从none_rows中取一个（如果有的话）
+            if none_rows:
+                new_rows.append(none_rows.pop(0))
+    
+    # 第二步：添加 default_ids 中没有但表格中存在的行（这些行可能是新增的，保留在末尾）
+    for param_id, row_data in id_to_row.items():
+        if param_id not in used_ids:
+            new_rows.append(row_data)
+    
+    # 第三步：添加剩余的ID为None的行
+    new_rows.extend(none_rows)
+    
+    # 清空旧内容并写入新顺序
+    table_widget.clearContents()
+    table_widget.setRowCount(len(new_rows))
+    for r, row_vals in enumerate(new_rows):
+        _write_row_from_list(table_widget, r, row_vals)
+    
+    # 恢复刷新
+    table_widget.setUpdatesEnabled(True)
+    table_widget.viewport().update()
+
+def apply_mode_param_order(table_widget, target_id_seq):
+    # 1226新修改_工作模式不同产品参数显示顺序调整
+    """
+    按照 target_id_seq 对表格进行"界面行顺序"的重排（不改单元格内容）。
+    特殊处理：工作模式下，所有带*的必填项参数必须优先显示在不带*的参数之前。
     仅处理第0列可解析为 int 的行；其余行保持在末尾原顺序。
     """
     if table_widget.rowCount() == 0 or table_widget.columnCount() == 0:
@@ -492,31 +799,56 @@ def apply_mode_param_order(table_widget, target_id_seq):
     # 取当前整表文稿
     all_rows = [_read_row_as_list(table_widget, r) for r in range(table_widget.rowCount())]
 
-    # 当前每行的 参数ID（来自第0列）
+    # 当前每行的 参数ID（来自第0列）和参数名称（第1列）
     cur_ids = []
+    param_names = []
     for r in range(table_widget.rowCount()):
         it = table_widget.item(r, 0)
         try:
             cur_ids.append(int(it.text().strip()) if it and it.text().strip() else None)
         except Exception:
             cur_ids.append(None)
+        # 获取参数名称（第1列），用于判断是否为必填项（带*）
+        name_item = table_widget.item(r, 1)
+        param_names.append(name_item.text().strip() if name_item else "")
 
     id2rows = {}
+    id_to_required = {}  # 记录每个ID对应的参数是否为必填项（带*）
     others = []
     for idx, pid in enumerate(cur_ids):
         if pid is None:
             others.append(all_rows[idx])
         else:
             id2rows[pid] = all_rows[idx]
+            # 判断该参数是否为必填项（参数名称包含*）
+            is_required = "*" in param_names[idx]
+            id_to_required[pid] = is_required
 
     new_rows = []
+    
+    # ✅ 第一步：按照 target_id_seq 的顺序，收集所有表格中实际存在的必填项（带*）
     for pid in target_id_seq:
-        row = id2rows.get(pid)
-        if row is not None:
-            new_rows.append(row)
-            id2rows.pop(pid, None)
-
-    for pid in [pid for pid in cur_ids if (pid is not None and pid in id2rows)]:
+        if pid in id2rows and id_to_required.get(pid, False):
+            new_rows.append(id2rows[pid])
+            id2rows.pop(pid)  # 从字典中移除，标记为已处理
+    
+    # ✅ 第二步：收集剩余的必填项（不在模板顺序中，但在表格中存在的带*参数）
+    # 按原始顺序排列剩余的必填项
+    remaining_required_ids = [pid for pid in cur_ids if pid is not None and pid in id2rows and id_to_required.get(pid, False)]
+    for pid in remaining_required_ids:
+        new_rows.append(id2rows[pid])
+        id2rows.pop(pid)
+    
+    # ✅ 第三步和第四步合并：收集所有剩余的非必填项，按ID从小到大排序
+    remaining_non_required_ids = [pid for pid in id2rows.keys() if not id_to_required.get(pid, False)]
+    remaining_non_required_ids.sort()  # 按ID从小到大排序
+    for pid in remaining_non_required_ids:
+        new_rows.append(id2rows[pid])
+        id2rows.pop(pid)
+    
+    # ✅ 第五步：处理其他特殊情况（理论上此时id2rows应该为空，但保留此逻辑以防万一）
+    remaining_ids = [pid for pid in cur_ids if pid is not None and pid in id2rows]
+    for pid in remaining_ids:
         new_rows.append(id2rows[pid])
 
     new_rows.extend(others)
@@ -647,9 +979,14 @@ def load_design_data_if_exists(product_id, product_form="all"):
 
                     if is_form_dependent_table and has_form_column:
                         # 1216新修改-bem也显示两个金属温度的参数
-                        if product_form in ['NEN', 'BEM']:
-                            sql_query += f" WHERE `{form_column_name}` IN (%s, %s)"
-                            params.extend(['all', 'NEN'])
+                        # 2026-01: AEM或后续的产品型式需要显示（直接在数据库表里加上产品型式）
+                        # 用 FIND_IN_SET 做“精确匹配”，避免 LIKE 子串误命中。
+                        if product_form and product_form != "all":
+                            sql_query += (
+                                f" WHERE `{form_column_name}` = %s"
+                                f" OR FIND_IN_SET(%s, `{form_column_name}`)"
+                            )
+                            params.extend(['all', product_form])
                         else:
                             sql_query += f" WHERE `{form_column_name}` = %s"
                             params.append('all')
@@ -1080,11 +1417,12 @@ def get_table_data(table_widget):
 
     return data
 
-def save_data_to_database(data, product_id, table_name, table_widget, is_from_design_lib=True):
+def save_data_to_database(data, product_id, table_name, table_widget, is_from_design_lib=True, viewer=None):
     """
     将表格数据保存至数据库：
     - 无论是 INSERT 还是 UPDATE，统一先对比模板表字段值，判断更改状态；
     - 更改状态字段统一标记；
+    - 特殊处理：如果外径显示为"—"但有计算值缓存，保存计算值到数据库。
     """
     connection = get_connection(**db_config_2)
     try:
@@ -1096,7 +1434,7 @@ def save_data_to_database(data, product_id, table_name, table_widget, is_from_de
             table_columns = cursor.fetchall()
             db_fields = [col['Field'] for col in table_columns]
 
-            # 获取“更改状态”字段名
+            # 获取"更改状态"字段名
             change_status_column = None
             for col in table_columns:
                 if re.search(r'更改状态$', col['Field']):
@@ -1105,10 +1443,10 @@ def save_data_to_database(data, product_id, table_name, table_widget, is_from_de
             if not change_status_column:
                 raise ValueError("未找到更改状态字段")
 
-            # 确定“参数名称”字段
+            # 确定"参数名称"字段
             name_column = "规范/标准名称" if "产品标准" in table_name else "参数名称"
 
-            # === 参数ID字段映射（避免用“序号”）===
+            # === 参数ID字段映射（避免用"序号"）===
             id_field_mapping = {
                 "产品设计活动表_产品标准数据表": "产品标准参数ID",
                 "产品设计活动表_设计数据表": "设计数据参数ID",
@@ -1117,7 +1455,7 @@ def save_data_to_database(data, product_id, table_name, table_widget, is_from_de
             param_id_field = id_field_mapping.get(table_name, table_columns[0]['Field'])
 
             # UI 表头第0列（序号）→ 实际数据库的参数ID字段
-            param_id_column = header_columns[0]   # UI显示是“序号”
+            param_id_column = header_columns[0]   # UI显示是"序号"
 
             # 匹配模板表名
             template_table_mapping = {
@@ -1134,11 +1472,37 @@ def save_data_to_database(data, product_id, table_name, table_widget, is_from_de
                 template_compare_fields = [col['Field'] for col in cursor.fetchall()]
                 print(f"[DEBUG] 模板表字段={template_compare_fields}")
 
+            # === 特殊处理：获取viewer实例以访问计算值缓存 ===
+            calculated_outer_d = None
+            if table_name == "产品设计活动表_通用数据表" and viewer:
+                # 如果传入了viewer且有计算值缓存
+                try:
+                    if hasattr(viewer, "_calculated_outer_diameter"):
+                        calculated_outer_d = viewer._calculated_outer_diameter
+                except Exception as e:
+                    print(f"[保存] 获取计算值缓存失败: {e}")
+
             for row_idx, row in enumerate(data):
                 param_name = row.get(name_column)
                 if not param_name:
                     print(f"[DEBUG] 跳过：没有{name_column}")
                     continue
+
+                # === 特殊处理：外径参数 ===
+                # 如果当前行是"外径"参数，且界面显示为"—"，但有计算值缓存，则使用计算值
+                if param_name == "外径" and calculated_outer_d:
+                    # 查找"数值"列
+                    value_column = None
+                    for col_name in header_columns:
+                        if "数值" in col_name or col_name == "数值":
+                            value_column = col_name
+                            break
+                    if value_column:
+                        current_value = str(row.get(value_column, "")).strip()
+                        if current_value == "—" and calculated_outer_d:
+                            # 使用计算值替换"—"
+                            row[value_column] = calculated_outer_d
+                            print(f"[保存外径] 界面显示=—, 保存计算值={calculated_outer_d}")
 
                 # 获取模板数据行
                 template = None
@@ -1189,7 +1553,7 @@ def save_data_to_database(data, product_id, table_name, table_widget, is_from_de
                         if field == "产品ID":
                             insert_row[field] = product_id
                         elif field == param_id_field:
-                            # ⚠️ 注意：这里要看 row 里到底有没有“序号”
+                            # ⚠️ 注意：这里要看 row 里到底有没有"序号"
                             insert_row[field] = row.get(param_id_column, "")
                         elif field == change_status_column:
                             insert_row[field] = change_detected
@@ -1519,15 +1883,21 @@ def sync_design_params_to_element_params(product_id):
         update_element_name_data(product_id, "固定管板", "管程侧腐蚀裕量", str(tube_ca))
         update_element_name_data(product_id, "浮动管板", "管程侧腐蚀裕量", str(tube_ca))
         update_element_name_data(product_id, "球冠形封头", "管程侧腐蚀裕量", str(tube_ca))
+        update_element_name_data(product_id, "浮头法兰", "管程侧腐蚀裕量", str(tube_ca))
 
     if shell_ca:
         update_element_name_data(product_id, "固定管板", "壳程侧腐蚀裕量", str(shell_ca))
         update_element_name_data(product_id, "浮动管板", "壳程侧腐蚀裕量", str(shell_ca))
         update_element_name_data(product_id, "球冠形封头", "壳程侧腐蚀裕量", str(shell_ca))
+        update_element_name_data(product_id, "浮头法兰", "壳程侧腐蚀裕量", str(shell_ca))
+
+    try:
+        sync_yanban_height_if_exceeds_shell_dn(product_id)
+    except Exception as e:
+        print(f"[警告] 堰板高度随壳程公称直径同步失败: {e}")
 
 
-
-def sync_corrosion_to_guankou_param(product_id, guankou_codes, category_label=None):
+def sync_corrosion_to_guankou_param(product_id, guankou_codes, category_label=None, overwrite_all_codes=False):
     """
     将条件输入（设计数据表）的腐蚀裕量同步到管口参数：
     - case1: 当管程/壳程腐蚀裕量数值相同 → 用该值填写管口3列默认值
@@ -1546,6 +1916,78 @@ def sync_corrosion_to_guankou_param(product_id, guankou_codes, category_label=No
         return
 
     print(f"[调试] tube_ca={tube_ca} ({type(tube_ca)}), shell_ca={shell_ca} ({type(shell_ca)})")
+
+    # 额外新增：把每个【管口代号】的接管腐蚀裕量单独写入 产品设计活动表_管口类别表
+    # - 不改变原有“接管腐蚀裕量(管口附加参数表)”的显示/写入逻辑
+    try:
+        # === 写入“产品设计活动表_管口类别表” ===
+        # overwrite_all_codes=True 时：忽略传入的 guankou_codes，按产品维度同步所有管口号
+        # （直接从 产品设计活动表_管口类别表 中读取该产品现有的所有管口代号，包括当前不挂在任何 Tab 下的管口）
+        # 否则：仅对当前传入的 guankou_codes 做增量/局部更新
+
+        # 1) 计算需要写入的管口号集合
+        target_codes = set()
+        if overwrite_all_codes:
+            conn_codes = None
+            try:
+                conn_codes = pymysql.connect(**design_db_config_1)
+                with conn_codes.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT 管口代号
+                        FROM 产品设计活动表_管口类别表
+                        WHERE 产品ID=%s
+                        """,
+                        (product_id,),
+                    )
+                    rows = cur.fetchall() or []
+                    for row in rows:
+                        # row 可能是 tuple 或单列
+                        code = row[0] if isinstance(row, (list, tuple)) else row
+                        c2 = (code or "").strip()
+                        if c2:
+                            target_codes.add(c2)
+            except Exception as e:
+                print(f"[警告] 查询产品{product_id}所有管口代号失败: {e}")
+            finally:
+                try:
+                    if conn_codes:
+                        conn_codes.close()
+                except Exception:
+                    pass
+        else:
+            if guankou_codes:
+                for c in guankou_codes:
+                    c2 = (c or "").strip()
+                    if c2:
+                        target_codes.add(c2)
+
+        if target_codes:
+            code_to_value = {}
+            # 若管壳相同：不必区分所属，直接同值写入每个管口
+            if tube_ca and shell_ca and str(tube_ca) == str(shell_ca):
+                for code in target_codes:
+                    code_to_value[code] = str(tube_ca)
+            else:
+                # 管壳不同：按管口所属写入对应值（取不到所属则留空）
+                for code in target_codes:
+                    a = query_guankou_affiliation(product_id, code)
+                    if a == "管程":
+                        code_to_value[code] = str(tube_ca) if tube_ca is not None and str(tube_ca).strip() != "" else ""
+                    elif a == "壳程":
+                        code_to_value[code] = str(shell_ca) if shell_ca is not None and str(shell_ca).strip() != "" else ""
+                    else:
+                        code_to_value[code] = ""
+
+            if code_to_value:
+                ret = update_guankou_corrosion_to_category_table(product_id, code_to_value)
+                print(
+                    f"[同步] 管口类别表.接管腐蚀裕量 更新 {ret.get('updated', 0)}/{ret.get('requested', 0)} "
+                    f"(overwrite_all_codes={overwrite_all_codes}, codes={sorted(target_codes)})"
+                )
+    except Exception as e:
+        # 兼容：字段未加/库异常时，不影响主流程
+        print(f"[警告] 同步到管口类别表.接管腐蚀裕量失败: {e}")
 
     # === case1: 管壳程腐蚀裕量相同 ===
     if tube_ca and shell_ca and str(tube_ca) == str(shell_ca):
@@ -1586,6 +2028,299 @@ def sync_corrosion_to_guankou_param(product_id, guankou_codes, category_label=No
         update_guankou_param_flex_db(product_id, "接管腐蚀裕量", "", tab_name=category_label)
         print("[case3] 没有管口号且腐蚀裕量不同，留空")
 
+
+def get_opening_weld_joint_default(product_id: str, category_label: str = None):
+    """
+    计算“所属元件开孔处焊接接头系数”的【默认值】（仅用于 UI 比对，不一定写入DB）：
+    - case1: 管程/壳程系数相同 → 返回该值；
+    - case2: 当前分类下的管口都属于管程/壳程 → 返回对应系数；
+    - case3: 混合 → 对当前分类下的每个管口，按所属取管程/壳程系数，再取最小值；
+    - 若条件输入缺少该参数，或无法计算，返回 None。
+    """
+    if not product_id:
+        return None
+
+    pmap = get_design_params_by_product_id(product_id)
+    tube_k = pmap.get("焊接接头系数*", {}).get("管程数值", "")
+    shell_k = pmap.get("焊接接头系数*", {}).get("壳程数值", "")
+
+    if not tube_k and not shell_k:
+        return None
+
+    def _to_float(x):
+        try:
+            if x is None:
+                return None
+            s = str(x).strip()
+            if not s:
+                return None
+            return float(s)
+        except Exception:
+            return None
+
+    t_val = _to_float(tube_k)
+    s_val = _to_float(shell_k)
+
+    # case1: 管壳相同
+    if t_val is not None and s_val is not None and abs(t_val - s_val) < 1e-9:
+        return t_val
+
+    if not category_label:
+        return None
+
+    # 当前分类下的管口号
+    try:
+        codes = query_guankou_codes(product_id, category_label) or []
+    except Exception:
+        codes = []
+
+    if not codes:
+        return None
+
+    affiliations = [query_guankou_affiliation(product_id, code) for code in codes]
+    pure_tube = all(a == "管程" for a in affiliations if a)
+    pure_shell = all(a == "壳程" for a in affiliations if a)
+
+    # case2: 纯管程/纯壳程
+    if pure_tube and t_val is not None:
+        return t_val
+    if pure_shell and s_val is not None:
+        return s_val
+
+    # case3: 混合 → 按所属取对应系数，再取最小值
+    vals = []
+    for code, a in zip(codes, affiliations):
+        if a == "管程" and t_val is not None:
+            vals.append(t_val)
+        elif a == "壳程" and s_val is not None:
+            vals.append(s_val)
+
+    if not vals:
+        return None
+    return min(vals)
+
+
+def sync_opening_weld_joint_coeff_to_guankou_param(
+    product_id,
+    guankou_codes,
+    category_label=None,
+    skip_category_sync=False,
+    force_reset_from_condition=False,
+):
+    """
+    将条件输入（设计数据表）的“焊接接头系数*”同步到管口参数：
+    - case1: 当管程/壳程系数相同 → 用该值填写管口默认值
+    - case2: 如果管口号都属于管程或壳程 → 用对应的系数值填写
+    - case3: 以上两种情况都不满足时 → 不填，保持为空
+
+    同时：把每个【管口代号】的值单独写入 产品设计活动表_管口类别表.所属元件开孔处焊接接头系数
+    """
+    # 1) 从条件输入获取焊接接头系数*
+    pmap = get_design_params_by_product_id(product_id)
+    tube_k = pmap.get("焊接接头系数*", {}).get("管程数值", "")
+    shell_k = pmap.get("焊接接头系数*", {}).get("壳程数值", "")
+
+    if not tube_k and not shell_k:
+        print("[跳过] 条件输入没有焊接接头系数*")
+        return
+
+    print(f"[调试] tube_k={tube_k} ({type(tube_k)}), shell_k={shell_k} ({type(shell_k)})")
+
+    # 2) 逐管口写入 管口类别表（不影响已满足“用户值>=默认值”的用户输入）
+    #    当 skip_category_sync=True 时，跳过此步骤（典型场景：用户在元件定义UI中手动修改了该参数，
+    #    datamanager 已经把用户值写回类别表，这里不再用条件输入的默认值覆盖）
+    #    当 force_reset_from_condition=True（从条件输入保存触发）时，视“焊接接头系数*”为新的主数据，
+    #    无条件按默认值覆盖类别表中对应管口号的值。
+    if not skip_category_sync:
+        try:
+            if guankou_codes:
+                # 仅在“类别表当前值为空或小于默认值”时，才用默认值覆盖；用户已输入且>=默认值的保留
+                code_to_value = {}
+
+                def _to_float_safe(x):
+                    try:
+                        if x is None:
+                            return None
+                        s = str(x).strip()
+                        if not s:
+                            return None
+                        return float(s)
+                    except Exception:
+                        return None
+
+                # 使用设计活动库连接读取当前类别表中的值
+                conn_cat = pymysql.connect(**design_db_config_1)
+                try:
+                    with conn_cat.cursor(pymysql.cursors.DictCursor) as c:
+                        for code in guankou_codes:
+                            c0 = (code or "").strip()
+                            if not c0:
+                                continue
+                            a = query_guankou_affiliation(product_id, c0)
+                            # 根据所属确定该管口的默认值
+                            if a == "管程":
+                                d_val = _to_float_safe(tube_k)
+                            elif a == "壳程":
+                                d_val = _to_float_safe(shell_k)
+                            else:
+                                d_val = None
+                            if d_val is None:
+                                continue
+
+                            if force_reset_from_condition:
+                                # 条件输入显式修改：无条件重写为新的默认值
+                                code_to_value[c0] = str(d_val)
+                            else:
+                                # 读取当前类别表中的用户值
+                                c.execute(
+                                    """
+                                    SELECT 所属元件开孔处焊接接头系数 AS v
+                                    FROM 产品设计活动表_管口类别表
+                                    WHERE 产品ID=%s AND 管口代号=%s
+                                    """,
+                                    (product_id, c0),
+                                )
+                                row = c.fetchone()
+                                cur_v = row.get("v") if row else None
+                                cur_f = _to_float_safe(cur_v)
+
+                                # 仅当当前值为空或小于默认值时，才更新为默认值
+                                if cur_f is None or cur_f < d_val:
+                                    code_to_value[c0] = str(d_val)
+
+                finally:
+                    conn_cat.close()
+
+                if code_to_value:
+                    ret = update_guankou_opening_weld_joint_coeff_to_category_table(product_id, code_to_value)
+                    print(f"[同步] 管口类别表.所属元件开孔处焊接接头系数 更新 {ret.get('updated', 0)}/{ret.get('requested', 0)}")
+        except Exception as e:
+            print(f"[警告] 同步到管口类别表.所属元件开孔处焊接接头系数失败: {e}")
+
+    # 3) 写入管口附加参数表（用于页面显示的默认值/联动，且遵守“用户值 >= 默认值”的约束）
+    param_name = "所属元件开孔处焊接接头系数"
+    # 仅在有分类标签时才考虑写入
+    if not category_label:
+        return
+
+    # 计算当前分类下的“默认值”
+    default_val = get_opening_weld_joint_default(product_id, category_label)
+    if default_val is None:
+        # 无法计算默认值 → 不强制覆盖已有用户值
+        return
+
+    # 判断当前分类是否为“混合场景”
+    affiliations = []
+    try:
+        affiliations = [query_guankou_affiliation(product_id, code) for code in (guankou_codes or [])]
+    except Exception:
+        affiliations = []
+    pure_tube = all(a == "管程" for a in affiliations if a)
+    pure_shell = all(a == "壳程" for a in affiliations if a)
+    mixed = not (pure_tube or pure_shell)
+
+    # 读取当前 DB 中该分类的参数值
+    conn = None
+    try:
+        # 注意：管口附加参数表在“产品设计活动库”中，这里必须使用设计活动库的连接配置
+        conn = pymysql.connect(**design_db_config_1)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            sql = """
+                SELECT 参数值
+                FROM 产品设计活动表_管口附加参数表
+                WHERE 产品ID = %s AND 参数名称 = %s AND 类别 = %s
+                LIMIT 1
+            """
+            cursor.execute(sql, (product_id, param_name, category_label))
+            row = cursor.fetchone()
+            cur_val = (row.get("参数值") if row else "") if row is not None else ""
+
+        # 辅助解析函数
+        def _to_float(x):
+            try:
+                if x is None:
+                    return None
+                s = str(x).strip()
+                if not s:
+                    return None
+                return float(s)
+            except Exception:
+                return None
+
+        cur_f = _to_float(cur_val)
+        # 解析管程/壳程默认值，便于识别“模板默认值”还是“用户输入值”
+        t_val = _to_float(tube_k)
+        s_val = _to_float(shell_k)
+
+        # case3：混合场景（本 tab 里既有管程又有壳程）
+        if mixed:
+            # ① DB 为空 → 说明当前只有默认逻辑，还没有用户输入，保持为空，仅在 UI 中用 default_val 做下限比较
+            if cur_val is None or str(cur_val).strip() == "":
+                print(f"[case3] 分类 {category_label} 为混合场景，DB 为空，仅在UI中使用默认值 {default_val}")
+                return
+
+            # ② DB 中的值等于某一侧的条件输入默认值（0.8 或 0.85）
+            #    仅在“非用户主动修改调用（skip_category_sync=False）”时，才把它视作“模板默认值”并清空。
+            #    若是用户在元件定义UI中手动输入 0.8 / 0.85 触发的调用（skip_category_sync=True），
+            #    则应视作用户值，后续走“提升/保留”分支，不再清空。
+            if not skip_category_sync:
+                if (
+                    cur_f is not None
+                    and (
+                        (t_val is not None and abs(cur_f - t_val) < 1e-9)
+                        or (s_val is not None and abs(cur_f - s_val) < 1e-9)
+                    )
+                ):
+                    update_guankou_param_flex_db(product_id, param_name, "", tab_name=category_label)
+                    print(f"[case3] 分类 {category_label} 混合场景且当前值为模板默认值 {cur_val}，清空DB，仅在UI中使用默认值 {default_val}")
+                    return
+
+            # ③ 其余情况视为“用户输入值”：
+            #    - 一般调用：若 < default_val，则提升到 default_val；否则保留用户值
+            #    - 条件输入保存触发（force_reset_from_condition=True）：无论当前值如何，都重写为 default_val，
+            #      且把该分类的“手动标志”重置为 False（回到条件输入主导状态）
+            if force_reset_from_condition:
+                update_guankou_param_flex_db(product_id, param_name, str(default_val), tab_name=category_label)
+                set_manual_flag(product_id, category_label, False)
+                print(f"[case3-条件输入覆盖] 分类 {category_label} 由条件输入强制写入默认值 {default_val}，手动标志清零")
+            else:
+                if cur_f is None or cur_f < float(default_val):
+                    update_guankou_param_flex_db(product_id, param_name, str(default_val), tab_name=category_label)
+                    print(f"[case3-提升] 分类 {category_label} 原值={cur_val} < 默认值={default_val}，提升为默认值")
+                else:
+                    print(f"[case3-保留] 分类 {category_label} 原值={cur_val} >= 默认值={default_val}，保留用户值")
+            return
+
+        # 非混合场景：
+        # force_reset_from_condition=True（条件输入保存触发）：
+        #   无论当前是否有值，直接写入新的默认值（条件输入视为主数据），并清除该分类的“手动标志”
+        if force_reset_from_condition:
+            update_guankou_param_flex_db(product_id, param_name, str(default_val), tab_name=category_label)
+            set_manual_flag(product_id, category_label, False)
+            print(f"[条件输入覆盖] 分类 {category_label} 由条件输入强制写入默认值 {default_val}，手动标志清零")
+        else:
+            # 若 DB 中还没有值，首次写入默认值
+            if cur_val is None or str(cur_val).strip() == "":
+                update_guankou_param_flex_db(product_id, param_name, str(default_val), tab_name=category_label)
+                print(f"[默认写入] 分类 {category_label} 首次写入默认值 {default_val}")
+                return
+
+            # 若已有用户值：当其 < 默认值 时，用默认值覆盖；否则保留用户值
+            if cur_f is None or cur_f < float(default_val):
+                update_guankou_param_flex_db(product_id, param_name, str(default_val), tab_name=category_label)
+                print(f"[提升] 分类 {category_label} 原值={cur_val} < 默认值={default_val}，提升为默认值")
+            else:
+                print(f"[保留] 分类 {category_label} 原值={cur_val} >= 默认值={default_val}，保留用户值")
+    except Exception as e:
+        print(f"[警告] 同步所属元件开孔处焊接接头系数到管口附加参数表失败: {e}")
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
 def save_all_tables(viewer, product_id):
     """
     保存所有表格数据（标准、设计、通用、涂漆、无损检测）至数据库
@@ -1616,12 +2351,23 @@ def save_all_tables(viewer, product_id):
 
         sync_design_params_to_element_params(product_id)
 
-        # 1124新修改-保存时增加元件定义腐蚀余量同步
+        # 1124新修改-保存时增加元件定义腐蚀余量/焊接接头系数同步
         try:
             labels = query_all_guankou_categories(product_id) or ["管口材料分类1"]
             for label in labels:
                 codes = query_guankou_codes(product_id, label) or []
-                sync_corrosion_to_guankou_param(product_id, codes, label)
+                # 读取内存中的“手动标志”：若该分类曾在元件界面被手动修改过，则仅“抬高不压低”；
+                # 否则视为纯条件输入/模板控制，允许条件输入完全覆盖（包括变小）。
+                is_manual = get_manual_flag(product_id, label)
+                sync_opening_weld_joint_coeff_to_guankou_param(
+                    product_id,
+                    codes,
+                    label,
+                    skip_category_sync=False,
+                    force_reset_from_condition=not is_manual,
+                )
+                # 腐蚀裕量：条件输入侧作为“总控”，此处强制覆盖所有管口的类别表取值
+                sync_corrosion_to_guankou_param(product_id, codes, label, overwrite_all_codes=True)
         except Exception as e:
             print(f"[警告] 设计数据保存后的腐蚀裕量同步失败: {e}")
 
@@ -1630,7 +2376,8 @@ def save_all_tables(viewer, product_id):
             product_id,
             "产品设计活动表_通用数据表",
             viewer.tableWidget_general_data,
-            is_from_design_lib
+            is_from_design_lib,
+            viewer=viewer  # 传递viewer实例以便访问计算值缓存
         )
 
         save_coating_table_to_database(
@@ -2040,6 +2787,94 @@ def validate_coating_table_cell(column_name: str, value: str, tip_widget, table_
     safe_set_text_and_color(tip_widget, "", "black")
     return "ok"
 
+
+def _dn_ask_continue_or_clear(viewer, table, row, col, warning_msg: str) -> bool:
+    """弹出是/否；选「否」则清空单元格并返回 False，选「是」返回 True。"""
+    box = QMessageBox(viewer)
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle("提示")
+    box.setText(warning_msg)
+    box.addButton("是", QMessageBox.YesRole)
+    btn_no = box.addButton("否", QMessageBox.NoRole)
+    box.setDefaultButton(btn_no)
+    box.exec_()
+    if box.clickedButton() == btn_no:
+        item = table.item(row, col)
+        if item:
+            item.setText("")
+        else:
+            table.setItem(row, col, QTableWidgetItem(""))
+        if getattr(viewer, "line_tip", None):
+            safe_set_text_and_color(viewer.line_tip, "", "black")
+        return False
+    return True
+
+
+def apply_dn_standard_range_user_prompt(viewer, table, row, col, value: str) -> bool:
+    """
+    在已通过「公称直径可填范围表」等原有校验后调用。
+    九种管壳式产品型式：先按 GB/T 150 询问小于 150mm；再按 GB/T 151 仅对超过型式上限询问。
+    用户选「否」则清空该单元格并返回 False，否则返回 True。
+    非「公称直径*」或非壳/管程数值列、或无需弹窗时返回 True。
+    """
+    if not value or not str(value).strip():
+        return True
+    try:
+        param_item = table.item(row, 1)
+        if not param_item or param_item.text().strip() != "公称直径*":
+            return True
+        hi = table.horizontalHeaderItem(col)
+        col_name = hi.text().strip() if hi else ""
+        if col_name not in ("壳程数值", "管程数值"):
+            return True
+        dn_val = int(float(value))
+    except Exception:
+        return True
+
+    try:
+        from modules.condition_input.funcs.funcs_def_check import (
+            _get_raw_product_form_from_product_db as _get_raw_product_form,
+        )
+
+        raw_form = (_get_raw_product_form(table) or "").strip().upper()
+        removable_for_gb151 = {"AEU", "BEU", "AES", "BES", "AKU", "BKU"}
+        non_removable_for_gb151 = {"AEM", "BEM", "NEN"}
+        gb150_shell_tube = removable_for_gb151 | non_removable_for_gb151
+
+        if raw_form in gb150_shell_tube and dn_val < 150:
+            if not _dn_ask_continue_or_clear(
+                viewer,
+                table,
+                row,
+                col,
+                "根据 GB/T 150 要求，公称直径不应小于 150mm，是否继续？",
+            ):
+                return False
+
+        if raw_form in removable_for_gb151 and dn_val > 2600:
+            if not _dn_ask_continue_or_clear(
+                viewer,
+                table,
+                row,
+                col,
+                "根据 GB/T 151 要求，可抽管束管壳式热交换器公称直径不大于 2600mm，是否继续？",
+            ):
+                return False
+        elif raw_form in non_removable_for_gb151 and dn_val > 6000:
+            if not _dn_ask_continue_or_clear(
+                viewer,
+                table,
+                row,
+                col,
+                "根据 GB/T 151 要求，不可抽管束管壳式热交换器公称直径不大于 6000mm，是否继续？",
+            ):
+                return False
+    except Exception:
+        pass
+
+    return True
+
+
 def dispatch_cell_validation(viewer, table, row, col, param_name, column_name, value, *args, **kwargs):
     print(f"[调试] dispatch_cell_validation: col={column_name}, value={value}")
 
@@ -2050,7 +2885,40 @@ def dispatch_cell_validation(viewer, table, row, col, param_name, column_name, v
         return "ok"
 
     if mode == "design":
-        return validate_design_table_cell(param_name, column_name, value, viewer.line_tip, table, col)
+        # 1) 先执行原有校验（含公称直径可填范围表等）
+        param_name_for_validation = param_name
+        column_name_for_validation = column_name
+        try:
+            from modules.condition_input.funcs.funcs_def_check import get_param_name as _get_param_name
+
+            if not str(param_name or "").strip():
+                param_name_for_validation = _get_param_name(table, row)
+            if not str(column_name or "").strip():
+                hi = table.horizontalHeaderItem(col)
+                column_name_for_validation = hi.text().strip() if hi else ""
+        except Exception:
+            pass
+
+        result = validate_design_table_cell(
+            param_name_for_validation,
+            column_name_for_validation,
+            value,
+            viewer.line_tip,
+            table,
+            col,
+        )
+        if result == "error":
+            return result
+
+        # 2) 原校验通过后，再叠加产品型式下的公称直径标准范围（是/否；与导入校验共用）
+        if (
+            param_name_for_validation == "公称直径*"
+            and column_name_for_validation in ("壳程数值", "管程数值")
+        ):
+            if not apply_dn_standard_range_user_prompt(viewer, table, row, col, value):
+                return "ok"
+
+        return result
 
     elif mode == "general":
         if column_name != "数值":
@@ -2096,70 +2964,259 @@ def dispatch_cell_validation(viewer, table, row, col, param_name, column_name, v
 
 """参考数据导入相关函数"""
 
-def get_ref_data_excel_path(product_id: int) -> str:
+
+def _get_product_folder_abs_from_active_db(product_id) -> str:
+    """产品设计活动表中的「产品文件夹绝对路径」，无则返回空字符串。"""
+    if not product_id:
+        return ""
+    try:
+        connection = get_connection(**db_config_2)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT `产品文件夹绝对路径` FROM `产品设计活动表` WHERE `产品ID` = %s LIMIT 1",
+                (product_id,),
+            )
+            row = cursor.fetchone()
+        connection.close()
+        if not row:
+            return ""
+        raw = row.get("产品文件夹绝对路径") if isinstance(row, dict) else row[0]
+        return (raw or "").strip().strip("'\"")
+    except Exception as e:
+        print(f"[_get_product_folder_abs_from_active_db] {e}")
+        return ""
+
+
+def get_expected_condition_xlsx_path(product_id, require_exists: bool = False) -> str:
     """
-    给定产品ID，查询并返回对应的 条件输入数据表.xlsx 完整路径
+    解析「条件输入数据表.xlsx」的期望绝对路径。
+    require_exists=True 时文件不存在则抛出 FileNotFoundError。
     """
     serial = ""
-    # ✅ 遍历 product_table_row_status，用 product_id 匹配行
     for row, status in bianl.product_table_row_status.items():
-        if isinstance(status, dict):
-            if str(status.get("product_id")) == str(product_id):
-                serial = status.get("old_serial", "") or f"{row+1:03d}"
-                break
+        if isinstance(status, dict) and str(status.get("product_id")) == str(product_id):
+            serial = status.get("old_serial", "") or f"{row + 1:03d}"
+            break
 
+    connection = get_connection(**db_config_3)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT `项目ID`, `产品编号`, `产品名称`, `设备位号`
+            FROM `产品需求表`
+            WHERE `产品ID` = %s
+            LIMIT 1
+            """,
+            (product_id,),
+        )
+        product_row = cursor.fetchone()
+    connection.close()
+
+    if not product_row:
+        raise ValueError(f"未找到产品ID {product_id} 的产品需求信息。")
+
+    project_id = product_row["项目ID"]
+    product_code = product_row["产品编号"]
+    product_name = product_row["产品名称"]
+    device_loc_id = product_row["设备位号"]
+
+    connection = get_connection(**db_config_4)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT `项目保存路径`,`项目名称`,`业主名称`
+            FROM `项目需求表`
+            WHERE `项目ID` = %s
+            LIMIT 1
+            """,
+            (project_id,),
+        )
+        project_row = cursor.fetchone()
+    connection.close()
+
+    if not project_row:
+        raise ValueError(f"未找到项目ID {project_id} 的项目信息。")
+
+    project_save_path = project_row["项目保存路径"]
+    project_path = project_row["项目名称"]
+    yezhu_path = project_row["业主名称"]
+    pinjie_path = f"{yezhu_path}_{project_path}"
+
+    parts = [serial, product_name, device_loc_id, product_code]
+    folder_name = "_".join([str(p).strip() for p in parts if p and str(p).strip()])
+
+    full_path = os.path.normpath(
+        os.path.join(project_save_path, pinjie_path, folder_name, "条件输入数据表.xlsx")
+    )
+
+    if require_exists and not os.path.isfile(full_path):
+        raise FileNotFoundError(f"未找到文件：{full_path}")
+    return full_path
+
+
+def get_expected_product_local_folder(product_id):
+    """
+    期望的产品本地文件夹（绝对路径）。
+    优先「产品设计活动表.产品文件夹绝对路径」；否则按项目路径 + 产品子目录规则拼接。
+    返回 (folder_or_None, err_message)。
+    """
+    if not product_id:
+        return None, "产品ID为空"
     try:
-        # 第一步：连接产品需求库，查产品需求表
-        connection = get_connection(**db_config_3)
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT `项目ID`, `产品编号`, `产品名称`, `设备位号`
-                FROM `产品需求表`
-                WHERE `产品ID` = %s
-                LIMIT 1
-            """, (product_id,))
-            product_row = cursor.fetchone()
-        connection.close()
+        db_folder = _get_product_folder_abs_from_active_db(product_id)
+        if db_folder:
+            return os.path.normpath(db_folder), ""
+        xlsx = get_expected_condition_xlsx_path(product_id, require_exists=False)
+        return os.path.dirname(xlsx), ""
+    except Exception as e:
+        print(f"[get_expected_product_local_folder] {e}")
+        return None, str(e)
 
-        if not product_row:
-            raise ValueError(f"未找到产品ID {product_id} 的产品需求信息。")
 
-        project_id = product_row['项目ID']
-        product_code = product_row['产品编号']
-        product_name = product_row['产品名称']
-        device_loc_id = product_row['设备位号']
+def fill_table_widget_export(table_widget, headers, rows, index_header=None):
+    """
+    与 DesignConditionInputViewer.fill_table_widget 对齐的填充逻辑，用于本地恢复写 Excel（不应用 NEN 特殊只读）。
+    """
+    import copy
 
-        # 第二步：连接项目需求库，查项目需求表
-        connection = get_connection(**db_config_4)
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT `项目保存路径`,`项目名称`,`业主名称`
-                FROM `项目需求表`
-                WHERE `项目ID` = %s
-                LIMIT 1
-            """, (project_id,))
-            project_row = cursor.fetchone()
-        connection.close()
+    rows = copy.deepcopy(rows) if rows else []
+    if table_widget.objectName() == "tableWidget_design_data":
+        rows = [row for row in rows if "[工况" not in str(row.get("参数名称", ""))]
+        if index_header and rows:
+            for idx, row in enumerate(rows):
+                row[index_header] = idx + 1
 
-        if not project_row:
-            raise ValueError(f"未找到项目ID {project_id} 的项目信息。")
+    clean_headers = headers.copy()
+    if index_header in clean_headers:
+        clean_headers.remove(index_header)
 
-        project_save_path = project_row['项目保存路径']
-        project_path = project_row['项目名称']
-        yezhu_path = project_row['业主名称']
-        pinjie_path = f"{yezhu_path}_{project_path}"
+    extra_col = 1 if index_header else 0
+    table_widget.clear()
+    table_widget.setColumnCount(len(clean_headers) + extra_col)
+    table_widget.setRowCount(len(rows))
 
-        # ✅ 拼接文件夹名：序号_产品名称_产品编号_设备位号（自动跳过空值）
-        parts = [serial, product_name, device_loc_id, product_code]
-        folder_name = "_".join([str(p).strip() for p in parts if p and str(p).strip()])
+    header_labels = [index_header] + clean_headers if index_header else clean_headers
 
-        full_path = os.path.join(project_save_path, pinjie_path, folder_name, "条件输入数据表.xlsx")
+    for col_index, header_text in enumerate(header_labels):
+        display_text = "序号" if index_header and col_index == 0 else header_text
+        item = QTableWidgetItem(display_text)
+        item.setData(Qt.UserRole, header_text)
+        item.setTextAlignment(Qt.AlignCenter)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        table_widget.setHorizontalHeaderItem(col_index, item)
 
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"未找到文件：{full_path}")
+    table_widget.verticalHeader().setVisible(False)
 
-        return full_path
+    for row_idx, row in enumerate(rows):
+        if index_header:
+            index_value = row.get(index_header, "")
+            index_item = QTableWidgetItem(str(index_value))
+            index_item.setTextAlignment(Qt.AlignCenter)
+            index_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            table_widget.setItem(row_idx, 0, index_item)
 
+        for col_idx, key in enumerate(clean_headers):
+            value = str(row.get(key, ""))
+            item = QTableWidgetItem(value)
+
+            is_name_column = col_idx == 0
+            is_code_column = key == "规范/标准代号"
+            is_unit_column = key == "参数单位"
+            if is_name_column:
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            elif is_unit_column:
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            else:
+                if is_code_column:
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                else:
+                    item.setTextAlignment(Qt.AlignCenter)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEditable | Qt.ItemIsEnabled)
+
+            table_widget.setItem(row_idx, col_idx + extra_col, item)
+
+    if table_widget.objectName() == "tableWidget_coating_data":
+        table_widget.logical_headers = [
+            "执行标准/规范", "用途", "油漆类别", "颜色", "干膜厚度（μm）", "涂漆面积", "备注"
+        ]
+
+    table_widget.resizeColumnsToContents()
+
+
+def hydrate_stub_viewer_for_local_xlsx(stub, product_id) -> bool:
+    """
+    将产品设计活动库五表数据载入 stub 上的 QTableWidget，供 save_local_condition_file 写出。
+    无库数据时返回 False（调用方仍可保留空模板文件）。
+    """
+    try:
+        from main import get_product_form_from_db
+
+        product_form = get_product_form_from_db(product_id) or "all"
+    except Exception:
+        product_form = "all"
+
+    result = load_design_data_if_exists(product_id, product_form)
+    if not result or not result.get("import_status"):
+        return False
+
+    data = result["数据"]
+    fill_table_widget_export(
+        stub.tableWidget_product_std,
+        data["产品标准"]["headers"],
+        data["产品标准"]["rows"],
+        index_header=data["产品标准"].get("prepend_index_header"),
+    )
+    fill_table_widget_export(
+        stub.tableWidget_design_data,
+        data["设计数据"]["headers"],
+        data["设计数据"]["rows"],
+        index_header=data["设计数据"].get("prepend_index_header"),
+    )
+    fill_table_widget_export(
+        stub.tableWidget_general_data,
+        data["通用数据"]["headers"],
+        data["通用数据"]["rows"],
+        index_header=data["通用数据"].get("prepend_index_header"),
+    )
+    capture_default_order(stub.tableWidget_design_data)
+
+    set_multilevel_headers(
+        stub.tableWidget_trail_data,
+        top_headers=["接头种类", "检测方法", "壳程", "管程"],
+        sub_headers=["", "", "技术等级", "检测比例%", "合格级别", "技术等级", "检测比例%", "合格级别"],
+        span_map=[(0, 1), (1, 1), (2, 3), (5, 3)],
+    )
+    render_grouped_table(
+        stub.tableWidget_trail_data,
+        data["检测数据"]["格式化"],
+        [
+            "接头种类", "检测方法",
+            "壳程_技术等级", "壳程_检测比例", "壳程_合格级别",
+            "管程_技术等级", "管程_检测比例", "管程_合格级别",
+        ],
+        group_key_column=0,
+    )
+
+    coating_std_value = ""
+    for row in data["产品标准"]["rows"]:
+        if row.get("规范/标准名称", "").strip() == "涂漆标准":
+            coating_std_value = row.get("规范/标准代号", "").strip()
+            break
+    render_coating_table(stub.tableWidget_coating_data, data["涂漆数据"]["格式化"], coating_std_value)
+    return True
+
+
+def get_ref_data_excel_path(product_id: int) -> str:
+    """
+    给定产品ID，查询并返回对应的 条件输入数据表.xlsx 完整路径（文件须已存在）。
+    """
+    try:
+        return get_expected_condition_xlsx_path(product_id, require_exists=True)
     except Exception as e:
         print(f"[ERROR] get_ref_data_excel_path 出错: {e}")
         raise
@@ -2370,7 +3427,7 @@ def import_multi_conditions_from_excel(excel_path: str, product_id: int, viewer:
     finally:
         conn.close()
 
-def update_general_data_table_from_excel(excel_path: str, table_widget):
+def update_general_data_table_from_excel(excel_path: str, table_widget, viewer=None):
     """
     从Excel中读取‘通用数据’Sheet，按参数名称匹配，更新‘参数值’。
     多选项字段将自动识别并标准化为“；”分隔格式。
@@ -2385,6 +3442,7 @@ def update_general_data_table_from_excel(excel_path: str, table_widget):
             for _, row in df.iterrows()
         }
 
+        # 外径系列、外径的导入值在下方按「是否以外径为基准」统一处理后再记录/使用
         for row in range(table_widget.rowCount()):
             name_item = table_widget.item(row, 1)  # 第1列是参数名称
             value_item = table_widget.item(row, 3)  # 第3列是参数值
@@ -2396,12 +3454,72 @@ def update_general_data_table_from_excel(excel_path: str, table_widget):
             if name not in data_map:
                 continue
 
+            # 外径系列、外径：不直接复制导入数据，以配置库+公称直径联动为准
+            if name in ("外径系列", "外径"):
+                continue
+
             raw_val = data_map[name]
             config = GENERAL_PARAM_CONFIG.get(name)
 
             # 不做修改，保留原始值，等待后续 validate_all_tables_after_import() 中统一处理
             value_item.setText(raw_val)
 
+        # === 导入校验：以「是否以外径为基准」为准，处理外径系列、外径 ===
+        base_val = (
+            data_map.get("是否以外径为基准*") or data_map.get("是否已外径为基准") or ""
+        ).strip()
+        if viewer is not None:
+            table = table_widget
+            if base_val == "否":
+                # 不论导入的外径系列/外径或配置库是什么，外径系列和外径均置为 "/"
+                imported_series = data_map.get("外径系列", "").strip()
+                imported_diameter = data_map.get("外径", "").strip()
+                need_tip = (imported_series != "/" or imported_diameter != "/")
+                for r in range(table.rowCount()):
+                    name_item = table.item(r, 1)
+                    if not name_item:
+                        continue
+                    param_name = name_item.text().strip()
+                    if param_name in ("外径系列", "外径"):
+                        val_item = table.item(r, 3)
+                        if val_item is None:
+                            val_item = QTableWidgetItem()
+                            table.setItem(r, 3, val_item)
+                        val_item.setText("/")
+                # 仅当导入数据中外径系列或外径不全是"/"时再提示
+                if need_tip:
+                    tip_list = getattr(viewer, "import_tip_list", None)
+                    if tip_list is not None:
+                        tip_list.append("已根据「是否以外径为基准」为否，将外径系列、外径置为「/」。")
+            elif base_val == "是":
+                # base_val 为“是”：
+                #   - 若导入的外径系列为“英制系列”或“公制系列”，直接使用导入值；
+                #   - 否则按配置库外径系列填充，并给出提示。
+                imported_series = data_map.get("外径系列", "").strip()
+                # 记录导入值（仅用于后续可能的提示或调试）
+                viewer._imported_outer_series = imported_series
+
+                if _is_shell_and_tube(viewer):
+                    allowed_series = {"英制系列", "公制系列"}
+                    if imported_series in allowed_series:
+                        # 导入值是合法系列：以用户填写为准
+                        try:
+                            _set_general_outer_diameter_series(viewer, imported_series)
+                        except Exception as e:
+                            raise RuntimeError(f"设置导入外径系列失败：{str(e)}")
+                    else:
+                        # 导入值非法或为空：按配置库判定系列，并提示用户
+                        determined_series = _determine_diameter_series()
+                        if determined_series:
+                            try:
+                                _set_general_outer_diameter_series(viewer, determined_series)
+                            except Exception as e:
+                                raise RuntimeError(f"设置配置库外径系列失败：{str(e)}")
+                            tip_list = getattr(viewer, "import_tip_list", None)
+                            if tip_list is not None:
+                                tip_list.append(
+                                    f"⚠️ 导入外径系列为“{imported_series or '空'}”，无效，已按配置库外径系列“{determined_series}”处理。"
+                                )
 
     except Exception as e:
         raise RuntimeError(f"导入通用数据失败：{str(e)}")
@@ -2571,7 +3689,7 @@ def import_all_reference_data(excel_path: str, viewer: QWidget):
     update_product_standard_table_from_excel(excel_path, viewer.tableWidget_product_std)
     update_design_data_table_from_excel(excel_path, viewer.tableWidget_design_data)
     import_multi_conditions_from_excel(excel_path, viewer.product_id, viewer)
-    update_general_data_table_from_excel(excel_path, viewer.tableWidget_general_data)
+    update_general_data_table_from_excel(excel_path, viewer.tableWidget_general_data, viewer)
     update_trail_data_table_from_excel(excel_path, viewer.tableWidget_trail_data)
     update_coating_data_table_from_excel(
         excel_path,
@@ -2617,6 +3735,13 @@ def validate_all_tables_after_import(viewer: QWidget):
                 tip_list.append(f"[设计数据] {param_name} - {col_name}: ❌ 非法值，已清空")
             elif result == "warn":
                 tip_list.append(f"[设计数据] {param_name} - {col_name}: ⚠️ 可疑值")
+
+            # 原可填范围表校验通过后，导入时同样按产品型式做公称直径标准范围询问（如 AEM 导入 6500）
+            if result != "error" and param_name == "公称直径*" and col_name in ("壳程数值", "管程数值"):
+                if not apply_dn_standard_range_user_prompt(viewer, table, row, col_index, val):
+                    tip_list.append(
+                        f"[设计数据] {param_name} - {col_name}: 公称直径超出标准允许范围，已按选择清空"
+                    )
 
     # ✅ 通用数据表
     table = viewer.tableWidget_general_data
@@ -2728,22 +3853,21 @@ def validate_all_tables_after_import(viewer: QWidget):
             elif result == "warn":
                 tip_list.append(f"[涂漆数据] 第{row+1}行 - {header}: ⚠️ 可疑值")
 
-    # ✅ 合并导入校验过程中记录的提示
+    # ✅ 合并导入校验过程中记录的提示（包括通用数据导入阶段关于外径系列的提示）
     if hasattr(viewer, "import_tip_list"):
         tip_list.extend(viewer.import_tip_list)
+
+    # 导入完成后触发外径自动填充（若开启"以外径为基准"），按配置库+公称直径计算外径
+    try:
+        autofill_outer_diameter(viewer)
+    except Exception:
+        pass
 
     # ✅ 显示提示：主显示 + tooltip 显示完整内容
     tip_message = "\n".join(tip_list) if tip_list else "✅ 所有导入数据校验通过。"
     viewer.line_tip.setText(tip_message[:80].replace("\n", " | "))
     viewer.line_tip.setToolTip(tip_message)
     viewer.line_tip.setStyleSheet("color: black;")  # ✅ 强制黑色字体
-
-    # 1206新修改-外径、外径系列、是否已外径为基准、公称直径联动
-    # === 新增：导入完成后触发一次外径自动填充（若开启“以外径为基准”） ===
-    try:
-        autofill_outer_diameter(viewer)
-    except Exception:
-        pass
 
 def trigger_all_cross_table_relations(viewer: QWidget):
     """
@@ -2813,12 +3937,40 @@ def is_file_locked(filepath: str) -> bool:
     except IOError:
         return True
 
-def save_local_condition_file(product_id: int, viewer: QWidget) -> bool:
+
+def _notify_local_condition_xlsx_missing(viewer: QWidget, detail: str) -> None:
+    """
+    本地「条件输入数据表.xlsx」不存在或无法打开时提示（标题：保存失败）；
+    正文仅含：具体路径/错误说明 + 前往项目管理恢复的指引。
+    """
+    parent = viewer if viewer is not None else getattr(bianl, "main_window", None)
+    if parent is None:
+        parent = viewer
+    first = (detail or "").strip()
+    second = "如需恢复该文件，请前往「项目管理」，选中当前产品后按提示恢复本地产品文件夹。"
+    msg = f"{first}\n\n{second}" if first else second
+    QMessageBox.warning(parent, "保存失败", msg)
+
+
+def save_local_condition_file(product_id: int, viewer: QWidget, local_path_override: str = None) -> bool:
     """
     保存界面数据到本地 Excel，如果文件被占用则提示并返回 False。
     —— 改动：写出时使用“默认顺序”的行索引，确保导出的 Excel 始终是固定顺序。
+    local_path_override：若指定则写出到此路径（用于本地文件夹恢复时与活动库「产品文件夹绝对路径」一致）。
     """
-    local_path = get_ref_data_excel_path(product_id)
+    try:
+        if local_path_override:
+            local_path = os.path.normpath(local_path_override)
+        else:
+            local_path = get_ref_data_excel_path(product_id)
+    except FileNotFoundError as e:
+        detail = str(e)
+        print(f"未找到本地条件数据路径：{detail}")
+        if viewer is not None:
+            setattr(viewer, "_local_condition_xlsx_missing", True)
+        _notify_local_condition_xlsx_missing(viewer, detail)
+        return False
+
     print(f"{local_path}")
     if is_file_locked(local_path):
         QMessageBox.warning(viewer, "文件占用", f"请先关闭本地文件：\n{local_path}\n然后重试保存。")
@@ -2827,6 +3979,9 @@ def save_local_condition_file(product_id: int, viewer: QWidget) -> bool:
         wb = load_workbook(local_path)
     except FileNotFoundError:
         print(f"未找到本地条件数据文件：{local_path}")
+        if viewer is not None:
+            setattr(viewer, "_local_condition_xlsx_missing", True)
+        _notify_local_condition_xlsx_missing(viewer, f"未找到文件：{local_path}")
         return False
     # === 关键：获取每张表的“默认写出顺序”索引 ===
     order_std     = get_row_index_order_for_default_write(viewer.tableWidget_product_std)
@@ -2904,6 +4059,8 @@ def save_local_condition_file(product_id: int, viewer: QWidget) -> bool:
 
     wb.save(local_path)
     print(f"✅ 本地条件数据表已成功保存到: {local_path}")
+    if viewer is not None:
+        setattr(viewer, "_local_condition_xlsx_missing", False)
     return True
 
 def update_sheet_from_table(sheet, table_widget, col_start=0, col_end=None,
@@ -3530,6 +4687,7 @@ def get_product_type_from_db(product_id):
 def fetch_general_dropdown_config():
     """
     从数据库读取通用数据表的下拉字段配置
+    注意：外径系列已从下拉框配置中移除，改为只读显示，值由user_config决定
     """
     config = {}
     conn = get_connection(**db_config_1)
@@ -3542,6 +4700,10 @@ def fetch_general_dropdown_config():
             rows = cursor.fetchall()
             for row in rows:
                 name = row["参数名称"]
+                # # === 移除外径系列的下拉框配置 ===
+                # if name == "外径系列":
+                #     continue  # 跳过外径系列，不添加到下拉框配置中
+                
                 typ = row["type"]
                 editable = str(row["editable"]).lower() in ("true", "1", "是")
                 try:

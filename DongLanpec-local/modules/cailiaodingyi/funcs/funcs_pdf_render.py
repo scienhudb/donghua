@@ -13,8 +13,10 @@ from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
 from modules.cailiaodingyi.controllers.combo import ComboDelegate, ComboPopupEventFilter, DynamicOptionsDelegate, \
     on_material_field_changed_col, ProcessPerColumnDelegate, NonNegativeDoubleDelegate, RowFillComboDelegate, \
     BulkFillDynamicOptionsDelegate, MultiSelectRowComboDelegate, MultiSelectDynamicOptionsDelegate
-from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options,get_fastener_bolt_type_options,\
-    get_fastener_component_options_by_template_id,load_updated_fastener_define_data
+from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options, get_fastener_bolt_type_options, \
+    get_fastener_component_options_by_template_id, load_updated_fastener_define_data, \
+    get_fastener_root_series_options, DEBUG_VERBOSE_DEFINE_UI
+from modules.condition_input.funcs.funcs_cdt_input import get_opening_weld_joint_default
 from modules.cailiaodingyi.funcs.funcs_pdf_input import load_guankou_param_structure_from_db, load_dropdown_options, \
     query_unassigned_codes, query_codes_for_tab_raw,get_fastener_param_structure_from_db
 from modules.cailiaodingyi.controllers.tooltip_utils import ensure_table_tooltip_updater
@@ -181,7 +183,8 @@ def find_material_groups_fuzzy_strict(table):
     if not groups:
         print("[材料联动][错误] 未识别到任何【满四项】的材料字段组")
     else:
-        print("[材料联动] 严格识别到材料组：", groups)
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print("[材料联动] 严格识别到材料组：", groups)
 
     return groups, row2field, row2group
 
@@ -887,6 +890,7 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
     install_selection_debug(table)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 关键：禁用默认触发
     table.setProperty("user_edited_corrosion", False)
+    table.setProperty("user_edited_opening_weld_joint_coeff", False)
 
     # 安装我们的过滤器（持有引用避免被 GC）
     flt = ComboPopupEventFilter(table)
@@ -1028,6 +1032,28 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                     self.highlight_row(r)
                 return
 
+            # 针对“所属元件开孔处焊接接头系数”：强制用户输入值 >= 默认值 D（存放在 UserRole+1 中）
+            if (self.pname or "") == "所属元件开孔处焊接接头系数" and self.table:
+                d_val = None
+                try:
+                    it = self.table.item(r, c)
+                    if it is not None:
+                        d = it.data(Qt.UserRole + 1)
+                        if d is not None and str(d).strip() != "":
+                            d_val = float(d)
+                except Exception:
+                    d_val = None
+
+                if d_val is not None and v < d_val:
+                    show_tip(f"参数“{self.pname}”的值应不小于默认值 {d_val}！")
+                    model.setData(index, "")
+                    self._restore_item_text(model, index, "")
+                    if self.table:
+                        self.table.setCurrentCell(r, c)
+                        self.highlight_row(r)
+                    return
+
+
             # 先写回当前格
             model.setData(index, txt)
             self._restore_item_text(model, index, txt)
@@ -1066,6 +1092,7 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                 self.table.setCurrentCell(r, c)
                 self.highlight_row(r)
             try:
+                # 标记“接管腐蚀裕量”被用户编辑过
                 if "腐蚀裕量" in (self.pname or "") and self.table:
                     self.table.setProperty("user_edited_corrosion", True)
                     v = getattr(self, "viewer", None)
@@ -1078,12 +1105,17 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                                 setattr(v, "_corrosion_user_override_tabs", set())
                                 s = getattr(v, "_corrosion_user_override_tabs")
                             s.add(name)
+
+                # 标记“所属元件开孔处焊接接头系数”被用户编辑过
+                if (self.pname or "") == "所属元件开孔处焊接接头系数" and self.table:
+                    self.table.setProperty("user_edited_opening_weld_joint_coeff", True)
             except Exception:
                 pass
 
     # 这几个是你要改成数值输入的行名（可按需要继续加）
     NUM_GE0 = {
         "接管腐蚀裕量(mm)",
+        "所属元件开孔处焊接接头系数",
         "接管焊缝金属截面积(mm²)",
         "接管覆层厚度(mm)",
         "接管法兰覆层厚度(mm)",
@@ -1147,8 +1179,26 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
                     table.setItemDelegateForRow(row, CheckComboDelegate(options, table, enable_select_all=enable_select_all))
 
             elif control_type == "empty":
-                item = QTableWidgetItem("")
+                # 2列+empty 类型：如果活动库里已有值（如“所属元件开孔处焊接接头系数”），这里要把值渲染出来
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignCenter)
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+                # 为“所属元件开孔处焊接接头系数”写入默认值到 UserRole+1，供数值校验使用
+                if param_name == "所属元件开孔处焊接接头系数":
+                    try:
+                        product_id = getattr(viewer_instance, "product_id", None)
+                        cur_tab = None
+                        tw = getattr(viewer_instance, "guankou_tabWidget", None)
+                        if product_id and tw and tw.currentIndex() >= 0 and tw.tabText(tw.currentIndex()) != "+":
+                            cur_tab = tw.tabText(tw.currentIndex())
+                        if product_id and cur_tab:
+                            default_val = get_opening_weld_joint_default(product_id, cur_tab)
+                            if default_val is not None:
+                                item.setData(Qt.UserRole + 1, float(default_val))
+                    except Exception as e:
+                        print(f"[警告] 设置所属元件开孔处焊接接头系数默认值失败: {e}")
+
                 table.setItem(row, 1, item)
 
         elif structure == "4列":
@@ -1215,6 +1265,11 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
     for r, rule, pname in numeric_rows:
         if r in found_set:
             continue
+        # 确保该行对应的数值单元格是可编辑的（包括 2列/4列 结构）
+        for c in (1, 2, 3):
+            it = table.item(r, c)
+            if it:
+                it.setFlags(it.flags() | Qt.ItemIsEditable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         table.setItemDelegateForRow(r, NumericDelegate(rule, pname, table, viewer_instance))
 
 
@@ -1404,12 +1459,10 @@ def _install_tooltip_updater(table):
 # 11.16设备法兰
 def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
     """渲染设备法兰紧固件参数到UI - 支持PNO.x格式的tab页面"""
-    print(
-        f"[DBG][fastener_render] 开始渲染设备法兰紧固件，数据条数={0 if fastener_para_info is None else len(fastener_para_info)}")
-
     # 获取参数结构
     param_structures = get_fastener_param_structure_from_db()
-    print(f"[DBG][fastener_render] 参数结构: {param_structures}")
+    if DEBUG_VERBOSE_DEFINE_UI:
+        print(f"[DBG][fastener_render] 参数结构: {param_structures}")
 
     # 根据参数结构确定列数
     max_cols = 3  # 默认3列：参数名 + 参数值1 + 参数值2
@@ -1423,11 +1476,17 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
             max_cols = 3  # 2列结构也使用3列表格，但会合并单元格
 
     template_id = fastener_para_info[0].get('模板ID') if fastener_para_info else None
-    print(f"[DBG][fastener_render] 模板ID: {template_id}")
+    if DEBUG_VERBOSE_DEFINE_UI:
+        print(f"[DBG][fastener_render] 模板ID: {template_id}")
     component_options = get_fastener_component_options_by_template_id(template_id)
-    print(f"[DBG][fastener_render] 元件所属候选项: {component_options}")
+    if DEBUG_VERBOSE_DEFINE_UI:
+        print(f"[DBG][fastener_render] 元件所属候选项: {component_options}")
     bolt_type_options = get_fastener_bolt_type_options()
-    print(f"[DBG][fastener_render] 螺柱型式候选项: {bolt_type_options}")
+    if DEBUG_VERBOSE_DEFINE_UI:
+        print(f"[DBG][fastener_render] 螺柱型式候选项: {bolt_type_options}")
+    root_series_options = get_fastener_root_series_options()
+    if DEBUG_VERBOSE_DEFINE_UI:
+        print(f"[DBG][fastener_render] 螺柱根径系列候选项: {root_series_options}")
     try:
         setattr(viewer_instance, 'fastener_component_all_options', component_options or [])
     except Exception:
@@ -1478,12 +1537,14 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
         # 如果没有数据，创建默认的PNO.1
         param_map = {"PNO.1": []}
 
-    print(f"[DBG][fastener_render] 参数分组: {list(param_map.keys())}")
+    if DEBUG_VERBOSE_DEFINE_UI:
+        print(f"[DBG][fastener_render] 参数分组: {list(param_map.keys())}")
 
     # 获取或创建tabWidget - 设备法兰紧固件使用tabWidget_3
     tw = getattr(viewer_instance, "tabWidget_3", None)
     if not tw:
-        print("[DBG][fastener_render] 未找到tabWidget_3")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print("[DBG][fastener_render] 未找到tabWidget_3")
         return
     # 清空现有tab页（保留+号tab）
     has_plus = (tw.count() > 0 and tw.tabText(tw.count() - 1).strip() in {"+", "＋"})
@@ -1513,13 +1574,12 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
         dropdown_options = {
             "元件所属": filtered_component_opts,
             "螺柱型式": bolt_type_options,
+            "螺柱根径系列": root_series_options,
         }
         try:
             from modules.cailiaodingyi.funcs.funcs_pdf_input import get_options_for_param
             forging_opts = get_options_for_param("锻件级别") or []
             dropdown_options["锻件级别"] = [str(x).strip() for x in forging_opts if str(x).strip()]
-            proc_opts = get_options_for_param("表面处理工艺") or []
-            dropdown_options["表面处理工艺"] = [str(x).strip() for x in proc_opts if str(x).strip()]
         except Exception:
             pass
         if idx == 0:
@@ -1529,7 +1589,8 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
             tables = page0.findChildren(QTableWidget) if page0 else []
             table = tables[0] if tables else getattr(viewer_instance, "tableWidget_define1_3", None)
             if table is None:
-                print("[DBG][fastener_render] 未找到tableWidget_define1_3")
+                if DEBUG_VERBOSE_DEFINE_UI:
+                    print("[DBG][fastener_render] 未找到tableWidget_define1_3")
                 return
             page0.setProperty("param_table", table)
             try:
@@ -1583,7 +1644,8 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
         # 渲染数据到表格
         _render_fastener_table_data(table, data, param_structures, dropdown_options, max_cols, viewer_instance)
 
-        print(f"[DBG][fastener_render] 完成渲染 {pno_label}，共 {table.rowCount()} 行")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[DBG][fastener_render] 完成渲染 {pno_label}，共 {table.rowCount()} 行")
 
     try:
         from modules.cailiaodingyi.controllers.add_tab import PlusTabManager
@@ -1612,14 +1674,17 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
                 tw.tabBar().customContextMenuRequested.connect(lambda pos: _on_fastener_tab_right_menu(viewer_instance, pos))
                 setattr(tw.tabBar(), "_fastener_context_wired", True)
         except Exception as e:
-            print(f"[DBG][fastener_render] 右键菜单绑定失败: {e}")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[DBG][fastener_render] 右键菜单绑定失败: {e}")
     except Exception as e:
-        print(f"[DBG][fastener_render] 初始化PlusTabManager失败: {e}")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[DBG][fastener_render] 初始化PlusTabManager失败: {e}")
 
     try:
         refresh_fastener_belonging_candidates(viewer_instance)
     except Exception as e:
-        print(f"[DBG][fastener_render] 初次刷新候选失败: {e}")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[DBG][fastener_render] 初次刷新候选失败: {e}")
 
 
 def _render_fastener_table_data(table, data, param_structures, dropdown_options, max_cols, viewer_instance=None):
@@ -1750,9 +1815,11 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
         if not display_map.get("表面处理工艺"):
             display_map["表面处理工艺"] = "/"
 
-        print(f"[DBG][fastener_render] 数据映射: {display_map}")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[DBG][fastener_render] 数据映射: {display_map}")
     else:
-        print(f"[DBG][fastener_render] 没有数据需要渲染")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[DBG][fastener_render] 没有数据需要渲染")
         # 如果没有数据，为每个参数设置默认值
         for param_name, structure, control_type, prefix in param_structures:
             if param_name == "元件名称":
@@ -1825,10 +1892,17 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
                 ensure_readonly_item(row, 1, display_val)
             else:
                 if param_name == "螺柱型式":
+                    # 螺柱型式：螺柱侧可编辑，下游一列只读占位
                     val1 = value_map.get(1, "")
                     display_val1 = str(val1) if val1 and str(val1) != "null" else ""
                     ensure_editable_item(row, 1, display_val1)
                     ensure_readonly_item(row, 2, "-")
+                elif param_name == "螺柱根径系列":
+                    # 螺柱根径系列：螺柱侧为下拉选择，螺母侧固定为斜杠"/"
+                    val1 = value_map.get(1, "")
+                    display_val1 = str(val1) if val1 and str(val1) != "null" else ""
+                    ensure_editable_item(row, 1, display_val1)
+                    ensure_readonly_item(row, 2, "/")
                 else:
                     for col in range(1, 3):
                         val = value_map.get(col, "")
@@ -1899,7 +1973,8 @@ def _render_fastener_table_data(table, data, param_structures, dropdown_options,
                 table.setItemDelegateForRow(r, dyn)
             install_copy_paste_shortcuts(table, groups, row2field, row2group)
         else:
-            print(f"[DBG][fastener_render] 未识别到材料四联组，跳过材料联动逻辑")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[DBG][fastener_render] 未识别到材料四联组，跳过材料联动逻辑")
 
     except Exception as e:
         # print(f"[DBG][fastener_render] 材料字段联动逻辑安装失败: {e}")

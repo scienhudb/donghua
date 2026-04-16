@@ -1,6 +1,113 @@
-from typing import Tuple
+from typing import Tuple, Set
 import re
+from modules.condition_input.funcs.db_cnt import get_connection
 
+# 0103新修改1-开始
+# 数据库配置（产品条件库）
+db_config_1 = {
+    'host': 'localhost',
+    'port': 3306,
+    'user': 'root',
+    'password': '123456',
+    'database': '产品条件库'
+}
+
+# 缓存变量，避免频繁查询数据库
+_dn_allowed_values_cache = {
+    '以内径为基准': None,
+    '以外径为基准': None
+}
+_raw_product_form_cache = {}
+
+
+def _get_raw_product_form_from_product_db(table_widget) -> str:
+    """
+    获取产品需求表中的原始“产品型式”（不做 all 映射）。
+    失败时返回空串。
+    """
+    try:
+        if not table_widget:
+            return ""
+        viewer = getattr(table_widget, "viewer", None)
+        product_id = getattr(viewer, "product_id", None) if viewer else None
+        if not product_id:
+            return ""
+
+        cached = _raw_product_form_cache.get(product_id)
+        if cached is not None:
+            return cached
+
+        from modules.chanpinguanli.common_usage import get_mysql_connection_product
+
+        conn = get_mysql_connection_product()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 产品型式 FROM 产品需求表 WHERE 产品ID = %s LIMIT 1",
+                    (product_id,)
+                )
+                row = cursor.fetchone()
+                raw_form = (row.get("产品型式", "") if isinstance(row, dict) else (row[0] if row else "")) or ""
+                raw_form = str(raw_form).strip()
+                _raw_product_form_cache[product_id] = raw_form
+                return raw_form
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[_get_raw_product_form_from_product_db] 查询失败: {e}")
+        return ""
+
+def fetch_dn_allowed_values_from_db(config_type: str) -> Set[int]:
+    """
+    从数据库读取公称直径允许值列表
+    - config_type: "以内径为基准" 或 "以外径为基准"
+    - 返回: 允许的公称直径值集合
+    """
+    # 先检查缓存
+    if _dn_allowed_values_cache.get(config_type) is not None:
+        return _dn_allowed_values_cache[config_type]
+    
+    allowed_values = set()
+    try:
+        conn = get_connection(**db_config_1)
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT `公称直径值`
+                FROM `公称直径允许值配置表`
+                WHERE `配置类型` = %s
+                ORDER BY `排序序号` ASC
+            """, (config_type,))
+            rows = cursor.fetchall()
+            for row in rows:
+                allowed_values.add(int(row['公称直径值']))
+        conn.close()
+        
+        # 更新缓存
+        _dn_allowed_values_cache[config_type] = allowed_values
+    except Exception as e:
+        print(f"[fetch_dn_allowed_values_from_db] 从数据库读取公称直径允许值失败: {e}")
+        # 如果数据库读取失败，返回空集合（或者可以返回默认值）
+        allowed_values = set()
+    
+    return allowed_values
+
+def get_dn_allowed_values(is_outer_by_diameter: bool) -> Set[int]:
+    """
+    根据"是否以外径为基准"参数值获取对应的公称直径允许值列表
+    - is_outer_by_diameter: True 表示"以外径为基准"，False 表示"以内径为基准"
+    - 返回: 允许的公称直径值集合
+    """
+    config_type = "以外径为基准" if is_outer_by_diameter else "以内径为基准"
+    return fetch_dn_allowed_values_from_db(config_type)
+
+def clear_dn_allowed_values_cache():
+    """清除缓存，用于数据更新后刷新"""
+    global _dn_allowed_values_cache
+    _dn_allowed_values_cache = {
+        '以内径为基准': None,
+        '以外径为基准': None
+    }
+# 0103新修改1-结束
 
 def get_param_name(table_widget, row):
     """获取当前表格行的参数名称（根据表格名称判断大表/弹窗）"""
@@ -33,8 +140,35 @@ def check_dn(value, tip_widget, param_name, column_name, table_widget, col_index
     except ValueError:
         return "error", "输入数据类型有误，请确认后输入"
 
-    if not (150 <= dn_val <= 4000):
-        return "error", "输入数值已超过GB/T 151-2014的适用范围，请核对后输入"
+    # 0103新修改2
+    # ✅ 新增：根据"是否以外径为基准*"参数值校验公称直径允许值（从数据库读取）
+    if table_widget:
+        try:
+            viewer = getattr(table_widget, "viewer", None)
+            if viewer:
+                # 读取通用数据表中的"是否以外径为基准*"参数值
+                general_table = getattr(viewer, "tableWidget_general_data", None)
+                if general_table:
+                    is_outer_by_diameter = False
+                    for r in range(general_table.rowCount()):
+                        name_item = general_table.item(r, 1)
+                        if name_item and name_item.text().strip() == "是否以外径为基准*":
+                            value_item = general_table.item(r, 3)
+                            if value_item:
+                                val = value_item.text().strip()
+                                # is_outer_by_diameter = (val == "是")
+                            break
+                    
+                    # # 从数据库读取对应的允许值列表
+                    # allowed_values = get_dn_allowed_values(is_outer_by_diameter)
+                    # if allowed_values and dn_val not in allowed_values:
+                    #     return "error", "公称直径输入值不符合规范要求，请核对后输入"
+        except Exception as e:
+            # 如果读取参数失败，跳过此校验，继续执行后续校验
+            print(f"[check_dn] 读取'是否以外径为基准*'参数或数据库允许值失败: {e}")
+
+    # if not (150 <= dn_val <= 4000):
+    #     return "error", "输入数值已超过GB/T 151-2014的适用范围，请核对后输入"
 
     dp_val = None
     dn_shell = None
@@ -78,8 +212,19 @@ def check_dn(value, tip_widget, param_name, column_name, table_widget, col_index
             if dn_val * dp_val > 27000:
                 return "error", "公称直径与设计压力乘积超过GB/T 151-2014的适用范围，请核对后输入"
 
+        # AKU/BKU 特殊规则：
+        # 仅当壳/管都已填写时，要求互不相等，且壳程 > 管程
+        raw_product_form = _get_raw_product_form_from_product_db(table_widget)
+        if raw_product_form in ("AKU", "BKU"):
+            if dn_shell is not None and dn_tube is not None:
+                if dn_shell == dn_tube:
+                    return "error", "AKU/BKU产品公称直径要求壳程与管程数值不同，请核对后输入"
+                if dn_shell < dn_tube:
+                    return "error", "AKU/BKU产品公称直径要求壳程数值大于管程数值，请核对后输入"
+
         if dn_shell is not None and dn_tube is not None:
-            if dn_shell != dn_tube:
+            # AKU/BKU 已有专属规则，不再提示“壳管不一致请确认”
+            if raw_product_form not in ("AKU", "BKU") and dn_shell != dn_tube:
                 return "warn", "管、壳程公称直径不一致，请确认"
 
     return "ok", ""

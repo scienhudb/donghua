@@ -277,6 +277,9 @@ def save_new_product(row,curr_row_serial,curr_row_product_name,curr_row_product_
         template_path = os.path.join(os.path.dirname(__file__), "条件输入数据表.xlsx")
         target_path = os.path.join(folder_path, "条件输入数据表.xlsx")
         shutil.copy(template_path, target_path)
+        template_path2 = os.path.join(os.path.dirname(__file__), "管口导入模板.xlsx")
+        target_path2 = os.path.join(folder_path, "管口导入模板.xlsx")
+        shutil.copy(template_path2, target_path2)
         print(f"[save_new_product] ✅ 模板文件复制完成: {target_path}")
 
         conn_pd = common_usage.get_mysql_connection_product()
@@ -292,6 +295,26 @@ def save_new_product(row,curr_row_serial,curr_row_product_name,curr_row_product_
         conn_pd.commit()
         cursor_pd.close()
         conn_pd.close()
+
+        # 活动库：写入产品设计活动表（产品ID、项目ID、产品文件夹绝对路径）
+        folder_abs = os.path.abspath(folder_path)
+        try:
+            conn_act = common_usage.get_mysql_connection_active()
+            cursor_act = conn_act.cursor()
+            sql_act = """
+                INSERT INTO 产品设计活动表 (产品ID, 项目ID, 产品文件夹绝对路径)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  项目ID = VALUES(项目ID),
+                  产品文件夹绝对路径 = VALUES(产品文件夹绝对路径)
+            """
+            cursor_act.execute(sql_act, (curr_product_id, bianl.current_project_id, folder_abs))
+            conn_act.commit()
+            cursor_act.close()
+            conn_act.close()
+            print(f"[save_new_product] ✅ 产品设计活动表已写入产品文件夹绝对路径: {folder_abs}")
+        except Exception as e_act:
+            print(f"[save_new_product] ⚠️ 写入产品设计活动表(产品文件夹绝对路径)失败: {e_act}")
 
         print("[save_new_product] ✅ 数据库插入成功")
 
@@ -399,6 +422,21 @@ def update_existing_product(row, new_serial, new_name, new_number, new_position,
                 else:
                     os.rename(old_folder, new_folder)
                     print("[rename] ✅ 重命名完成")
+                    # 同步更新产品设计活动表中的产品文件夹绝对路径
+                    new_folder_abs = os.path.abspath(new_folder)
+                    try:
+                        conn_act = common_usage.get_mysql_connection_active()
+                        cur_act = conn_act.cursor()
+                        cur_act.execute(
+                            "UPDATE 产品设计活动表 SET 产品文件夹绝对路径 = %s WHERE 产品ID = %s",
+                            (new_folder_abs, curr_product_id)
+                        )
+                        conn_act.commit()
+                        cur_act.close()
+                        conn_act.close()
+                        print(f"[update_existing_product] ✅ 产品设计活动表已同步路径: {new_folder_abs}")
+                    except Exception as e_act:
+                        print(f"[update_existing_product] ⚠️ 更新产品设计活动表路径失败: {e_act}")
                     # ★修改：更新 row_status 的 old_xxx 删除
                     # row_status["old_serial"] = curr_row_serial
                     # row_status["old_name"] = curr_row_product_name

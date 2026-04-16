@@ -2,21 +2,11 @@ from PyQt5.QtWidgets import (QDialog, QTableWidget, QTableWidgetItem, QHeaderVie
                              QSizePolicy, QAbstractScrollArea, QStyledItemDelegate, 
                              QComboBox, QLineEdit, QLabel, QWidget, QVBoxLayout, QTabWidget, QPushButton, QMessageBox, QRadioButton)
 from PyQt5.QtCore import Qt, QTimer, QEvent
-from PyQt5.QtGui import QFont, QPixmap, QDoubleValidator, QColor, QBrush, QTextOption, QPainter
+from PyQt5.QtGui import QFont, QPixmap, QDoubleValidator, QColor, QBrush
 import os
 import re
 from modules.guankoudingyi.db_cnt import get_connection, db_config_1, db_config_2
 
-
-class NoWrapItemDelegate(QStyledItemDelegate):
-    """禁用文字换行的表格项代理"""
-    
-    def paint(self, painter, option, index):
-        """重写绘制方法，禁用文字换行"""
-        # 设置文本省略模式，如果文字太长，用省略号显示而不是换行
-        option.textElideMode = Qt.ElideRight
-        # 调用父类的绘制方法
-        super().paint(painter, option, index)
 
 class LocalStressCalcTypeComboDelegate(QStyledItemDelegate):
     """局部应力计算类型下拉框代理（仅对第二行第二列生效）"""
@@ -474,14 +464,10 @@ def fill_load_params_by_calc_type(dialog: QDialog, calc_type: str):
         current_row_count = table.rowCount()
         if current_row_count < target_row_count:
             # 不足时，从末尾开始插入新行
-            min_row_height = 40
             for _ in range(target_row_count - current_row_count):
                 row_index = table.rowCount()
                 table.insertRow(row_index)
-                # 设置最小行高，允许根据内容自动扩展
-                table.setRowHeight(row_index, min_row_height)
-                if table.verticalHeader():
-                    table.verticalHeader().setMinimumSectionSize(min_row_height)
+                table.setRowHeight(row_index, 40)
         elif current_row_count > target_row_count:
             # 多余时，从末尾开始删除行
             for _ in range(current_row_count - target_row_count):
@@ -499,10 +485,9 @@ def fill_load_params_by_calc_type(dialog: QDialog, calc_type: str):
             else:
                 item.setText(param)
 
-            # 对第一列统一设置：垂直居中、不可编辑、不可选中
+            # 对第一列统一设置：居中、不可编辑、不可选中
+            #item.setTextAlignment(Qt.AlignCenter)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable & ~Qt.ItemIsSelectable)
-            # 设置第一列垂直居中对齐
-            item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
             table.setItem(row_index, 0, item)
             
             # 确保第二列已存在item并设置居中对齐
@@ -907,24 +892,16 @@ def setup_justlike_table(dialog: QDialog):
     # 设置表格只显示1行
     table.setRowCount(1)
     
-    # 设置最小行高，但允许根据内容自动扩展
-    min_row_height = 40
-    table.setRowHeight(0, min_row_height)
+    # 设置行高为40
+    row_height = 40
+    table.setRowHeight(0, row_height)
     
-    # 设置垂直标题头为Stretch模式，让行高根据内容和字体自动调整
+    # 设置垂直标题头为固定模式
     if table.verticalHeader():
-        table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        table.verticalHeader().setMinimumSectionSize(min_row_height)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
     
     # 禁用垂直滚动条
     table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    
-    # 为整个表格设置禁用换行的代理
-    no_wrap_delegate = NoWrapItemDelegate(table)
-    table.setItemDelegate(no_wrap_delegate)
-    
-    # 使用样式表禁用文字换行
-    table.setStyleSheet("QTableWidget::item { white-space: nowrap; }")
     
     # 设置第一列（索引0）：显示"参考引用"，不可编辑、不可选中
     item_col0 = table.item(0, 0)
@@ -945,36 +922,33 @@ def setup_justlike_table(dialog: QDialog):
     #item_col1.setBackground(QBrush(QColor(240, 240, 240)))
     
     # 设置列宽：第一列固定宽度360，第二列可以拉伸自适应
-    table.setColumnWidth(0, 360)
+    table.setColumnWidth(0, 430)
     table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
     
     if table.columnCount() > 1:
-        table.setColumnWidth(1, 135)  # 设置初始宽度
+        table.setColumnWidth(1, 120)  # 设置初始宽度
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
     
     # 禁止水平滚动条
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     
-    # 不再使用固定高度，改用最小高度策略，让表格根据内容自适应
-    # 计算最小高度：1行最小高度 + 表头高度 + 边框
-    min_total_height = min_row_height + table.horizontalHeader().height() + 2
-    table.setMinimumHeight(min_total_height)
+    # 设置表格固定高度，只显示一行
+    total_height = row_height + 2  # 行高 + 边框
+    table.setFixedHeight(total_height)
     
-    # 设置表格大小策略：允许两个方向扩展，但高度优先根据内容自适应
-    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    # 设置表格大小策略：高度固定，宽度可扩展
+    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     
-    # 设置表格最小宽度和高度
+    # 设置表格最小宽度
     min_width = 360 + 135
-    table.setMinimumSize(min_width, min_total_height)
-    # 不设置最大尺寸，允许根据内容和环境自适应扩展
-    table.setMaximumSize(16777215, 16777215)
+    table.setMinimumWidth(min_width)
 
 """设置第二个tab页的zaihecanshu表格"""
 def setup_second_tab_table(dialog: QDialog):
     """
     对第二个tab页的表格（zaihecanshu）进行设置：
-    - 第一列列宽设为400
-    - 第二列列宽设为180
+    - 第一列列宽设为430
+    - 第二列列宽设为120
     - 行高设为40（和第一个tab页一样）
     """
     if dialog is None:
@@ -986,29 +960,20 @@ def setup_second_tab_table(dialog: QDialog):
         print("[设置第二个tab页表格] 未找到zaihecanshu控件")
         return
 
-    # 为整个表格设置禁用换行的代理
-    no_wrap_delegate = NoWrapItemDelegate(table)
-    table.setItemDelegate(no_wrap_delegate)
-    
-    # 使用样式表禁用文字换行
-    table.setStyleSheet("QTableWidget::item { white-space: nowrap; }")
-
     # 获取行数
     row_count = table.rowCount()
     
-    # 设置最小行高，但允许根据内容和字体自动扩展
-    min_row_height = 40
+    # 设置初始行高为 40
+    initial_row_height = 40
     
-    # 先设置一个最小行高（用于计算最小高度），实际显示时行高会根据内容和字体自动调整
+    # 先设置一个基础行高（用于计算最小高度），实际显示时行高会自动拉伸
     for r in range(row_count):
-        table.setRowHeight(r, min_row_height)
+        table.setRowHeight(r, initial_row_height)
     
     # 垂直标题头使用 Stretch 模式，让行高自动拉伸填充可用空间
     # 这样当对话框放大时，行本身会被拉高，不会在表格底部出现一大块空白区域
-    # 同时设置最小行高，确保在不同DPI/缩放环境下都能完整显示内容
     if table.verticalHeader():
         table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        table.verticalHeader().setMinimumSectionSize(min_row_height)
 
     # 禁用垂直滚动条，确保只显示实际行数，不显示多余的空白行
     table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1023,35 +988,33 @@ def setup_second_tab_table(dialog: QDialog):
             table.setItem(row, 0, item)
         # 移除可编辑和可选中标志，只保留可启用（参考第一个tab页的实现）
         item.setFlags(item.flags() & ~Qt.ItemIsEditable & ~Qt.ItemIsSelectable)
-        # 设置第一列垂直居中对齐
-        item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         
         # 第二列：设置输入居中（如果item已存在，设置对齐方式）
         item_col1 = table.item(row, 1)
         if item_col1 is not None:
             item_col1.setTextAlignment(Qt.AlignCenter)
 
-    # 设置列宽：第一列固定宽度360，第二列可以拉伸自适应（参考第一个tab页的实现）
+    # 设置列宽：第一列固定宽度430，第二列可以拉伸自适应（参考第一个tab页的实现）
     # 第一列设置为固定宽度模式
-    table.setColumnWidth(0, 360)
+    table.setColumnWidth(0, 430)
     table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
     
     # 第二列设置为拉伸模式，可以自适应对话框宽度变化
     if table.columnCount() > 1:
-        table.setColumnWidth(1, 135)  # 设置初始宽度
+        table.setColumnWidth(1, 120)  # 设置初始宽度
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
     # 禁止水平滚动条
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     
-    # 设置表格大小策略：允许两个方向扩展，高度优先根据内容自适应
-    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    # 设置表格大小策略：允许两个方向扩展
+    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     
-    # 设置表格最小尺寸（宽度最小为两列最小宽度之和，高度为所有行最小高度之和 + 表头）
+    # 设置表格最小尺寸（宽度最小为两列最小宽度之和，高度为所有行高度之和）
     min_width = 360 + 135  # 第一列360 + 第二列最小135
-    min_height = min_row_height * row_count + table.horizontalHeader().height() + 2
+    min_height = initial_row_height * row_count + 2
     table.setMinimumSize(min_width, min_height)
-    # 不设置最大尺寸，允许根据内容和环境自适应扩展
+    # 不设置最大宽度，允许水平扩展（参考第一个tab页的实现）
     table.setMaximumSize(16777215, 16777215)  # 16777215是Qt的最大整数值
 
 
@@ -1085,32 +1048,20 @@ def init_pipe_openingload_dialog(dialog: QDialog, pipe_code: str = None, product
     if not table:
         return
 
-    # 为整个表格设置禁用换行的代理
-    no_wrap_delegate = NoWrapItemDelegate(table)
-    table.setItemDelegate(no_wrap_delegate)
-    
-    # 使用样式表禁用文字换行
-    table.setStyleSheet("QTableWidget::item { white-space: nowrap; }")
 
-    # 设置行高自适应：使用Stretch模式，让行高根据内容和字体自动调整
-    # 这样在不同DPI/缩放环境下都能完整显示
-    if table.verticalHeader():
-        table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
-    
-    # 设置最小行高，确保内容可读（但允许根据内容自动扩展）
-    min_row_height = 40
+    # 显式设定每一行行高为 40
+    row_height = 40
+
     for r in range(table.rowCount()):
-        table.setRowHeight(r, min_row_height)
-        # 设置最小行高，允许自动扩展
-        table.verticalHeader().setMinimumSectionSize(min_row_height)
+        table.setRowHeight(r, row_height)
 
     # 禁用垂直滚动条，确保只显示2行
     table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-    # 不再使用固定高度，改用最小高度策略，让表格根据内容自适应
-    # 计算最小高度：2行最小高度 + 表头高度 + 边框
-    min_total_height = min_row_height * 2 + table.horizontalHeader().height() + 2
-    table.setMinimumHeight(min_total_height)
+    # 设置表格固定高度，使其刚好显示2行
+    # 计算表格总高度：2行高度
+    total_height = row_height * 2+2
+    table.setFixedHeight(total_height)
 
     # 参考 dynamically_adjust_ui.py 中 setup_tableWidget_pipe_header 的逻辑
     # 设置第一列的所有单元格为不可编辑、不可选中
@@ -1122,30 +1073,28 @@ def init_pipe_openingload_dialog(dialog: QDialog, pipe_code: str = None, product
             table.setItem(row, 0, item)
         # 移除可编辑和可选中标志，只保留可启用（参考 dynamically_adjust_ui.py 第504行）
         item.setFlags(item.flags() & ~Qt.ItemIsEditable & ~Qt.ItemIsSelectable)
-        # 设置第一列垂直居中对齐
-        item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
     
-    # 设置列宽：第一列固定宽度180，第二列可以拉伸自适应
+    # 设置列宽：第一列固定宽度200，第二列可以拉伸自适应
     # 第一列设置为固定宽度模式
-    table.setColumnWidth(0, 180)
+    table.setColumnWidth(0, 200)
     table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
     
     # 第二列设置为拉伸模式，可以自适应对话框宽度变化
     if table.columnCount() > 1:
-        table.setColumnWidth(1, 400)  # 设置初始宽度
+        table.setColumnWidth(1, 500)  # 设置初始宽度
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
     # 禁止水平滚动条，视觉更干净
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-    # 设置表格大小策略：允许两个方向扩展，但高度优先根据内容自适应
-    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    # 设置表格大小策略：高度固定，宽度可扩展
+    table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     
-    # 设置表格最小尺寸（宽度最小为两列最小宽度之和，高度为最小高度）
+    # 设置表格最小尺寸（宽度最小为两列最小宽度之和，高度固定）
     min_width = 180 + 400  # 第一列180 + 第二列最小400
-    table.setMinimumSize(min_width, min_total_height)
-    # 不设置最大尺寸，允许根据内容和环境自适应扩展
-    table.setMaximumSize(16777215, 16777215)  # 16777215是Qt的最大整数值
+    table.setMinimumSize(min_width, total_height)
+    # 不设置最大宽度，允许水平扩展
+    table.setMaximumSize(16777215, total_height)  # 16777215是Qt的最大整数值
     
     # 设置第二个tab页的justlike表格（参考引用表）
     setup_justlike_table(dialog)

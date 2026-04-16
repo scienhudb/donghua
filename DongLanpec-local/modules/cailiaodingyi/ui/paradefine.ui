@@ -19,8 +19,7 @@
      <item>
       <layout class="QVBoxLayout" name="verticalLayout" stretch="2,8">
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout_4" stretch="2,1,2,1,2">
-         <item>
+        <layout class="QHBoxLayout" name="horizontalLayout_4" stretch="2,1,2,1,1,1,2">         <item>
           <layout class="QHBoxLayout" name="horizontalLayout">
            <item>
             <widget class="QLabel" name="label">
@@ -80,20 +79,60 @@
            </property>
           </spacer>
          </item>
-         <item>
-          <layout class="QHBoxLayout" name="horizontalLayout_3">
-           <item>
-            <widget class="QLabel" name="label_3">
-             <property name="text">
-              <string>存为模板</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QLineEdit" name="lineEdit_2"/>
-           </item>
-          </layout>
-         </item>
+<item>
+ <spacer name="horizontalSpacer_6">
+  <property name="orientation">
+   <enum>Qt::Horizontal</enum>
+  </property>
+  <property name="sizeHint" stdset="0">
+   <size>
+    <width>20</width>
+    <height>20</height>
+   </size>
+  </property>
+ </spacer>
+</item>
+
+<item>
+ <layout class="QHBoxLayout" name="horizontalLayout_batch_replace">
+  <item>
+   <widget class="QPushButton" name="pushButton_batch_replace">
+    <property name="text">
+     <string>批量替换</string>
+    </property>
+   </widget>
+  </item>
+ </layout>
+</item>
+
+<item>
+ <spacer name="horizontalSpacer_batch_replace">
+  <property name="orientation">
+   <enum>Qt::Horizontal</enum>
+  </property>
+  <property name="sizeHint" stdset="0">
+   <size>
+    <width>20</width>
+    <height>20</height>
+   </size>
+  </property>
+ </spacer>
+</item>
+
+<item>
+ <layout class="QHBoxLayout" name="horizontalLayout_3">
+  <item>
+   <widget class="QLabel" name="label_3">
+    <property name="text">
+     <string>存为模板</string>
+    </property>
+   </widget>
+  </item>
+  <item>
+   <widget class="QLineEdit" name="lineEdit_2"/>
+  </item>
+ </layout>
+</item>
         </layout>
        </item>
        <item>
@@ -609,108 +648,203 @@
                   <item>
                    <layout class="QVBoxLayout" name="verticalLayout_3">
                     <item>
-                     <widget class="QTabWidget" name="tabWidget">
-                      <property name="currentIndex">
-                       <number>0</number>
-                      </property>
-                      <widget class="QWidget" name="tab">
-                       <attribute name="title">
-                        <string>管口材料分类1</string>
-                       </attribute>
-                       <layout class="QHBoxLayout" name="horizontalLayout_7">
-                        <item>
-                         <layout class="QVBoxLayout" name="verticalLayout_2">
+                     <layout class="QHBoxLayout" name="horizontalLayout_19">
+                      <item>
+                       <widget class="QTabWidget" name="tabWidget">
+                        <property name="currentIndex">
+                         <number>1</number>
+                        </property>
+                        <widget class="QWidget" name="tab">
+                         <attribute name="title">
+                          <string>管口材料分类-管程</string>
+                         </attribute>
+                         <layout class="QHBoxLayout" name="horizontalLayout_7">
                           <item>
-                           <widget class="QTableWidget" name="tableWidget_define1">
-                            <attribute name="horizontalHeaderVisible">
-                             <bool>false</bool>
-                            </attribute>
-                            <attribute name="verticalHeaderVisible">
-                             <bool>false</bool>
-                            </attribute>
-                            <row>
-                             <property name="text">
-                              <string/>
-                             </property>
-                            </row>
-                            <column>
-                             <property name="text">
-                              <string>零件名称</string>
-                             </property>
-                             <property name="textAlignment">
-                              <set>AlignCenter</set>
-                             </property>
-                            </column>
-                            <column>
-                             <property name="text">
-                              <string>材料类型</string>
-                             </property>
-                            </column>
-                            <column>
-                             <property name="text">
-                              <string>材料牌号</string>
-                             </property>
-                            </column>
-                            <column>
-                             <property name="text">
-                              <string>供货状态</string>
-                             </property>
-                            </column>
-                            <column>
-                             <property name="text">
-                              <string>材料标准</string>
-                             </property>
-                            </column>
-                            <item row="0" column="0">
-                             <property name="text">
-                              <string/>
-                             </property>
-                             <property name="textAlignment">
-                              <set>AlignCenter</set>
-                             </property>
+                           <layout class="QVBoxLayout" name="verticalLayout_2">
+                            <item>
+                             <widget class="QTableWidget" name="tableWidget_define1">
+                              <attribute name="horizontalHeaderVisible">
+                               <bool>false</bool>
+                              </attribute>
+                              <attribute name="verticalHeaderVisible">
+                               <bool>false</bool>
+                              </attribute>
+                              <row>
+                               <property name="text">
+                                <string/>
+                               </property>
+                              </row>
+                              <column>
+                               <property name="text">
+                                <string>零件名称</string>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>材料类型</string>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>材料牌号</string>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>供货状态</string>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>材料标准</string>
+                               </property>
+                              </column>
+                              <item row="0" column="0">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="1">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="2">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="3">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="4">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                             </widget>
                             </item>
-                            <item row="0" column="1">
-                             <property name="text">
-                              <string/>
-                             </property>
-                             <property name="textAlignment">
-                              <set>AlignCenter</set>
-                             </property>
-                            </item>
-                            <item row="0" column="2">
-                             <property name="text">
-                              <string/>
-                             </property>
-                             <property name="textAlignment">
-                              <set>AlignCenter</set>
-                             </property>
-                            </item>
-                            <item row="0" column="3">
-                             <property name="text">
-                              <string/>
-                             </property>
-                             <property name="textAlignment">
-                              <set>AlignCenter</set>
-                             </property>
-                            </item>
-                            <item row="0" column="4">
-                             <property name="text">
-                              <string/>
-                             </property>
-                             <property name="textAlignment">
-                              <set>AlignCenter</set>
-                             </property>
-                            </item>
-                           </widget>
+                           </layout>
                           </item>
                          </layout>
-                        </item>
-                       </layout>
-                      </widget>
-                     </widget>
-                    </item>
-                    <item>
-                     <layout class="QHBoxLayout" name="horizontalLayout_19"/>
+                        </widget>
+                        <widget class="QWidget" name="tab_5">
+                         <attribute name="title">
+                          <string>管口材料分类-壳程</string>
+                         </attribute>
+                         <layout class="QHBoxLayout" name="horizontalLayout_29">
+                          <item>
+                           <layout class="QVBoxLayout" name="verticalLayout_15">
+                            <item>
+                             <widget class="QTableWidget" name="tableWidget_define1_5">
+                              <attribute name="horizontalHeaderVisible">
+                               <bool>false</bool>
+                              </attribute>
+                              <attribute name="verticalHeaderVisible">
+                               <bool>false</bool>
+                              </attribute>
+                              <row>
+                               <property name="text">
+                                <string/>
+                               </property>
+                              </row>
+                              <column>
+                               <property name="text">
+                                <string>零件名称</string>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>材料类型</string>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>材料牌号</string>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>供货状态</string>
+                               </property>
+                              </column>
+                              <column>
+                               <property name="text">
+                                <string>材料标准</string>
+                               </property>
+                              </column>
+                              <item row="0" column="0">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="1">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="2">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="3">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                              <item row="0" column="4">
+                               <property name="text">
+                                <string/>
+                               </property>
+                               <property name="textAlignment">
+                                <set>AlignCenter</set>
+                               </property>
+                              </item>
+                             </widget>
+                            </item>
+                           </layout>
+                          </item>
+                         </layout>
+                        </widget>
+                       </widget>
+                      </item>
+                     </layout>
                     </item>
                    </layout>
                   </item>

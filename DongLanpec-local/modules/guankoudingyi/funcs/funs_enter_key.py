@@ -103,7 +103,9 @@ def save_all_pipe_data(stats_widget):
             for col, field in column_map.items():
                 it = table.item(row, col)
                 txt = it.text().strip() if it else ""
-                if txt != "":
+                # 对于"管口附件"字段，允许保存空字符串（用户取消所有选择时需要清空数据库中的值）
+                # 其他字段保持原有逻辑，空字符串不保存
+                if txt != "" or field == "管口附件":
                     row_data[field] = txt
 
             # 获取/兜底分配 管口ID（运行期分配，确认时才落库）
@@ -325,28 +327,15 @@ def save_pipe_attachment_data(product_id, conn, cur):
         next_param_id = max_param_id + 1
 
         # 4. 差异化同步：只处理受影响的附件类型
-        # 查询现有各 Tab分类/Tab_ID/附件类型 的管口号
+        # 查询现有各 Tab分类/Tab_ID 的管口号
         cur.execute("""
-            SELECT Tab分类, Tab_ID, 附件类型, 参数数值
+            SELECT Tab分类, Tab_ID, 参数数值
             FROM 产品设计活动表_管口附件附加参数表
             WHERE 产品ID = %s AND 参数名称 = '管口号'
         """, (product_id,))
         existing_tabs = cur.fetchall() or []
 
         current_types = set(attachment_groups.keys())
-        
-        # 按附件类型分组统计现有的tab页（用于判断是否需要新建tab）
-        existing_tabs_by_attachment_type = {}
-        for row in existing_tabs:
-            attachment_type = row.get('附件类型')
-            if attachment_type:
-                if attachment_type not in existing_tabs_by_attachment_type:
-                    existing_tabs_by_attachment_type[attachment_type] = []
-                existing_tabs_by_attachment_type[attachment_type].append(row)
-
-
-
-
 
 
         # # 如果产品设计活动表_管口附件附加参数表里没有任何数据，按模板加载逻辑处理所有附件类型
@@ -363,7 +352,7 @@ def save_pipe_attachment_data(product_id, conn, cur):
         #     template_name = None
         #     if template_result:
         #         template_name = template_result.get('模板名称') if isinstance(template_result, dict) else template_result[0]
-            
+
         #     if not template_name:
         #         print("[管口附件] 未找到模板名称，无法按模板加载，跳过")
         #     else:
@@ -413,7 +402,7 @@ def save_pipe_attachment_data(product_id, conn, cur):
         #                             continue
 
         #                         pipe_codes_str = '、'.join(pipe_codes)
-                                
+
         #                         # 插入该附件类型的所有参数行
         #                         for param in type_params:
         #                             param_name = param.get('参数名称')
@@ -455,11 +444,12 @@ def save_pipe_attachment_data(product_id, conn, cur):
         #                 conn_material.close()
         #             except Exception:
         #                 pass
-            
+
         #     # 提交事务并返回（首次加载时不需要执行后续的差异化更新逻辑）
         #     conn.commit()
         #     print(f"[管口附件] 事务已提交")
         #     return
+
 
 
         # 如果产品设计活动表_管口附件附加参数表里没有任何数据，按模板加载逻辑处理所有附件类型
@@ -552,62 +542,44 @@ def save_pipe_attachment_data(product_id, conn, cur):
             return
 
 
-
-
         # # 如果已有数据，执行差异化更新逻辑
 
-        
-        # 遍历所有现有的tab页，更新或删除
-        # 对于每个tab页：
-        # 1. 如果这个tab页的附件类型在管口表中还存在，则根据管口号更新（去掉不再存在的管口号）
-        # 2. 如果更新后管口号为空，则删除整个tab页
-        # 3. 如果这个tab页的附件类型在管口表中不存在了，则删除整个tab页
-        handled_attachment_types = set()
+        # 删除已不存在的附件类型（整类删）
+        types_to_remove = [row.get('Tab分类') for row in existing_tabs if row.get('Tab分类') not in current_types]
+        if types_to_remove:
+            cur.execute(f"""
+                DELETE FROM 产品设计活动表_管口附件附加参数表
+                WHERE 产品ID = %s AND Tab分类 IN ({', '.join(['%s']*len(types_to_remove))})
+            """, (product_id, *types_to_remove))
+
+        # 对仍存在的类型，更新各 Tab 的管口号；若管口号为空则删除该 Tab
+        handled_types = set()
         for row in existing_tabs:
-            attachment_type = row.get('附件类型')
+            tab_type = row.get('Tab分类')
             tab_id = row.get('Tab_ID')
-            
-            if not attachment_type:
+            if not tab_type or tab_type not in current_types:
                 continue
-            
-            # 获取该tab页当前的管口号列表
+            handled_types.add(tab_type)
+
+            keep_set = set(attachment_groups.get(tab_type, []))
             current_codes = [c.strip() for c in (row.get('参数数值') or '').split('、') if c.strip()]
-            
-            # 如果该附件类型在管口表中还存在
-            if attachment_type in current_types:
-                handled_attachment_types.add(attachment_type)
-                
-                # 获取该附件类型在管口表中的所有可用管口号
-                available_pipe_codes = set(attachment_groups.get(attachment_type, []))
-                
-                # 只保留那些既在当前tab页中，又在管口表中可用的管口号
-                new_codes = [c for c in current_codes if c in available_pipe_codes]
-                
-                # 如果更新后还有管口号，则更新；否则删除整个tab页
-                if new_codes:
-                    new_codes_str = '、'.join(new_codes)
-                    cur.execute("""
-                        UPDATE 产品设计活动表_管口附件附加参数表
-                        SET 参数数值 = %s
-                        WHERE 产品ID = %s AND Tab_ID = %s AND 参数名称 = '管口号'
-                    """, (new_codes_str, product_id, tab_id))
-                else:
-                    # 管口号为空，删除整个tab页
-                    cur.execute("""
-                        DELETE FROM 产品设计活动表_管口附件附加参数表
-                        WHERE 产品ID = %s AND Tab_ID = %s
-                    """, (product_id, tab_id))
-                    print(f"[管口附件] 删除了Tab_ID={tab_id}（因为管口号为空）")
+            new_codes = [c for c in current_codes if c in keep_set]
+
+            if new_codes:
+                new_codes_str = '、'.join(new_codes)
+                cur.execute("""
+                    UPDATE 产品设计活动表_管口附件附加参数表
+                    SET 参数数值 = %s
+                    WHERE 产品ID = %s AND Tab分类 = %s AND Tab_ID = %s AND 参数名称 = '管口号'
+                """, (new_codes_str, product_id, tab_type, tab_id))
             else:
-                # 该附件类型在管口表中不存在了，删除整个tab页
                 cur.execute("""
                     DELETE FROM 产品设计活动表_管口附件附加参数表
-                    WHERE 产品ID = %s AND Tab_ID = %s
-                """, (product_id, tab_id))
-                print(f"[管口附件] 删除了Tab_ID={tab_id}（因为附件类型'{attachment_type}'在管口表中已不存在）")
+                    WHERE 产品ID = %s AND Tab分类 = %s AND Tab_ID = %s
+                """, (product_id, tab_type, tab_id))
 
-        # 新增的附件类型：如果该附件类型在活动库里完全没有Tab，则按模板结构创建一个Tab
-        types_to_add = current_types - handled_attachment_types
+        # 新增的附件类型：如果该附件类型一个 Tab 都没有，则按模板结构创建一个 Tab
+        types_to_add = current_types - handled_types
         if types_to_add:
             try:
                 # 获取模板名称（来自产品设计活动表_元件材料表）
@@ -657,9 +629,8 @@ def save_pipe_attachment_data(product_id, conn, cur):
 
                                 for attachment_type in types_to_add:
                                     # 只为完全没有任何 Tab 的附件类型创建一个新的 Tab
-                                    # 检查该附件类型是否在现有tab页中存在（按附件类型判断）
-                                    if attachment_type in existing_tabs_by_attachment_type:
-                                        print(f"[管口附件] 附件类型'{attachment_type}'已有tab页，跳过新建")
+                                    # 若该类型在 existing_tabs 中已经有记录，说明前面处理遗漏，则跳过
+                                    if any(row.get('Tab分类') == attachment_type for row in existing_tabs):
                                         continue
 
                                     pipe_codes = attachment_groups.get(attachment_type, [])
@@ -670,11 +641,8 @@ def save_pipe_attachment_data(product_id, conn, cur):
                                     tab_id = base_timestamp + tab_id_counter
                                     tab_id_counter += 1
 
-                                    # 从模板参数中筛出对应附件类型的行（按附件类型筛选，而不是按Tab分类）
-                                    type_params = [p for p in template_params if p.get('附件类型') == attachment_type]
-                                    # 如果按附件类型没找到，再尝试按Tab分类查找（兼容旧模板）
-                                    if not type_params:
-                                        type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
+                                    # 从模板参数中筛出对应 Tab分类 的行
+                                    type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
                                     if not type_params:
                                         print(f"[管口附件] 新增附件类型 '{attachment_type}' 在模板中没有找到参数结构")
                                         continue
@@ -722,7 +690,7 @@ def save_pipe_attachment_data(product_id, conn, cur):
                 import traceback
                 traceback.print_exc()
 
-        print(f"[管口附件] 同步完成：更新附件类型 {len(handled_attachment_types)}，待新增附件类型 {len(types_to_add)}")
+        print(f"[管口附件] 同步完成：删除类型 {len(types_to_remove)}，更新类型 {len(handled_types)}，待新增类型 {len(types_to_add)}")
 
         # 提交事务（使用主连接）
         conn.commit()
