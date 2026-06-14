@@ -92,7 +92,8 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtCore import QUrl, QTimer, QEvent
 from PyQt5.QtGui import QMouseEvent
-from PyQt5.QtWidgets import QWidget, QTabBar, QPushButton, QMessageBox, QDesktopWidget, QApplication, QLabel, \
+# 0522新修改：导航栏改为 QToolButton 后，用 QAbstractButton 查找/绑定按钮
+from PyQt5.QtWidgets import QWidget, QTabBar, QPushButton, QAbstractButton, QMessageBox, QDesktopWidget, QApplication, QLabel, \
     QSplashScreen
 
 # -------------------------------
@@ -560,8 +561,13 @@ def get_product_form_from_db(product_id: str) -> str:
                 # 如果是 AEM，就返回 AEM
                 print(f"    ↳ 逻辑转换: 保持为 'AEM'")
                 return 'AEM'
+            # 0515新修改-NEN(Head)产品型式
+            if raw_product_form == 'NEN(Head)':
+                # 如果是 NEN(Head)，就返回 NEN(Head)
+                print(f"    ↳ 逻辑转换: 保持为 'NEN(Head)'")
+                return 'NEN(Head)'
             else:
-                # 如果是其他任何值 (AES, BES, 空值等)，都统一视为 'all'
+                # 如果是其他任何值 (AES, BES, NEN、NEN(Head)空值等)，都统一视为 'all'
                 print(f"    ↳ 逻辑转换: 将 '{raw_product_form}' 视为 'all'")
                 return 'all'
         else:
@@ -691,8 +697,8 @@ class MainWindow(QtWidgets.QMainWindow):
         global APP_MAIN_WINDOW
         APP_MAIN_WINDOW = self
 
-        uic.loadUi(resource_path("main_viewer333.ui"), self)
-
+        # uic.loadUi(resource_path("main_viewer333.ui"), self)
+        uic.loadUi(resource_path("main_viewer333_new.ui"), self)
 
         # ✅ 设置界面打开大小为屏幕的 80%
         screen = QDesktopWidget().screenGeometry()
@@ -788,7 +794,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
         for btn_name, (title, widget_class) in self.page_buttons.items():
-            btn = self.findChild(QPushButton, btn_name)
+            btn = self.findChild(QAbstractButton, btn_name)
             if btn:
                 btn.clicked.connect(lambda _, t=title, w=widget_class: self.safe_open_tab(t, w))
                 btn.setEnabled(False)  # 初始禁用
@@ -859,8 +865,34 @@ class MainWindow(QtWidgets.QMainWindow):
         # 偏好设置 submenu（objectName 在 ui 里叫 "menu"）
         prefs_menu = self.findChild(QtWidgets.QMenu, "menu")
         if prefs_menu is None:
-            # 兜底：直接挂到菜单栏
-            prefs_menu = self.menuBar().addMenu("偏好设置")
+            # 如果没有找到 "menu"（在新 UI 中），尝试寻找 btn_config 按钮并把菜单挂在它下面
+            btn_config = self.findChild(QtWidgets.QToolButton, "btn_config")
+            if btn_config:
+                config_menu = btn_config.menu()
+                if config_menu is None:
+                    config_menu = QtWidgets.QMenu(self)
+                    btn_config.setMenu(config_menu)
+                    # 点击按钮时立刻弹出下拉菜单
+                    btn_config.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+                
+                # 把“预定义”加到配置菜单
+                act_18 = self.findChild(QtWidgets.QAction, "action_18")
+                if act_18:
+                    config_menu.addAction(act_18)
+                
+                # 创建子菜单“偏好设置”
+                prefs_menu = config_menu.addMenu("偏好设置")
+                prefs_menu.setObjectName("menu")
+                
+                # 把原来在偏好设置里的 action 加进去：界面、快捷键、存储路径
+                for act_name in ["action_15", "action_16", "action_17"]:
+                    act = self.findChild(QtWidgets.QAction, act_name)
+                    if act:
+                        prefs_menu.addAction(act)
+                prefs_menu.addSeparator()
+            else:
+                # 兜底：直接挂到菜单栏
+                prefs_menu = self.menuBar().addMenu("偏好设置")
 
         font_menu = prefs_menu.addMenu("字体大小")
 
@@ -918,6 +950,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return self.stats_page_instance
 
+    # 4，12新修改--本地文件夹误删1共7
     def apply_readonly_to_widget_tree(self, root, readonly: bool):
         """业务界面只读：输入框、表格、表内控件、按钮等。"""
         if root is None:
@@ -994,6 +1027,45 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 w.setEditTriggers(edit_triggers_default)
 
+    # 0506新修改-项目管理只读区域设置
+    def _apply_readonly_unlock_project_management_product_areas(self):
+        """
+        本地文件缺失解除锁定时：只对「产品信息 / 产品定义 / 工作信息」三个分组执行解锁，
+        不刷项目信息整页，避免误把查看态项目信息行编辑设为可写。
+        产品定义组内含「类型」「型式」下拉：子树刷前后对其 isEnabled / 样式 / minWidth 打快照并恢复。
+        """
+        import modules.chanpinguanli.bianl as bianl
+
+        def _snap_combo(c):
+            if c is None:
+                return None
+            return (c.isEnabled(), c.styleSheet(), c.minimumWidth())
+
+        def _restore_combo(c, snap):
+            if c is None or snap is None:
+                return
+            en, stylesheet, minw = snap
+            c.setEnabled(en)
+            c.setStyleSheet(stylesheet)
+            c.setMinimumWidth(minw)
+
+        try:
+            t_combo = getattr(bianl, "product_type_combo", None)
+            f_combo = getattr(bianl, "product_form_combo", None)
+            snap_t = _snap_combo(t_combo)
+            snap_f = _snap_combo(f_combo)
+
+            for attr in ("product_info_group", "product_definition_group", "work_information_group"):
+                box = getattr(bianl, attr, None)
+                if box is not None:
+                    self.apply_readonly_to_widget_tree(box, False)
+
+            _restore_combo(t_combo, snap_t)
+            _restore_combo(f_combo, snap_f)
+        except Exception as e:
+            print(f"[_apply_readonly_unlock_project_management_product_areas] {e}")
+
+    # 4，12新修改--本地文件夹误删2共7
     def refresh_all_tabs_readonly_state(self):
         import modules.chanpinguanli.bianl as bianl
 
@@ -1004,7 +1076,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not w:
                 continue
             if title in ("", "项目管理"):
-                self.apply_readonly_to_widget_tree(w, False)
+                # 0506新修改-项目管理只读区域设置
+                self._apply_readonly_unlock_project_management_product_areas()
             else:
                 self.apply_readonly_to_widget_tree(w, ro)
 
@@ -1081,7 +1154,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 # 3) 启用所有功能按钮
                 for btn_name in self.page_buttons:
-                    btn = self.findChild(QPushButton, btn_name)
+                    btn = self.findChild(QAbstractButton, btn_name)
                     if btn:
                         btn.setEnabled(True)
     #新增
@@ -1324,6 +1397,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(self.tab_widget.count()):
             if self.tab_widget.tabText(i) == title:
                 self.tab_widget.setCurrentIndex(i)
+                # 4，12新修改--本地文件夹误删3共7
                 self._last_tab_index = i
                 self.refresh_all_tabs_readonly_state()
                 return
@@ -1332,6 +1406,7 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self.tab_widget.addTab(widget, title)
         self.tab_widget.setCurrentIndex(idx)
         self._last_tab_index = idx
+        # 4，12新修改--本地文件夹误删4共7
         self.refresh_all_tabs_readonly_state()
 
     # === on_tab_changed 改进版 ===
@@ -1425,6 +1500,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tab_widget.setCurrentIndex(new_idx)
                     self._last_tab_index = new_idx
                     print(f"[DEBUG] 已打开新产品界面: {ctitle}")
+                    # 4，12新修改--本地文件夹误删5共7
                     try:
                         self.refresh_all_tabs_readonly_state()
                     except Exception:
@@ -1525,6 +1601,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.tab_widget.setCurrentIndex(new_idx)
                         self._last_tab_index = new_idx  # 更新 last_index
                         print(f"[DEBUG] 已打开新产品界面: {ctitle}")
+                        # 4，12新修改--本地文件夹误删6共7
                         try:
                             self.refresh_all_tabs_readonly_state()
                         except Exception:
@@ -1560,6 +1637,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(
                     f"[DEBUG][on_tab_changed] 无需关闭界面，直接同步 last_confirmed → {self.last_confirmed_product_id}")
         self._last_tab_index = index
+        # 4，12新修改--本地文件夹误删7共7
         try:
             self.refresh_all_tabs_readonly_state()
         except Exception as _ro_e:

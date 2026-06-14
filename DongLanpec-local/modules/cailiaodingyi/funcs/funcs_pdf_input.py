@@ -865,6 +865,10 @@ def update_template_input_editable_state(self):
         self.lineEdit_template.clear()  # 可选：禁止时清空内容
 
 
+# 用户「另存为模板」分配的模板ID起始值（与系统内置模板 ID 区分）
+USER_SAVE_TEMPLATE_ID_START = 5000
+
+
 def save_to_template_library(template_name, product_data, product_type, product_form):
     """
     将当前产品定义好的信息存入模板库中
@@ -878,10 +882,18 @@ def save_to_template_library(template_name, product_data, product_type, product_
             if row:
                 template_id = row["模板ID"]
             else:
-                # 2. 生成新的模板ID（最大 + 1）
-                cursor.execute("SELECT MAX(模板ID) AS max_id FROM 元件材料模板表")
+                # 2. 用户另存模板：从 5000 起递增，不与系统模板共用 MAX 全表逻辑
+                cursor.execute(
+                    "SELECT MAX(模板ID) AS max_id FROM 元件材料模板表 WHERE 模板ID >= %s",
+                    (USER_SAVE_TEMPLATE_ID_START,),
+                )
                 max_row = cursor.fetchone()
-                template_id = (max_row["max_id"] or 0) + 1
+                max_id = max_row["max_id"] if max_row else None
+                template_id = (
+                    USER_SAVE_TEMPLATE_ID_START
+                    if max_id is None
+                    else max_id + 1
+                )
             # 3. 遍历插入每一条元件数据
             for item in product_data:
                 cursor.execute("""
@@ -1844,7 +1856,7 @@ def init_buguan_defaults(product_id):
                            WHERE 产品ID=%s
                        """, (product_id,))
             row = cur1.fetchone()
-            if row and (row["产品型式"] == "AEU" or row["产品型式"] == "BEU"):
+            if row and (row["产品型式"] in ["AEU", "BEU", "AKU", "BKU"]):
 
                 # 2. 从元件库读取默认布管参数
                 cur2.execute("SELECT 参数名, 参数值, 单位 FROM 布管参数默认表_u型管")

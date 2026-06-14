@@ -42,6 +42,7 @@ _MAP_GTYPE_CACHE = {}
 _GASKET_DIM_CACHE = {}
 _FLANGE_MATERIAL_CACHE = {}
 _COMPUTE_PN_CACHE = {}
+_PRODUCT_FORM_CACHE = {}
 
 def get_program_recommend_reset_param_names() -> Set[str]:
     """
@@ -957,6 +958,74 @@ def update_guankou_define_status(product_id, element_name, define_status): #已�
 
 
 
+#6.12覆层新增
+def _param_cell_text(table, row, col):
+    if row is None or row < 0:
+        return ""
+    try:
+        from PyQt5.QtWidgets import QComboBox, QLineEdit
+        w = table.cellWidget(row, col)
+        if w is not None:
+            if isinstance(w, QComboBox):
+                return w.currentText().strip()
+            if isinstance(w, QLineEdit):
+                return w.text().strip()
+    except Exception:
+        pass
+    it = table.item(row, col)
+    return (it.text().strip() if it else "")
+
+
+def _cladding_names_for_switch(switch_name: str):
+    """由覆层开关名推导材料类型、焊接凹槽深度参数名。"""
+    if switch_name == "是否添加覆层":
+        return "覆层材料类型", "存在覆层时的焊接凹槽深度"
+    if switch_name.endswith("是否添加覆层"):
+        prefix = switch_name[: -len("是否添加覆层")]
+        return f"{prefix}覆层材料类型", f"{prefix}存在覆层时的焊接凹槽深度"
+    return None, None
+
+
+def update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, control_field=None):
+    """
+    焊接凹槽深度：覆层开关=是 且 覆层材料类型=钢板/板材 时显示，否则隐藏（仅隐藏，不清空）。
+    control_field 指定时只刷新对应覆层组；为 None 时刷新表中存在的全部覆层组。
+    """
+    if table is None:
+        return
+
+    switches = [control_field] if control_field else [
+        "是否添加覆层",
+        "管程侧是否添加覆层",
+        "壳程侧是否添加覆层",
+        "配对法兰是否添加覆层",
+    ]
+
+    def _find_row(name):
+        if not name:
+            return None
+        for r in range(table.rowCount()):
+            it = table.item(r, param_col)
+            if it and it.text().strip() == name:
+                return r
+        return None
+
+    for switch_name in switches:
+        if not switch_name:
+            continue
+        type_name, groove_name = _cladding_names_for_switch(switch_name)
+        if not groove_name:
+            continue
+        r_groove = _find_row(groove_name)
+        if r_groove is None:
+            continue
+        r_sw = _find_row(switch_name)
+        r_type = _find_row(type_name)
+        covering = (_param_cell_text(table, r_sw, value_col) == "是") if r_sw is not None else False
+        type_val = _param_cell_text(table, r_type, value_col) if r_type is not None else ""
+        show = covering and (type_val in ("钢板", "板材"))
+        table.setRowHidden(r_groove, not show)
+
 
 def toggle_covering_fields(table, combo, control_field):
     """
@@ -967,7 +1036,6 @@ def toggle_covering_fields(table, combo, control_field):
         "是否添加覆层": [
             "覆层材料类型", "覆层材料牌号", "覆层材料级别",
             "覆层材料标准", "覆层成型工艺", "覆层使用状态", "覆层厚度",
-            "存在覆层时的焊接凹槽深度"
         ],
         "管程侧是否添加覆层": [
             "管程侧覆层材料类型", "管程侧覆层材料牌号", "管程侧覆层材料级别",
@@ -1003,6 +1071,8 @@ def toggle_covering_fields(table, combo, control_field):
             #         item = table.item(row, 1)
             #         if item:
             #             item.setText("")
+    # 6.12覆层新增
+    update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, control_field=control_field)
 
 
 
@@ -1402,6 +1472,16 @@ def is_all_guankou_parts_defined(product_id: int) -> bool:
         connection.close()
 
 
+#6.12覆层新增
+def default_cladding_thickness_by_material_type(type_value: str) -> str:
+    """覆层材料类型 → 覆层厚度 UI 默认值（仅界面联动，不写库）。"""
+    v = (type_value or "").strip()
+    if v in ("钢板", "板材"):
+        return "3"
+    if v == "焊材":
+        return "6"
+    return ""
+
 
 def get_filtered_material_options(selected: dict) -> dict:
     """根据当前已选字段，查询数据库，返回所有材料字段的可选项"""
@@ -1538,6 +1618,12 @@ def get_dependency_mapping_from_db():
       mapping["_compound_rules"] = [
         {"masters":[(name,val),...], "dependent":"从字段", "options":[...]}
       ]
+      mapping["_dependent_defaults"] = {
+        (主参数名称, 主参数值, 被联动参数名称): { 元件名: 默认显示值, ... },
+        ...
+      }
+      同一 (主参数名称, 主参数值, 被联动参数名称) 多行（如按元件区分默认法兰密封面）时，
+      合并「联动选项」列表（去重保序）；默认值按「元件」列解析（顿号/逗号分隔多个元件名）。
     允许"主参数名称"是"垫片类型+垫片标准"这种复合形式；
     允许"主参数值"用"|"分隔（如：金属波齿复合垫片|SH/T 3430-2018）。
     """
@@ -1546,6 +1632,7 @@ def get_dependency_mapping_from_db():
     try:
         with conn.cursor() as cur:
             mapping = {}
+            mapping["_dependent_defaults"] = {}
 
             def _to_list(s):
                 """把"联动选项"安全转成 list，支持 JSON 和常见分隔符"""
@@ -1564,14 +1651,36 @@ def get_dependency_mapping_from_db():
                 parts = re.split(r"[，、,;；\s]+", t)
                 return [p.strip() for p in parts if p.strip()]
 
-            # 1) 单主字段
-            sql1 = """
+            def _merge_opts(existing, new_opts):
+                if not existing:
+                    return list(new_opts)
+                seen = set(existing)
+                out = list(existing)
+                for o in new_opts:
+                    if o not in seen:
+                        seen.add(o)
+                        out.append(o)
+                return out
+
+            # 1) 单主字段（兼容未增加「元件」「默认法兰密封面」列的旧库）
+            sql1_full = """
+                SELECT 主参数名称, 主参数值, 被联动参数名称, 联动选项,
+                       IFNULL(元件, '') AS 元件,
+                       IFNULL(默认法兰密封面, '') AS 默认法兰密封面
+                FROM 法兰参数联动表
+                WHERE 主参数名称 NOT LIKE '%%+%%'
+            """
+            sql1_legacy = """
                 SELECT 主参数名称, 主参数值, 被联动参数名称, 联动选项
                 FROM 法兰参数联动表
                 WHERE 主参数名称 NOT LIKE '%%+%%'
             """
-            cur.execute(sql1)
+            try:
+                cur.execute(sql1_full)
+            except Exception:
+                cur.execute(sql1_legacy)
             rows1 = cur.fetchall() or []
+            dep_defaults = mapping["_dependent_defaults"]
             for r in rows1:
                 mname = (r["主参数名称"] or "").strip()
                 mval  = (r["主参数值"] or "").strip()
@@ -1582,7 +1691,18 @@ def get_dependency_mapping_from_db():
                      continue
                 mapping.setdefault(mname, {})
                 mapping[mname].setdefault(mval, {})
-                mapping[mname][mval][dname] = opts
+                prev = mapping[mname][mval].get(dname)
+                mapping[mname][mval][dname] = _merge_opts(prev, opts)
+
+                comp_raw = (r.get("元件") or "").strip()
+                def_raw = (r.get("默认法兰密封面") or "").strip()
+                if comp_raw and def_raw:
+                    key = (mname, mval, dname)
+                    sub = dep_defaults.setdefault(key, {})
+                    for part in re.split(r"[、,，;；]+", comp_raw):
+                        c = part.strip()
+                        if c:
+                            sub[c] = def_raw
 
 
             # 2) 复合字段（名称里带 +）
@@ -2223,6 +2343,89 @@ def update_element_name_data(product_id, element_name, param_name, param_value):
         conn.close()
 
 
+_HG_FLANGE_TYPES_DISALLOWED_WHEN_INNER_BASE = frozenset({
+    "HG/T 20615 带颈对焊法兰",
+    "HG/T 20592 带颈对焊法兰",
+})
+_NB_FALLBACK_FLANGE_TYPE_WHEN_INNER_BASE = "NB/T 47023 长颈对焊法兰"
+
+
+def _default_seal_height_mm_for_flange_face_db(face: str):
+    """与元件定义界面「法兰密封面→密封面高度」规则一致，用于基准切否后写库。"""
+    f = (face or "").strip()
+    if f in ("平密封面RF",):
+        return "3"
+    if f in ("突面RF",):
+        return "2"
+    if f in ("全平面FF", "全平密封面FF"):
+        return "0"
+    if f in (
+        "凸密封面M", "凹密封面FM", "榫密封面T", "槽密封面G",
+        "凸面M", "凹面FM", "榫面T", "槽面G", "环连接面RJ", "环连接密封面RJ",
+    ):
+        return "6"
+    return None
+
+
+def sync_flange_params_when_outer_base_inner(product_id):
+    """
+    条件输入将「是否以外径为基准*」改为「否」后调用：
+    附加参数表中仍为 HG/T 20615/20592 的「法兰类型」改为 NB/T 47023 长颈对焊法兰，
+    「法兰密封面」改为该类型在法兰参数联动表中、对应该元件的默认值；
+    「密封面高度」按密封面型式写 0/2/3/6（与 UI 一致）。
+    """
+    if not product_id:
+        return
+    mapping = get_dependency_mapping_from_db()
+    dep_def = mapping.get("_dependent_defaults") or {}
+    flange_by_type = mapping.get("法兰类型") or {}
+    nb_sub = flange_by_type.get(_NB_FALLBACK_FLANGE_TYPE_WHEN_INNER_BASE) or {}
+    nb_face_opts = nb_sub.get("法兰密封面") or []
+    key_tpl = ("法兰类型", _NB_FALLBACK_FLANGE_TYPE_WHEN_INNER_BASE, "法兰密封面")
+
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 元件ID, 元件名称, 参数值
+                FROM 产品设计活动表_元件附加参数表
+                WHERE 产品ID = %s AND 参数名称 = %s
+                """,
+                (product_id, "法兰类型"),
+            )
+            rows = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    updated = 0
+    for row in rows:
+        eid = row.get("元件ID")
+        ename = (row.get("元件名称") or "").strip()
+        cur_type = (row.get("参数值") or "").strip()
+        if cur_type not in _HG_FLANGE_TYPES_DISALLOWED_WHEN_INNER_BASE:
+            continue
+        if not eid:
+            continue
+
+        cm = dep_def.get(key_tpl) or {}
+        new_face = (cm.get(ename) or "").strip()
+        if not new_face or new_face not in nb_face_opts:
+            new_face = nb_face_opts[0] if nb_face_opts else ""
+
+        try:
+            update_element_para_data(product_id, eid, "法兰类型", _NB_FALLBACK_FLANGE_TYPE_WHEN_INNER_BASE)
+            if new_face:
+                update_element_para_data(product_id, eid, "法兰密封面", new_face)
+            h = _default_seal_height_mm_for_flange_face_db(new_face)
+            if h is not None:
+                update_element_para_data(product_id, eid, "密封面高度", h)
+            updated += 1
+        except Exception as ex:
+            print(f"[基准切否-法兰同步库] 元件ID={eid} 失败: {ex}")
+
+    if updated:
+        print(f"[基准切否-法兰同步库] 产品ID={product_id} 已修正 {updated} 条 HG→{_NB_FALLBACK_FLANGE_TYPE_WHEN_INNER_BASE}")
 
 
 def update_guankou_category_for_tab(product_id, category_label, selected_codes: list):
@@ -2307,6 +2510,30 @@ def query_template_codes(product_id):
     finally:
         connection.close()
 
+
+
+def query_buguan_param_value(product_id, param_name):
+    """从产品设计活动表_布管参数表读取指定参数值（如管程程数）。"""
+    if not product_id or not (param_name or "").strip():
+        return None
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 参数值
+                FROM 产品设计活动表_布管参数表
+                WHERE 产品ID = %s AND 参数名 = %s
+                LIMIT 1
+                """,
+                (product_id, str(param_name).strip()),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row.get("参数值") if isinstance(row, dict) else row[0]
+    finally:
+        conn.close()
 
 
 def query_extra_param_value(product_id, param_name):
@@ -3438,8 +3665,53 @@ def get_dn_for_outer_head_cylinder(product_id: str) -> str:
 
 
 
-# [性能优化] 垫片-法兰映射按垫片名称缓存，减少重复读取
-def get_gasket_mapping(gasket_name: str) -> dict:
+def _normalize_product_form_list(forms_text: str) -> list:
+    s = str(forms_text or "").strip().upper()
+    for sep in ("，", "、", ";", "；", "/", "\\"):
+        s = s.replace(sep, ",")
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+def _is_form_match(forms_text: str, product_form: str) -> bool:
+    tokens = _normalize_product_form_list(forms_text)
+    if not tokens:
+        return False
+    pf = str(product_form or "").strip().upper()
+    return pf in tokens
+
+def _is_form_all(forms_text: str) -> bool:
+    tokens = _normalize_product_form_list(forms_text)
+    if not tokens:
+        return True
+    return "ALL" in tokens
+
+def get_product_form_by_product_id(product_id: str) -> str:
+    key = str(product_id or "").strip()
+    if not key:
+        return ""
+    if key in _PRODUCT_FORM_CACHE:
+        cached = _PRODUCT_FORM_CACHE.get(key)
+        return cached if cached is not None else ""
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 产品型式
+                FROM 产品设计活动表
+                WHERE 产品ID = %s
+                LIMIT 1
+                """,
+                (key,)
+            )
+            row = cur.fetchone()
+            val = (row.get("产品型式") or "").strip() if row else ""
+            _PRODUCT_FORM_CACHE[key] = val
+            return val
+    finally:
+        conn.close()
+
+# [性能优化] 垫片-法兰映射按(垫片名称,产品型式)缓存，减少重复读取
+def get_gasket_mapping(gasket_name: str, product_id: str = "") -> dict:
     """
     FROM 材料库.垫片配套法兰映射表
     返回: {"flange": 配套法兰, "flange_side": 法兰管壳程, "gasket_side": 垫片管壳程}
@@ -3447,7 +3719,8 @@ def get_gasket_mapping(gasket_name: str) -> dict:
     res = {"flange": "", "flange_side": "", "gasket_side": ""}
     if not gasket_name:
         return res
-    key = (gasket_name.strip(),)
+    product_form = get_product_form_by_product_id(product_id)
+    key = (gasket_name.strip(), str(product_form or "").strip().upper())
     if key in _GASKET_MAPPING_CACHE:
         cached = _GASKET_MAPPING_CACHE.get(key) or {}
         return cached or res
@@ -3455,28 +3728,39 @@ def get_gasket_mapping(gasket_name: str) -> dict:
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT 配套法兰, 法兰管壳程, 垫片管壳程
+                SELECT 配套法兰, 法兰管壳程, 垫片管壳程, 产品型式
                 FROM 垫片配套法兰映射表
                 WHERE 垫片名称=%s
-                LIMIT 1
             """, (gasket_name.strip(),))
-            row = cur.fetchone()
-            if row:
-                res["flange"]      = (row.get("配套法兰") or "").strip()
-                res["flange_side"] = (row.get("法兰管壳程") or "").strip()
-                res["gasket_side"] = (row.get("垫片管壳程") or "").strip()
+            rows = cur.fetchall() or []
+
+            preferred = []
+            fallback = []
+            for row in rows:
+                forms = row.get("产品型式")
+                if _is_form_match(forms, product_form):
+                    preferred.append(row)
+                elif _is_form_all(forms):
+                    fallback.append(row)
+
+            picked = preferred[0] if preferred else (fallback[0] if fallback else None)
+            if picked:
+                res["flange"]      = (picked.get("配套法兰") or "").strip()
+                res["flange_side"] = (picked.get("法兰管壳程") or "").strip()
+                res["gasket_side"] = (picked.get("垫片管壳程") or "").strip()
     finally:
         conn.close()
     _GASKET_MAPPING_CACHE[key] = res
     return res
 
 
-# [性能优化] 垫片-法兰映射(全量)按垫片名称缓存
-def get_gasket_mappings_all(gasket_name: str) -> list:
+# [性能优化] 垫片-法兰映射(全量)按(垫片名称,产品型式)缓存
+def get_gasket_mappings_all(gasket_name: str, product_id: str = "") -> list:
     res = []
     if not gasket_name:
         return res
-    key = (gasket_name.strip(),)
+    product_form = get_product_form_by_product_id(product_id)
+    key = (gasket_name.strip(), str(product_form or "").strip().upper())
     if key in _GASKET_MAPPINGS_ALL_CACHE:
         cached = _GASKET_MAPPINGS_ALL_CACHE.get(key) or []
         return cached
@@ -3485,19 +3769,28 @@ def get_gasket_mappings_all(gasket_name: str) -> list:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT 配套法兰, 法兰管壳程, 垫片管壳程
+                SELECT 配套法兰, 法兰管壳程, 垫片管壳程, 产品型式
                 FROM 垫片配套法兰映射表
                 WHERE 垫片名称=%s
                 """,
                 (gasket_name.strip(),)
             )
             rows = cur.fetchall() or []
+
+            preferred = []
+            fallback = []
             for row in rows:
-                res.append({
+                item = {
                     "配套法兰": (row.get("配套法兰") or "").strip(),
                     "法兰管壳程": (row.get("法兰管壳程") or "").strip(),
                     "垫片管壳程": (row.get("垫片管壳程") or "").strip(),
-                })
+                }
+                forms = row.get("产品型式")
+                if _is_form_match(forms, product_form):
+                    preferred.append(item)
+                elif _is_form_all(forms):
+                    fallback.append(item)
+            res = preferred if preferred else fallback
     finally:
         conn.close()
     _GASKET_MAPPINGS_ALL_CACHE[key] = res
@@ -3511,7 +3804,7 @@ def get_dn_for_gasket(product_id: str, gasket_name: str) -> str:
          · 若为"参数定义" 且 垫片=外头盖垫片 -> 取 外头盖圆筒 的 公称直径
          · 否则 -> 按该侧别 get_dn_by_side
     """
-    m = get_gasket_mapping(gasket_name or "")
+    m = get_gasket_mapping(gasket_name or "", product_id=product_id)
     gasket_side = m.get("gasket_side", "")
     if gasket_side == "参数定义" and (gasket_name or "").strip() == "外头盖垫片":
         return get_dn_for_outer_head_cylinder(product_id)
@@ -3525,7 +3818,7 @@ def get_pn_for_gasket(product_id: str, gasket_name: str) -> str:
       - 若配套法兰 ∈ {浮头法兰, 钩圈} -> 取两侧《设计压力*》最大值
       - 否则 -> 按"法兰管壳程"取对应侧《设计压力*》
     """
-    m = get_gasket_mapping(gasket_name or "")
+    m = get_gasket_mapping(gasket_name or "", product_id=product_id)
     flange      = m.get("flange", "")
     flange_side = m.get("flange_side", "")
     print(f"f{flange}")
@@ -3702,6 +3995,20 @@ def invalidate_caches_for_product(product_id: str):
                 _FLANGE_MATERIAL_CACHE.pop(k, None)
     except Exception:
         pass
+    try:
+        # 垫片映射表可能在运行期被维护（如新增 AKU/BKU 特例），
+        # 这里清空映射缓存，避免继续命中旧的 ALL 规则。
+        _GASKET_MAPPING_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _GASKET_MAPPINGS_ALL_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _PRODUCT_FORM_CACHE.pop(product_id, None)
+    except Exception:
+        pass
 
 # [性能优化] 推荐PN按(产品ID, 垫片名称)缓存计算结果
 def compute_pn_for_gasket(product_id: str, gasket_name: str):
@@ -3713,7 +4020,7 @@ def compute_pn_for_gasket(product_id: str, gasket_name: str):
     shell_p = get_design_pressure_side(product_id, "壳程")
     tube_t = _get_design_temperature_side(product_id, "管程")
     shell_t = _get_design_temperature_side(product_id, "壳程")
-    maps = get_gasket_mappings_all(gasket_name or "")
+    maps = get_gasket_mappings_all(gasket_name or "", product_id=product_id)
     pn_map = {}
     pn_vals = []
     for r in maps or []:

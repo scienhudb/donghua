@@ -322,6 +322,8 @@ def check_work_temp_in(value, tip_widget, param_name, column_name, table_widget,
             continue
         if name == "设计温度（最高）*":
             design_temp = val
+        elif name == "最低设计温度":
+            min_design_temp = val
         elif name == "工作温度（出口）":
             work_temp_out = val
 
@@ -356,13 +358,29 @@ def check_work_temp_in(value, tip_widget, param_name, column_name, table_widget,
         if design_temp < current_work_max:
             return "warn", "设计温度应当不低于最高工作温度。不合规。"
         elif design_temp == current_work_max:
-            # return "warn", "设计温度应当不低于最高工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最高工作温度。"
+            # pass
         elif (design_temp - current_work_max) > 50:
             return "warn", "设计温度相对于工作温度的裕度较大。"
         else:
             pass
 
+    # 0506新增：双向检验（工作温度变化时校验最低设计温度是否符合要求）
+    # 规则：最低设计温度应低于工作温度（入口/出口）的最小值
+    if min_design_temp is not None:
+        current_work_temps = [temp]  # 当前入口温度
+        if work_temp_out is not None:
+            current_work_temps.append(work_temp_out)
+        current_work_min = min(current_work_temps)
+
+        if min_design_temp > current_work_min:
+            return "warn", "最低设计温度应当不高于最低工作温度。"
+
+        if min_design_temp == current_work_min:
+            return "warn", "最低设计温度应当不低于最低工作温度。"
+
+        if (current_work_min - min_design_temp) > 50 :#最低设计温度低于最低工作温度超过50℃时，提示：设计温度相对于工作温度的裕度较大。
+            return "warn", "设计温度相对于工作温度的裕度较大。"
 
     return "ok", ""
 
@@ -467,12 +485,28 @@ def check_work_temp_out(value, tip_widget, param_name, column_name, table_widget
         if design_temp < current_work_max:
             return "warn", "设计温度应当不低于最高工作温度。不合规。"
         elif design_temp == current_work_max:
-            # return "warn", "设计温度应当不低于最高工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最高工作温度。"
         elif (design_temp - current_work_max) > 50:
             return "warn", "设计温度相对于工作温度的裕度较大。"
         else:
             pass
+
+    # 0506新增：双向检验（工作温度变化时校验最低设计温度是否符合要求）
+    # 规则：最低设计温度应低于工作温度（入口/出口）的最小值
+    if min_design_temp is not None:
+        current_work_temps = [temp]  # 当前出口温度
+        if work_temp_in is not None:
+            current_work_temps.append(work_temp_in)
+        current_work_min = min(current_work_temps)
+
+        if min_design_temp > current_work_min:
+            return "warn", "最低设计温度应当不高于最低工作温度。"
+
+        if min_design_temp == current_work_min:
+            return "warn", "最低设计温度应当不低于最低工作温度。"
+
+        if (current_work_min - min_design_temp) > 50 :#最低设计温度低于最低工作温度超过50℃时，提示：设计温度相对于工作温度的裕度较大。
+            return "warn", "设计温度相对于工作温度的裕度较大。"
 
     return "ok", ""
 
@@ -773,12 +807,47 @@ def check_design_temp_max(value, tip_widget, param_name, column_name, table_widg
         if temp < work_temp_max:
             return "warn", "设计温度应当不低于最高工作温度。不合规。"
         elif temp == work_temp_max:
-            # return "warn", "设计温度应当不低于最高工作温度。"
-            pass
+            return "warn", "设计温度应当不低于最高工作温度。"
+            # pass
         elif (temp - work_temp_max) > 50:
             return "warn", "设计温度相对于工作温度的裕度较大。"
         else:
             pass
+    # 0506新增：双向检验
+    # 反向联动校验（NEN/BEM/AEM）：
+    # 当先输入“沿长度平均的换热管金属温度*”后再输入“设计温度（最高）*”时，
+    # 也要检查 avg_tube_metal_temp < 设计温度（最高）*
+    try:
+        raw_form = _get_raw_product_form_from_product_db(table_widget).strip().lower()
+    except Exception:
+        raw_form = ""
+
+    if raw_form in {"nen", "bem", "aem","NEN(Head)"}:
+        avg_tube_metal_temp = None
+        avg_shell_metal_temp = None
+        for row in range(table_widget.rowCount()):
+            p_text = get_param_name(table_widget, row)
+            if p_text == "沿长度平均的换热管金属温度*":
+                val_item = table_widget.item(row, col_index)
+                if val_item and val_item.text().strip():
+                    try:
+                        avg_tube_metal_temp = float(val_item.text().strip())
+                    except ValueError:
+                        pass
+            elif p_text == "沿长度平均的壳程圆筒金属温度*":
+                val_item = table_widget.item(row, col_index)
+                if val_item and val_item.text().strip():
+                    try:
+                        avg_shell_metal_temp = float(val_item.text().strip())
+                    except ValueError:
+                        pass
+
+        if avg_tube_metal_temp is not None and avg_tube_metal_temp > 0:
+            if avg_tube_metal_temp >= temp:
+                return "warn", "沿长度平均的换热管金属温度应小于设计温度（最高）*，请核对后输入"
+        if avg_shell_metal_temp is not None and avg_shell_metal_temp > 0:
+            if avg_shell_metal_temp >= temp:
+                return "warn", "沿长度平均的壳程圆筒金属温度应小于设计温度（最高）*，请核对后输入"
     return "ok", ""
 
 def check_design_temp_min(value, tip_widget, param_name, column_name, table_widget, col_index) -> Tuple[str, str]:
@@ -841,6 +910,42 @@ def check_design_temp_min(value, tip_widget, param_name, column_name, table_widg
         else:  # temp < work_min
             if (work_min - temp) > 50:
                 return "warn", "最低设计温度相对于工作温度的裕度较大。"
+    # 0506新增：双向检验
+    # 反向联动校验（NEN/BEM/AEM）：
+    # 当先输入“沿长度平均的换热管/壳程圆筒金属温度*”后再输入“最低设计温度”时，
+    # 也要检查 avg_metal_temp > 最低设计温度
+    try:
+        raw_form = _get_raw_product_form_from_product_db(table_widget).strip().lower()
+    except Exception:
+        raw_form = ""
+
+    if raw_form in {"nen", "bem", "aem","nen(head)"}:
+        avg_tube_metal_temp = None
+        avg_shell_metal_temp = None
+
+        for row in range(table_widget.rowCount()):
+            p_text = get_param_name(table_widget, row)
+            if p_text == "沿长度平均的换热管金属温度*":
+                val_item = table_widget.item(row, col_index)
+                if val_item and val_item.text().strip():
+                    try:
+                        avg_tube_metal_temp = float(val_item.text().strip())
+                    except ValueError:
+                        pass
+            elif p_text == "沿长度平均的壳程圆筒金属温度*":
+                val_item = table_widget.item(row, col_index)
+                if val_item and val_item.text().strip():
+                    try:
+                        avg_shell_metal_temp = float(val_item.text().strip())
+                    except ValueError:
+                        pass
+
+        if avg_tube_metal_temp is not None and avg_tube_metal_temp < 0:
+            if avg_tube_metal_temp <= temp:
+                return "warn", "沿长度平均的换热管金属温度应大于最低设计温度，请核对后输入"
+        if avg_shell_metal_temp is not None and avg_shell_metal_temp < 0:
+            if avg_shell_metal_temp <= temp:
+                return "warn", "沿长度平均的壳程圆筒金属温度应大于最低设计温度，请核对后输入"
     return "ok", ""
     # 根据与最低工作温度的比较结果返回相应提示   已修改
     # if work_min is not None and temp >= work_min and work_min==work_in:
