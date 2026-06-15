@@ -17,6 +17,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_render import _set_table_tooltips, _i
 from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     get_filtered_material_options,
     default_cladding_thickness_by_material_type,
+    cladding_thickness_default_if_needed,
     update_cladding_groove_depth_visibility,
     DEBUG_VERBOSE_DEFINE_UI,
 )
@@ -1637,6 +1638,7 @@ def _apply_cladding_type_logic_for_attachment_table(
     *,
     has_covering: bool,
     type_value: str,
+    type_param: str = "",
     level_param: str,
     status_param: str,
     process_param: str,
@@ -1690,10 +1692,15 @@ def _apply_cladding_type_logic_for_attachment_table(
     # 6.12覆层新增
     if thickness_param:
         thickness_row = _find_first_row_by_param(table, param_col, thickness_param)
-        default_th = default_cladding_thickness_by_material_type(v)
-        if thickness_row is not None and default_th:
-            _ensure_editable_value_cell(table, thickness_row, value_col)
-            _set_cell_text(table, thickness_row, value_col, default_th)
+        if thickness_row is not None:
+            cur = _get_cell_text(table, thickness_row, value_col)
+            type_key = type_param or level_param.replace("覆层材料级别", "覆层材料类型")
+            new_th = cladding_thickness_default_if_needed(
+                table, type_key, v, cur
+            )
+            if new_th:
+                _ensure_editable_value_cell(table, thickness_row, value_col)
+                _set_cell_text(table, thickness_row, value_col, new_th)
 
 
 def _install_attachment_flange_cladding_linkage(table, param_col: int, value_col: int, viewer_instance=None):
@@ -1790,6 +1797,7 @@ def _install_attachment_flange_cladding_linkage(table, param_col: int, value_col
                     value_col,
                     has_covering=True,
                     type_value=cur_type,
+                    type_param=type_name,
                     level_param=level_name,
                     status_param=status_name,
                     process_param=process_name,
@@ -1870,6 +1878,7 @@ def _install_attachment_flange_cladding_linkage(table, param_col: int, value_col
                     value_col,
                     has_covering=has_covering,
                     type_value=new_text,
+                    type_param=type_name,
                     level_param=level_name,
                     status_param=status_name,
                     process_param=process_name,
@@ -1917,6 +1926,7 @@ def _install_attachment_flange_cladding_linkage(table, param_col: int, value_col
                 value_col,
                 has_covering=has_covering_init,
                 type_value=cur_t,
+                type_param=type_name,
                 level_param=level_name,
                 status_param=status_name,
                 process_param=process_name,

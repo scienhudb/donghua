@@ -989,6 +989,7 @@ def _cladding_names_for_switch(switch_name: str):
 def update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, control_field=None):
     """
     焊接凹槽深度：覆层开关=是 且 覆层材料类型=钢板/板材 时显示，否则隐藏（仅隐藏，不清空）。
+    显示时：仅材料类型刚变为钢板/板材或当前为空时写入默认 2，保留手改/库值。
     control_field 指定时只刷新对应覆层组；为 None 时刷新表中存在的全部覆层组。
     """
     if table is None:
@@ -1010,6 +1011,23 @@ def update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, con
                 return r
         return None
 
+    def _set_cell_text(row, col, text: str):
+        w = table.cellWidget(row, col)
+        if isinstance(w, QComboBox):
+            w.setCurrentText(text)
+            return
+        if isinstance(w, QLineEdit):
+            w.setText(text)
+            return
+        it = table.item(row, col)
+        if it is None:
+            it = QTableWidgetItem(text)
+            from PyQt5.QtCore import Qt
+            it.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, col, it)
+        else:
+            it.setText(text)
+
     for switch_name in switches:
         if not switch_name:
             continue
@@ -1025,6 +1043,12 @@ def update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, con
         type_val = _param_cell_text(table, r_type, value_col) if r_type is not None else ""
         show = covering and (type_val in ("钢板", "板材"))
         table.setRowHidden(r_groove, not show)
+        cur_groove = _param_cell_text(table, r_groove, value_col)
+        new_depth = cladding_groove_depth_default_if_needed(
+            table, type_name, type_val, cur_groove, covering=covering
+        )
+        if show and new_depth:
+            _set_cell_text(r_groove, value_col, new_depth)
 
 
 def toggle_covering_fields(table, combo, control_field):
@@ -1480,6 +1504,62 @@ def default_cladding_thickness_by_material_type(type_value: str) -> str:
         return "3"
     if v == "焊材":
         return "6"
+    return ""
+
+
+def cladding_thickness_default_if_needed(
+    table, type_field_key: str, type_value: str, current_text: str
+) -> str:
+    """
+    覆层厚度：仅当材料类型变更或当前单元格为空时返回默认厚度；否则返回空串（保留手改/库值）。
+    在 table._cladding_prev_types 记录各覆层组材料类型的上一次取值。
+    """
+    v = (type_value or "").strip()
+    if not type_field_key:
+        return ""
+    _prev_map = getattr(table, "_cladding_prev_types", None)
+    if _prev_map is None:
+        _prev_map = {}
+        setattr(table, "_cladding_prev_types", _prev_map)
+    prev_v = _prev_map.get(type_field_key)
+    if prev_v is None:
+        prev_v = v
+    type_changed = (prev_v != v)
+    _prev_map[type_field_key] = v
+    default_th = default_cladding_thickness_by_material_type(v)
+    if not default_th:
+        return ""
+    cur = (current_text or "").strip()
+    if type_changed or not cur:
+        return default_th
+    return ""
+
+
+def cladding_groove_depth_default_if_needed(
+    table, type_field_key: str, type_value: str, current_text: str, *, covering: bool
+) -> str:
+    """
+    焊接凹槽深度：覆层=是 且 材料类型=钢板/板材 时，仅当「刚变为钢板/板材」或当前为空时返回默认 2；
+    否则返回空串（保留手改/库值）。使用独立 prev 键，避免与覆层厚度联动互相覆盖。
+    """
+    v = (type_value or "").strip()
+    if not type_field_key:
+        return ""
+    grove_key = f"{type_field_key}::groove"
+    _prev_map = getattr(table, "_cladding_prev_types", None)
+    if _prev_map is None:
+        _prev_map = {}
+        setattr(table, "_cladding_prev_types", _prev_map)
+    prev_v = _prev_map.get(grove_key)
+    if prev_v is None:
+        prev_v = v
+    _prev_map[grove_key] = v
+    if not covering or v not in ("钢板", "板材"):
+        return ""
+    became_plate = (v in ("钢板", "板材")) and (prev_v not in ("钢板", "板材"))
+    cur = (current_text or "").strip()
+    if became_plate or not cur:
+        return "2"
     return ""
 
 

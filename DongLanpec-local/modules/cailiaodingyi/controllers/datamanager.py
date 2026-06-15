@@ -47,6 +47,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     update_spacer_tube_status_to_undefined, restore_spacer_tube_status_to_defined,load_updated_fastener_define_data,
     update_element_name_data,
     default_cladding_thickness_by_material_type,
+    cladding_thickness_default_if_needed,
     DEBUG_VERBOSE_DEFINE_UI,
 )
 from modules.cailiaodingyi.funcs.funcs_pdf_input import (
@@ -4305,9 +4306,14 @@ def _apply_cladding_type_logic(table, param_col, value_col, type_field_name: str
         if state_row is not None: table.setRowHidden(state_row, False)
 
     # 6.12覆层新增
-    default_th = default_cladding_thickness_by_material_type(v)
-    if thickness_row is not None and default_th:
-        _set(thickness_row, default_th)
+    if thickness_row is not None:
+        cur_it = table.item(thickness_row, value_col)
+        cur_th = cur_it.text().strip() if cur_it else ""
+        new_th = cladding_thickness_default_if_needed(
+            table, type_field_name, v, cur_th
+        )
+        if new_th:
+            _set(thickness_row, new_th)
 
     switch_name = "是否添加覆层" if not prefix else f"{prefix}是否添加覆层"
     update_cladding_groove_depth_visibility(table, param_col, value_col, control_field=switch_name)
@@ -5191,6 +5197,27 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
     # 6.12覆层新增
     try:
         update_cladding_groove_depth_visibility(table, param_col, value_col)
+    except Exception:
+        pass
+
+    # 初次进入：同步覆层级别/工艺/厚度联动（厚度仅类型变更或为空时写默认，保留库值/手改值）
+    try:
+        for switch_field, type_field in (
+            ("是否添加覆层", "覆层材料类型"),
+            ("管程侧是否添加覆层", "管程侧覆层材料类型"),
+            ("壳程侧是否添加覆层", "壳程侧覆层材料类型"),
+        ):
+            r_sw = find_row_by_param_name(table, switch_field, param_col)
+            r_ty = find_row_by_param_name(table, type_field, param_col)
+            if r_sw is None or r_ty is None:
+                continue
+            it_sw = table.item(r_sw, value_col)
+            if not (it_sw and it_sw.text().strip() == "是"):
+                continue
+            it_ty = table.item(r_ty, value_col)
+            cur_type = (it_ty.text().strip() if it_ty else "")
+            if cur_type:
+                _apply_cladding_type_logic(table, param_col, value_col, type_field, cur_type)
     except Exception:
         pass
 
@@ -6861,15 +6888,34 @@ def apply_gk_paramname_combobox(table, param_col, value_col, component_info=None
                             combo_widget.setCurrentText("")
                         combo_widget.blockSignals(False)
                     # 6.12覆层新增
-                    default_th = default_cladding_thickness_by_material_type(value)
-                    if default_th and cover_value == "是":
+                    if cover_value == "是":
+                        cur_th = ""
+                        th_row = None
                         for rr in range(table.rowCount()):
                             pitem = table.item(rr, param_col)
                             if pitem and pitem.text().strip() == "覆层厚度":
+                                th_row = rr
                                 widget = table.cellWidget(rr, value_col)
                                 if isinstance(widget, QLineEdit):
-                                    widget.setText(default_th)
+                                    cur_th = widget.text().strip()
+                                else:
+                                    it = table.item(rr, value_col)
+                                    cur_th = it.text().strip() if it else ""
                                 break
+                        new_th = cladding_thickness_default_if_needed(
+                            table, "覆层材料类型", value, cur_th
+                        )
+                        if new_th and th_row is not None:
+                            widget = table.cellWidget(th_row, value_col)
+                            if isinstance(widget, QLineEdit):
+                                widget.setText(new_th)
+                            else:
+                                it = table.item(th_row, value_col)
+                                if it is None:
+                                    it = QTableWidgetItem(new_th)
+                                    table.setItem(th_row, value_col, it)
+                                else:
+                                    it.setText(new_th)
 
                     try:
                         update_cladding_groove_depth_visibility(

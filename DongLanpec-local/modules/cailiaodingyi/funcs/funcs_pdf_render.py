@@ -767,10 +767,16 @@ def install_overlay_group_toggle(
             continue
 
         # --- 生成刷新函数（注意参数顺序） ---
+        _prev_types = (
+            [_get_text(type_row, c) for c in value_cols]
+            if type_row >= 0 else [""] * len(value_cols)
+        )
+
         def make_refresh(_toggle_row, _type_row, _grade_row, _status_row, _process_row,
                          _thickness_row, _groove_mode, _groove_data, _thickness_min, _overlay_rows,  #6.12覆层新增
                          _plate_values, _weld_values,
-                         _p_plate_opts, _p_plate_def, _p_weld_opts, _p_weld_def):
+                         _p_plate_opts, _p_plate_def, _p_weld_opts, _p_weld_def,
+                         _prev_types):
             def _refresh():
                 # 1) 覆层开关：整块显隐
                 has_overlay = True
@@ -786,6 +792,11 @@ def install_overlay_group_toggle(
 
                 if not has_overlay:
                     _hide_groove_rows(table, _groove_mode, _groove_data) #6.12覆层新增
+                    if _type_row >= 0:
+                        _off_types = [_get_text(_type_row, c) for c in value_cols]
+                        for i, _c in enumerate(value_cols):
+                            if i < len(_prev_types):
+                                _prev_types[i] = _off_types[i] if i < len(_off_types) else ""
                     table.viewport().update()
                     return
 
@@ -862,13 +873,16 @@ def install_overlay_group_toggle(
                         else:
                             pass
                 # 6.12覆层新增
-                # 2.4 覆层厚度（按列默认值）
+                # 2.4 覆层厚度（按列默认值：仅类型变更或当前为空时写入，保留用户手改值）
                 if _thickness_row >= 0:
                     for cc in value_cols:
                         t = _get_text(_type_row, cc) if _type_row >= 0 else ""
                         default_th = default_cladding_thickness_by_material_type(t)
                         if default_th:
-                            _set_text(_thickness_row, cc, default_th)
+                            idx = cc - value_cols[0]
+                            prev_t = _prev_types[idx] if idx < len(_prev_types) else ""
+                            if t != prev_t or not _get_text(_thickness_row, cc):
+                                _set_text(_thickness_row, cc, default_th)
 
                 # 2.5 焊接凹槽深度（覆层=是 且 对应列材料类型=钢板/板材）
                 types = [_get_text(_type_row, c) for c in value_cols] if _type_row >= 0 else []
@@ -882,8 +896,13 @@ def install_overlay_group_toggle(
                         if hide_row:
                             for cc in value_cols:
                                 _clear_cell(gro_row, cc)
+                        else:
+                            prev_t = _prev_types[idx] if idx < len(_prev_types) else ""
+                            became_plate = (t in _plate_values) and (prev_t not in _plate_values)
+                            if became_plate or not _get_text(gro_row, col_i):
+                                _set_text(gro_row, col_i, "2")
                 elif _groove_mode == "unified" and _groove_data is not None and _groove_data >= 0:
-                    # 4列单行：整行至少一列钢板则显示；焊材列禁用并清空（同覆层级别/使用状态）
+                    # 4列单行：整行至少一列钢板则显示；焊材列禁用并清空；钢板列默认=2（不覆盖手改值）
                     any_plate = any(t in _plate_values for t in types)
                     table.setRowHidden(_groove_data, not any_plate)
                     for cc in value_cols:
@@ -893,6 +912,15 @@ def install_overlay_group_toggle(
                         _set_cell_enabled(_groove_data, cc, enabled)
                         if not enabled:
                             _clear_cell(_groove_data, cc)
+                        else:
+                            prev_t = _prev_types[idx] if idx < len(_prev_types) else ""
+                            became_plate = (t in _plate_values) and (prev_t not in _plate_values)
+                            if became_plate or not _get_text(_groove_data, cc):
+                                _set_text(_groove_data, cc, "2")
+
+                for i, _c in enumerate(value_cols):
+                    if i < len(_prev_types):
+                        _prev_types[i] = types[i] if i < len(types) else ""
 
             return _refresh
 
@@ -900,7 +928,8 @@ def install_overlay_group_toggle(
             toggle_row, type_row, grade_row, status_row, process_row,
             thickness_row, groove_mode, groove_data, thickness_min, overlay_rows,  #6.12覆层新增
             plate_values, weld_values,
-            process_plate_options, process_plate_default, process_weld_options, process_weld_default
+            process_plate_options, process_plate_default, process_weld_options, process_weld_default,
+            _prev_types,
         )
 
         watchers.append({
