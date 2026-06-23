@@ -26,6 +26,23 @@ db_config_2 = {
     'database': '材料库'
 }
 
+db_config_config = {
+    'host': 'localhost',
+    'port': 3306,
+    'user': 'root',
+    'password': '123456',
+    'database': '配置库'
+}
+
+CLADDING_GROOVE_DEPTH_CONFIG_ID = "1.1.2"
+CLADDING_GROOVE_DEPTH_LEGACY_DEFAULT = "2"
+QIUGUANXING_FENGTOU_ELEMENT_NAME = "球冠形封头"
+QIUGUAN_GROOVE_DEPTH_CONFIG_ENABLED_ID = "1.5.5"
+QIUGUAN_GROOVE_DN_THRESHOLD_CONFIG_ID = "1.5.5.1"
+_CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE = None
+_QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE = None
+_QIUGUAN_GROOVE_DN_THRESHOLD_CACHE = None
+
 # 元件定义界面冗长调试输出总开关（默认关闭；开发排查时在下方置 True）
 # 控制：垫片尺寸/PN 计算、[DBG] 垫片联动、支座/铭牌/保温的合并表与支座联动、[铭牌附属元件显隐]、[保温装置-螺柱型式显隐]、
 # [DBG][fastener_render]/[DBG][fastener_data]、材料组识别与 get_options_for_param 的[警告]、
@@ -989,11 +1006,14 @@ def _cladding_names_for_switch(switch_name: str):
 def update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, control_field=None):
     """
     焊接凹槽深度：覆层开关=是 且 覆层材料类型=钢板/板材 时显示，否则隐藏（仅隐藏，不清空）。
-    显示时：仅材料类型刚变为钢板/板材或当前为空时写入默认 2，保留手改/库值。
+    球冠形封头额外要求配置库 user_config(1.5.5)=True，且覆层材料类型=钢板/板材。
+    显示时：仅材料类型刚变为适用类型或当前为空时写入默认值，保留手改/库值。
     control_field 指定时只刷新对应覆层组；为 None 时刷新表中存在的全部覆层组。
     """
     if table is None:
         return
+
+    element_name = _element_name_from_table(table)
 
     switches = [control_field] if control_field else [
         "是否添加覆层",
@@ -1041,7 +1061,7 @@ def update_cladding_groove_depth_visibility(table, param_col=0, value_col=1, con
         r_type = _find_row(type_name)
         covering = (_param_cell_text(table, r_sw, value_col) == "是") if r_sw is not None else False
         type_val = _param_cell_text(table, r_type, value_col) if r_type is not None else ""
-        show = covering and (type_val in ("钢板", "板材"))
+        show = _should_show_cladding_groove_depth(element_name, covering, type_val)
         table.setRowHidden(r_groove, not show)
         cur_groove = _param_cell_text(table, r_groove, value_col)
         new_depth = cladding_groove_depth_default_if_needed(
@@ -1535,16 +1555,191 @@ def cladding_thickness_default_if_needed(
     return ""
 
 
+def _get_user_config_value(config_id: str):
+    """从配置库 user_config 表读取指定 id 的 value。"""
+    try:
+        conn = get_connection(**db_config_config)
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT value FROM user_config WHERE id = %s LIMIT 1", (config_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return row.get("value") if isinstance(row, dict) else row[0]
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[读取user_config失败] id={config_id}, 错误: {e}")
+        return None
+
+
+def _is_truthy_config_value(value) -> bool:
+    """将 user_config.value 解析为布尔值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if value is None:
+        return False
+
+    text = str(value).strip()
+    if not text:
+        return False
+
+    lower_text = text.lower()
+    if lower_text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if lower_text in {"false", "0", "no", "n", "off", "none", "null"}:
+        return False
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, bool):
+            return parsed
+        if isinstance(parsed, (int, float)):
+            return parsed == 1
+        if isinstance(parsed, str):
+            return parsed.strip().lower() in {"true", "1", "yes", "y", "on"}
+    except Exception:
+        pass
+    return False
+
+
+def _parse_numeric_value(val) -> Optional[float]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    s = s.replace("，", ",")
+    m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
+
+
+def _qiuguan_groove_depth_config_enabled() -> bool:
+    """球冠形封头：配置库 user_config(id=1.5.5) 是否为 True。"""
+    global _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE
+    if _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE is None:
+        _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE = _is_truthy_config_value(
+            _get_user_config_value(QIUGUAN_GROOVE_DEPTH_CONFIG_ENABLED_ID)
+        )
+    return _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE
+
+
+def _qiuguan_groove_dn_threshold() -> Optional[float]:
+    """球冠形封头：配置库 user_config(id=1.5.5.1) 的公称直径阈值。"""
+    global _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE
+    if _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE is None:
+        _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE = _parse_numeric_value(
+            _get_user_config_value(QIUGUAN_GROOVE_DN_THRESHOLD_CONFIG_ID)
+        )
+    return _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE
+
+
+def _product_id_from_table(table) -> str:
+    viewer = getattr(table, "_viewer_instance", None)
+    if viewer is not None:
+        pid = getattr(viewer, "product_id", None)
+        if pid is not None and str(pid).strip():
+            return str(pid).strip()
+    pid = getattr(table, "_product_id", None)
+    return str(pid).strip() if pid is not None and str(pid).strip() else ""
+
+
+def _get_tube_side_nominal_diameter(product_id: str) -> Optional[float]:
+    """从设计数据表读取公称直径行的管程数值。"""
+    if not product_id:
+        return None
+    try:
+        design_map = get_design_params_by_product_id(product_id) or {}
+    except Exception:
+        return None
+    for pname in ("公称直径*", "公称直径"):
+        row = design_map.get(pname)
+        if not row:
+            continue
+        parsed = _parse_numeric_value(row.get("管程数值"))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _is_qiuguanxing_fengtou_element(element_name: str) -> bool:
+    return (element_name or "").strip() == QIUGUANXING_FENGTOU_ELEMENT_NAME
+
+
+def _cladding_groove_plate_types(element_name: str) -> Tuple[str, ...]:
+    return ("钢板", "板材")
+
+
+def _should_show_cladding_groove_depth(element_name: str, covering: bool, type_val: str) -> bool:
+    v = (type_val or "").strip()
+    plate_types = _cladding_groove_plate_types(element_name)
+    if not covering or v not in plate_types:
+        return False
+    if _is_qiuguanxing_fengtou_element(element_name):
+        return _qiuguan_groove_depth_config_enabled()
+    return True
+
+
+def _default_qiuguan_cladding_groove_depth(product_id: str = None) -> str:
+    """
+    球冠形封头焊接凹槽深度默认值：
+    管程公称直径 > user_config(1.5.5.1) → user_config(1.1.2)；否则 → 0。
+    """
+    dn = _get_tube_side_nominal_diameter(product_id)
+    threshold = _qiuguan_groove_dn_threshold()
+    if dn is not None and threshold is not None and dn > threshold:
+        return _resolve_cladding_groove_depth_from_user_config()
+    return "0"
+
+
+def _resolve_cladding_groove_depth_from_user_config() -> str:
+    """从配置库 user_config(id=1.1.2) 读取覆层焊接凹槽深度默认值（带缓存）。"""
+    global _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE
+    if _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE is not None:
+        return _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE
+    val = _get_user_config_value(CLADDING_GROOVE_DEPTH_CONFIG_ID)
+    if val is not None and str(val).strip():
+        _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE = str(val).strip()
+    else:
+        _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE = CLADDING_GROOVE_DEPTH_LEGACY_DEFAULT
+    return _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE
+
+
+def default_cladding_groove_depth(element_name: str = None, product_id: str = None) -> str:
+    """
+    存在覆层时的焊接凹槽深度 UI 默认值。
+    球冠形封头：按 1.5.5 / 管程公称直径 / 1.5.5.1 / 1.1.2 规则计算；
+    其余元件从配置库 user_config(id=1.1.2) 读取。
+    """
+    name = (element_name or "").strip()
+    if name == QIUGUANXING_FENGTOU_ELEMENT_NAME:
+        return _default_qiuguan_cladding_groove_depth(product_id)
+    return _resolve_cladding_groove_depth_from_user_config()
+
+
+def _element_name_from_table(table) -> str:
+    return (getattr(table, "_element_name", "") or "").strip()
+
+
 def cladding_groove_depth_default_if_needed(
     table, type_field_key: str, type_value: str, current_text: str, *, covering: bool
 ) -> str:
     """
-    焊接凹槽深度：覆层=是 且 材料类型=钢板/板材 时，仅当「刚变为钢板/板材」或当前为空时返回默认 2；
+    焊接凹槽深度：覆层=是 且 材料类型满足显示条件时，仅当「刚变为适用类型」或当前为空时返回默认值；
     否则返回空串（保留手改/库值）。使用独立 prev 键，避免与覆层厚度联动互相覆盖。
     """
     v = (type_value or "").strip()
     if not type_field_key:
         return ""
+    element_name = _element_name_from_table(table)
+    plate_types = _cladding_groove_plate_types(element_name)
     grove_key = f"{type_field_key}::groove"
     _prev_map = getattr(table, "_cladding_prev_types", None)
     if _prev_map is None:
@@ -1554,12 +1749,12 @@ def cladding_groove_depth_default_if_needed(
     if prev_v is None:
         prev_v = v
     _prev_map[grove_key] = v
-    if not covering or v not in ("钢板", "板材"):
+    if not _should_show_cladding_groove_depth(element_name, covering, v):
         return ""
-    became_plate = (v in ("钢板", "板材")) and (prev_v not in ("钢板", "板材"))
+    became_plate = (v in plate_types) and (prev_v not in plate_types)
     cur = (current_text or "").strip()
     if became_plate or not cur:
-        return "2"
+        return default_cladding_groove_depth(element_name, _product_id_from_table(table))
     return ""
 
 

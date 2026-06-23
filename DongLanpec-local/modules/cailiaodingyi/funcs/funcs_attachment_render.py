@@ -21,7 +21,12 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     update_cladding_groove_depth_visibility,
     DEBUG_VERBOSE_DEFINE_UI,
 )
-from modules.cailiaodingyi.controllers.datamanager import install_material_delegate_linkage, MaterialInstantDelegate, _apply_forging_visibility
+from modules.cailiaodingyi.controllers.datamanager import (
+    install_material_delegate_linkage,
+    MaterialInstantDelegate,
+    _apply_forging_visibility,
+    refresh_attachment_schematic_image,
+)
 import pymysql
 
 # 材料库配置（用于查询管口附件折叠表）
@@ -697,6 +702,16 @@ def render_attachment_param_to_ui(viewer_instance, element_id, target_tab_name=N
             # 如果没有指定目标tab页，默认切换到第一个tab页
             # 从其他元件切换到管口附件时，应该默认显示第一个tab页
             tab_widget.setCurrentIndex(0)
+
+    # 刷新当前 Tab 对应的元件示意图
+    try:
+        cur_idx = tab_widget.currentIndex()
+        if 0 <= cur_idx < tab_widget.count():
+            cur_tab = tab_widget.tabText(cur_idx).strip()
+            if cur_tab not in {"+", "＋"}:
+                refresh_attachment_schematic_image(viewer_instance, cur_tab)
+    except Exception as e:
+        print(f"[管口附件示意图] 初始渲染后刷新失败: {e}")
 
 
 def _read_param_values_from_table(table, param_data):
@@ -2882,6 +2897,12 @@ def _on_attachment_tab_changed(viewer_instance, index: int):
         print(f"[管口附件] Tab页数据刷新失败: {e}")
         import traceback
         traceback.print_exc()
+
+    # 切换 Tab 时刷新元件示意图
+    try:
+        refresh_attachment_schematic_image(viewer_instance, tab_name)
+    except Exception as e:
+        print(f"[管口附件示意图] Tab切换刷新失败: {e}")
 
 
 def _refresh_attachment_tab_pipe_code_options(viewer_instance, table, tab_name):

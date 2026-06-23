@@ -1037,6 +1037,90 @@ def _query_zhizuo_image(support_type_name, component_name):
             except Exception:
                 pass
 
+
+_ATTACHMENT_BASE_TYPES = ("接管法兰配对法兰", "接管拉筋", "防冲挡板", "破涡器")
+
+
+def normalize_attachment_type_from_tab(tab_classification: str) -> str:
+    """Tab分类名 → 附件类型（如 接管法兰配对法兰2 → 接管法兰配对法兰）"""
+    name = (tab_classification or "").strip()
+    if not name:
+        return ""
+    for base in _ATTACHMENT_BASE_TYPES:
+        if name == base or name.startswith(base):
+            return base
+    return re.sub(r"\d+$", "", name)
+
+
+def _query_attachment_image(attachment_type: str):
+    """材料库：管口附件示意图表 → 按附件类型匹配示意图路径"""
+    attachment_type = (attachment_type or "").strip()
+    if not attachment_type:
+        return None
+    connection = None
+    try:
+        connection = get_connection(**db_config_2)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 示意图 FROM 管口附件示意图表
+                WHERE 附件类型=%s
+                LIMIT 1
+                """,
+                (attachment_type,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        if isinstance(row, dict):
+            return row.get("示意图")
+        return row[0] if len(row) > 0 else None
+    except Exception as e:
+        print(f"[错误] 管口附件示意图查询失败: {e}")
+        return None
+    finally:
+        if connection:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+def refresh_attachment_schematic_image(viewer_instance, tab_classification: str):
+    """根据管口附件 Tab 页刷新元件示意图（由 Tab 分类映射到附件类型后查库）"""
+    tab_classification = (tab_classification or "").strip()
+    if not tab_classification or tab_classification in {"+", "＋"}:
+        return
+
+    def _do():
+        try:
+            attachment_type = ""
+            product_id = getattr(viewer_instance, "product_id", None)
+            if product_id:
+                try:
+                    from modules.cailiaodingyi.funcs.funcs_attachment_render import load_attachment_param_data
+                    param_data = load_attachment_param_data(product_id, tab_classification)
+                    if param_data:
+                        attachment_type = (param_data[0].get("附件类型") or "").strip()
+                except Exception:
+                    pass
+            if not attachment_type:
+                attachment_type = normalize_attachment_type_from_tab(tab_classification)
+            if not attachment_type:
+                return
+            image_path = _query_attachment_image(attachment_type)
+            _set_pixmap_if_changed(viewer_instance, image_path or "")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(
+                    f"[管口附件示意图] tab={tab_classification}, "
+                    f"附件类型={attachment_type}, 图片={image_path}"
+                )
+        except Exception as e:
+            print(f"[管口附件示意图刷新] 失败: {e}")
+
+    QTimer.singleShot(60, _do)
+
+
 # ✅ 封装处理函数：绑定每行独立信息，避免闭包错误
 def make_on_covering_changed(component_info_copy, viewer_instance_copy, row_index, table=None):
     """全局‘是否添加覆层’ → 图片刷新（一次性去抖，无连接累积）"""
@@ -4319,9 +4403,123 @@ def _apply_cladding_type_logic(table, param_col, value_col, type_field_name: str
     update_cladding_groove_depth_visibility(table, param_col, value_col, control_field=switch_name)
 
 
+QIUGUANXING_FENGTOU_ELEMENT_NAME = "球冠形封头"
+_CLADDING_PLATE_TYPES = frozenset({"钢板", "板材"})
+_CLADDING_WELD_TYPES = frozenset({"焊材"})
+_QIUGUAN_SIDED_CLADDING_TYPE_FIELDS = ("管程侧覆层材料类型", "壳程侧覆层材料类型")
+_QIUGUAN_OPPOSITE_CLADDING = {
+    "管程侧覆层材料类型": ("壳程侧是否添加覆层", "壳程侧覆层材料类型"),
+    "壳程侧覆层材料类型": ("管程侧是否添加覆层", "管程侧覆层材料类型"),
+}
 
 
+def _is_qiuguanxing_fengtou_element(element_name: str) -> bool:
+    return (element_name or "").strip() == QIUGUANXING_FENGTOU_ELEMENT_NAME
 
+
+def _filter_sided_cladding_type_options(all_options, opposite_type: str, opposite_covering_on: bool):
+    """球冠形封头：对侧覆层=是且材料类型有值时，本侧材料类型与对侧互斥。"""
+    opts = [o for o in dict.fromkeys([str(x).strip() for x in (all_options or [])]) if o]
+    if not opposite_covering_on:
+        return opts
+    opp = (opposite_type or "").strip()
+    if not opp:
+        return opts
+    if opp in _CLADDING_PLATE_TYPES:
+        return [o for o in opts if o in _CLADDING_WELD_TYPES]
+    if opp in _CLADDING_WELD_TYPES:
+        return [o for o in opts if o in _CLADDING_PLATE_TYPES]
+    return opts
+
+
+def _sided_cladding_switch_on(table, param_col, value_col, type_field_name: str) -> bool:
+    prefix = "管程侧" if type_field_name.startswith("管程侧") else (
+        "壳程侧" if type_field_name.startswith("壳程侧") else ""
+    )
+    if not prefix:
+        return False
+    r_sw = find_row_by_param_name(table, f"{prefix}是否添加覆层", param_col)
+    if r_sw is None:
+        return False
+    it_sw = table.item(r_sw, value_col)
+    return bool(it_sw and it_sw.text().strip() == "是")
+
+
+def refresh_qiuguan_sided_cladding_type_options(table, param_col: int, value_col: int):
+    """
+    球冠形封头：管/壳覆层材料类型互斥。
+    对侧覆层=是且选了钢板/板材 → 本侧仅焊材；选了焊材 → 本侧仅钢板/板材；
+    对侧类型清空或覆层关 → 本侧恢复参数表全量候选。
+    """
+    ele = getattr(table, "_element_name", "") or ""
+    if not _is_qiuguanxing_fengtou_element(ele):
+        return
+
+    from PyQt5.QtCore import QSignalBlocker
+
+    def _cell_text(row):
+        if row is None:
+            return ""
+        w = table.cellWidget(row, value_col)
+        if isinstance(w, QComboBox):
+            return w.currentText().strip()
+        it = table.item(row, value_col)
+        return (it.text().strip() if it else "")
+
+    try:
+        from modules.cailiaodingyi.funcs.funcs_pdf_input import get_options_for_param
+    except Exception:
+        get_options_for_param = None
+
+    for type_field in _QIUGUAN_SIDED_CLADDING_TYPE_FIELDS:
+        r_type = find_row_by_param_name(table, type_field, param_col)
+        if r_type is None:
+            continue
+
+        opp_sw_name, opp_type_field = _QIUGUAN_OPPOSITE_CLADDING[type_field]
+        r_opp_sw = find_row_by_param_name(table, opp_sw_name, param_col)
+        r_opp_type = find_row_by_param_name(table, opp_type_field, param_col)
+        opp_covering_on = (_cell_text(r_opp_sw) == "是") if r_opp_sw is not None else False
+        opp_type = _cell_text(r_opp_type)
+
+        all_opts = []
+        if get_options_for_param:
+            try:
+                all_opts = get_options_for_param(type_field) or []
+            except Exception:
+                all_opts = []
+        if not all_opts:
+            all_opts = ["钢板", "焊材"]
+
+        filtered = _filter_sided_cladding_type_options(all_opts, opp_type, opp_covering_on)
+        existing = table.itemDelegateForRow(r_type)
+        old_opts = []
+        if isinstance(existing, ComboDelegate):
+            old_opts = [o for o in dict.fromkeys([str(x).strip() for x in (existing.options or [])]) if o]
+        if old_opts != filtered:
+            table.setItemDelegateForRow(r_type, ComboDelegate(filtered, table))
+
+        cur = _cell_text(r_type)
+        if cur and filtered and cur not in filtered:
+            with QSignalBlocker(table):
+                it = table.item(r_type, value_col)
+                if it is None:
+                    it = QTableWidgetItem("")
+                    it.setTextAlignment(Qt.AlignCenter)
+                    table.setItem(r_type, value_col, it)
+                it.setText("")
+            if _sided_cladding_switch_on(table, param_col, value_col, type_field):
+                _apply_cladding_type_logic(table, param_col, value_col, type_field, "")
+
+
+def defer_qiuguan_sided_cladding_type_refresh(table, param_col: int, value_col: int):
+    """等下拉提交并关闭编辑器后再刷新 delegate，避免打断 ComboDelegate 写回。"""
+    if not _is_qiuguanxing_fengtou_element(getattr(table, "_element_name", "") or ""):
+        return
+    QTimer.singleShot(
+        0,
+        lambda: refresh_qiuguan_sided_cladding_type_options(table, param_col, value_col),
+    )
 
 
 # 锥壳：偏心锥壳与筒体夹角 α1 上限依赖条件输入「设计数据表」中设计压力*的壳程列符号
@@ -4431,6 +4629,11 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
     from PyQt5.QtWidgets import (
         QStyledItemDelegate, QLineEdit, QTableWidgetItem, QAbstractItemView
     )
+
+    try:
+        table._viewer_instance = viewer_instance
+    except Exception:
+        pass
 
     try:
         import modules.chanpinguanli.bianl as _bianl_ro_lm
@@ -5221,6 +5424,11 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
     except Exception:
         pass
 
+    try:
+        refresh_qiuguan_sided_cladding_type_options(table, param_col, value_col)
+    except Exception:
+        pass
+
     # 4) itemChanged：覆层联动 + 写库 + 图片刷新 + 再评估显隐
     def _on_item_changed(item: QTableWidgetItem):
         # 总闸
@@ -5512,6 +5720,8 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
             else:
                 with FreezeUI(table):
                     _apply_cladding_type_logic(table, param_col, value_col, pname, val)
+            if pname in _QIUGUAN_SIDED_CLADDING_TYPE_FIELDS:
+                defer_qiuguan_sided_cladding_type_refresh(table, param_col, value_col)
 
         # 是否添加覆层点击后直接写回库问题 10.31
         # if pname in COVERING_SWITCH_GLOBAL or pname in COVERING_SWITCH_SIDED:
@@ -5634,6 +5844,7 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                         it_type = table.item(r_type, value_col)
                         cur_type = it_type.text().strip() if it_type else ""
                         _apply_cladding_type_logic(table, param_col, value_col, type_field, cur_type)
+                defer_qiuguan_sided_cladding_type_refresh(table, param_col, value_col)
 
         # ==== 折流/支持板厚度四项：任一改动 → 其它三项跟随 + 同步写库 ====
         try:
