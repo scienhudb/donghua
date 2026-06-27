@@ -4615,6 +4615,47 @@ def _zhuike_alpha1_max_deg(product_id) -> float:
     return 45.0
 
 
+def _setup_gasket_combo_row(
+    table, row, value_col, options, new_value=None, *, force_write=False, readonly_if_empty=False
+):
+    """为垫片下拉字段安装 ComboDelegate，并按需写入默认值。
+
+    readonly_if_empty=True 时（金属/填充材料）：定义表无候选则显示「-」且不可编辑。
+    """
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QTableWidgetItem
+
+    if row is None:
+        return
+    opts = [str(o).strip() for o in (options or []) if str(o).strip()]
+    it = table.item(row, value_col)
+    if it is None:
+        it = QTableWidgetItem("")
+        table.setItem(row, value_col, it)
+    it.setTextAlignment(Qt.AlignCenter)
+    table.setItemDelegateForRow(row, None)
+
+    if not opts:
+        if readonly_if_empty:
+            it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            it.setText("-")
+        else:
+            it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+            if force_write:
+                it.setText("")
+        return
+
+    it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+    table.setItemDelegateForRow(row, ComboDelegate(opts, table))
+    if force_write:
+        it.setText(str(new_value if new_value is not None else opts[0]))
+    elif new_value is not None:
+        cur = (it.text() or "").strip()
+        if (not cur) or (cur not in opts):
+            pick = new_value if new_value in opts else opts[0]
+            it.setText(str(pick))
+
+
 def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int, viewer_instance):
     """
     最终版：
@@ -5393,6 +5434,55 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
     except Exception:
         pass
 
+    # 初次进入垫片页：安装垫片材料/金属材料/填充材料下拉（保留库中已有值）
+    try:
+        pid = getattr(viewer_instance, "product_id", "")
+        ci = getattr(viewer_instance, "clicked_element_data", {}) or {}
+        ele_name = getattr(table, "_element_name", "") or (ci.get("元件名称", "") or ci.get("零件名称", ""))
+        if pid and ele_name and ("垫片" in ele_name):
+            def _v_init(name):
+                rr = find_row_by_param_name(table, name, param_col)
+                it0 = table.item(rr, value_col) if rr is not None else None
+                return (it0.text() if it0 else "").strip()
+
+            gt = _v_init("垫片型式") or _v_init("垫片类型")
+            gs = _v_init("垫片标准")
+            gm = _v_init("垫片材料")
+            if gs != "非标垫片" and (gt or gs or gm):
+                props0 = query_gasket_material_options_by_type_std(gt, gs, gm)
+                if props0:
+                    table.blockSignals(True)
+                    try:
+                        r_mat = find_row_by_param_name(table, "垫片材料", param_col)
+                        r_metal = find_row_by_param_name(table, "金属材料", param_col)
+                        if r_metal is None:
+                            r_metal = find_row_by_param_name(table, "金属材料名称", param_col)
+                        r_filler = find_row_by_param_name(table, "填充材料", param_col)
+                        if r_filler is None:
+                            r_filler = find_row_by_param_name(table, "填充材料名称", param_col)
+                        mats0 = props0.get("垫片材料候选") or []
+                        if r_mat is not None and mats0:
+                            _setup_gasket_combo_row(table, r_mat, value_col, mats0, force_write=False)
+                        _setup_gasket_combo_row(
+                            table, r_metal, value_col,
+                            props0.get("金属材料候选") or [],
+                            props0.get("金属材料"),
+                            force_write=False,
+                            readonly_if_empty=True,
+                        )
+                        _setup_gasket_combo_row(
+                            table, r_filler, value_col,
+                            props0.get("填充材料候选") or [],
+                            props0.get("填充材料"),
+                            force_write=False,
+                            readonly_if_empty=True,
+                        )
+                    finally:
+                        table.blockSignals(False)
+    except Exception as e:
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[垫片联动] 初次安装金属/填充下拉失败: {e}")
+
     _apply_forging_visibility_local()
     _apply_surface_treatment_visibility_local()
     _apply_flange_seal_face_to_seal_height_ui(only_if_height_empty=True)
@@ -5567,14 +5657,14 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
             except Exception:
                 pass
 
-        # === 垫片材料变更：只刷新 y/m，不动尺寸 ===
+        # === 垫片材料变更：刷新 y/m、金属材料、填充材料，不动尺寸 ===
         if pname == "垫片材料":
             try:
                 gasket_type     = _val("垫片型式") or _val("垫片类型")
                 gasket_standard = _val("垫片标准")
                 gasket_material = val
 
-                # 查询当前材料对应的 y/m（类型+标准+材料优先；不足时回退到仅材料）
+                # 查询当前材料对应的 y/m/金属/填充（类型+标准+材料优先）
                 props = query_gasket_material_options_by_type_std(
                     gasket_type, gasket_standard, gasket_material
                 )
@@ -5591,12 +5681,28 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
 
                 row_y = _find_any(["垫片比压力y", "垫片比压y", "比压力y"])
                 row_m = _find_any(["垫片系数m", "垫片系数M", "系数m"])
+                row_metal = _find_any(["金属材料", "金属材料名称"])
+                row_filler = _find_any(["填充材料", "填充材料名称"])
 
-                # 垫片材料变更时强制覆盖 y/m（仅写值，不动尺寸/锁）
+                # 垫片材料变更时强制覆盖 y/m 与金属/填充（不动尺寸/锁）
                 _force_write(row_y, props.get("垫片比压力y"))
                 _force_write(row_m, props.get("垫片系数m"))
+                _setup_gasket_combo_row(
+                    table, row_metal, value_col,
+                    props.get("金属材料候选") or [],
+                    props.get("金属材料"),
+                    force_write=True,
+                    readonly_if_empty=True,
+                )
+                _setup_gasket_combo_row(
+                    table, row_filler, value_col,
+                    props.get("填充材料候选") or [],
+                    props.get("填充材料"),
+                    force_write=True,
+                    readonly_if_empty=True,
+                )
             except Exception as e:
-                print(f"[垫片材料联动] 刷新y/m失败: {e}")
+                print(f"[垫片材料联动] 刷新y/m/金属/填充失败: {e}")
 
         if pname == "公称压力PN":
             cur_sig = _current_gasket_signature()
@@ -6083,6 +6189,8 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                 row_mat = _find_any(["垫片材料"])
                 row_y = _find_any(["垫片比压力y", "垫片比压y", "比压力y"])
                 row_m = _find_any(["垫片系数m", "垫片系数M", "系数m"])
+                row_metal = _find_any(["金属材料", "金属材料名称"])
+                row_filler = _find_any(["填充材料", "填充材料名称"])
 
                 def _ensure_editable(rr):
                     if rr is None: return
@@ -6309,20 +6417,62 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                                 for rr in (row_D2n, row_D1n, row_d1):
                                     _set_by_spec(rr, None, force=driver_changed)  # “程序推荐”
 
-                            # 2.2 材料 / y / m 写回（按类型+标准）
+                            # 2.2 材料 / y / m / 金属 / 填充 写回（按类型+标准+材料）
                             if props:
                                 mats = (props.get("垫片材料候选") or [])
+                                if driver_changed:
+                                    eff_gm = mats[0] if mats else ""
+                                    props = query_gasket_material_options_by_type_std(
+                                        gasket_type, gasket_standard, eff_gm
+                                    ) or props
+                                    if mats:
+                                        props.setdefault("垫片材料候选", mats)
                                 if row_mat is not None:
                                     _ensure_editable(row_mat)
                                     table.setItemDelegateForRow(row_mat, ComboDelegate(mats, table))
-                                    txt_now = table.item(row_mat, value_col).text().strip() if table.item(row_mat, value_col) else ""
                                     if driver_changed and mats:
                                         _set_by_spec(row_mat, mats[0], force=True)
                                 _set_by_spec(row_y, props.get("垫片比压力y"), force=driver_changed)
-                                _set_by_spec(row_m, props.get("垫片系数m"),   force=driver_changed)
+                                _set_by_spec(row_m, props.get("垫片系数m"), force=driver_changed)
+                                if driver_changed:
+                                    _setup_gasket_combo_row(
+                                        table, row_metal, value_col,
+                                        props.get("金属材料候选") or [],
+                                        props.get("金属材料"),
+                                        force_write=True,
+                                        readonly_if_empty=True,
+                                    )
+                                    _setup_gasket_combo_row(
+                                        table, row_filler, value_col,
+                                        props.get("填充材料候选") or [],
+                                        props.get("填充材料"),
+                                        force_write=True,
+                                        readonly_if_empty=True,
+                                    )
+                                else:
+                                    _setup_gasket_combo_row(
+                                        table, row_metal, value_col,
+                                        props.get("金属材料候选") or [],
+                                        props.get("金属材料"),
+                                        force_write=False,
+                                        readonly_if_empty=True,
+                                    )
+                                    _setup_gasket_combo_row(
+                                        table, row_filler, value_col,
+                                        props.get("填充材料候选") or [],
+                                        props.get("填充材料"),
+                                        force_write=False,
+                                        readonly_if_empty=True,
+                                    )
                             else:
                                 for rr in (row_mat, row_y, row_m):
                                     _set_by_spec(rr, None, force=driver_changed)
+                                for rr in (row_metal, row_filler):
+                                    _setup_gasket_combo_row(
+                                        table, rr, value_col, [],
+                                        force_write=True,
+                                        readonly_if_empty=True,
+                                    )
 
                 finally:
                     table.blockSignals(False)

@@ -3738,13 +3738,66 @@ def get_dn_by_side(product_id: str, side: str) -> str:
     return ""
 
 
+def parse_gasket_option_field(raw) -> list:
+    """
+    将垫片定义表「金属材料/填充材料」字段解析为下拉选项 list。
+    支持：JSON 数组、普通字符串、空/—。
+    """
+    if raw is None:
+        return []
+    s = str(raw).strip()
+    if not s or s in ("—", "-", "－", "None", "null"):
+        return []
+    try:
+        j = json.loads(s)
+        if isinstance(j, list):
+            return [str(x).strip() for x in j if str(x).strip()]
+        if isinstance(j, str) and j.strip():
+            return [j.strip()]
+    except Exception:
+        pass
+    return [s]
+
+
+def _gasket_definition_row_to_props(row: dict) -> dict:
+    """从垫片定义表单行提取 y/m 与金属/填充材料候选及默认值（第一项为默认）。"""
+    if not row:
+        return {}
+
+    def _fmt(v):
+        return "" if v in (None, "") else str(v)
+
+    metal_raw = row.get("金属材料")
+    if metal_raw in (None, ""):
+        metal_raw = row.get("金属材料名称")
+    filler_raw = row.get("填充材料")
+    if filler_raw in (None, ""):
+        filler_raw = row.get("填充材料名称")
+
+    metal_opts = parse_gasket_option_field(metal_raw)
+    filler_opts = parse_gasket_option_field(filler_raw)
+
+    return {
+        "垫片比压力y": _fmt(row.get("垫片比压力y")),
+        "垫片系数m": _fmt(row.get("垫片系数m")),
+        "金属材料候选": metal_opts,
+        "填充材料候选": filler_opts,
+        "金属材料": metal_opts[0] if metal_opts else "",
+        "填充材料": filler_opts[0] if filler_opts else "",
+    }
+
+
 def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard: str, gasket_material: str = "") -> dict:
     """
     返回:
     {
-        "垫片材料候选": ["柔性石墨", "金属缠绕", ...],  # 供"垫片材料"下拉用
-        "垫片比压力y": "3.0",                      # 可空
-        "垫片系数m": "1.0"                         # 可空
+        "垫片材料候选": ["柔性石墨", ...],
+        "垫片比压力y": "3.0",
+        "垫片系数m": "1.0",
+        "金属材料候选": ["S30408", ...],   # 可空
+        "填充材料候选": ["柔性石墨", ...], # 可空
+        "金属材料": "S30408",              # 默认第一项
+        "填充材料": "柔性石墨",
     }
     取不到返回 {}
     """
@@ -3753,6 +3806,14 @@ def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard:
     gm = (gasket_material or "").strip()
     if not (t and st) and not gm:
         return {}
+
+    _row_sql = """
+        SELECT 垫片比压力y, 垫片系数m, 金属材料, 填充材料
+        FROM 垫片定义表
+        WHERE {where}
+        ORDER BY CASE WHEN 垫片标准=%s THEN 0 ELSE 1 END
+        LIMIT 1
+    """
 
     conn = get_connection(**db_config_2)  # 材料库
     try:
@@ -3767,58 +3828,46 @@ def query_gasket_material_options_by_type_std(gasket_type: str, gasket_standard:
                     ORDER BY 垫片材料
                 """
                 cur.execute(sql_mats, (t, st, f"%{st}%"))
-                mats = [ (row.get("垫片材料") or "").strip() for row in cur.fetchall() if (row.get("垫片材料") or "").strip() ]
+                mats = [(row.get("垫片材料") or "").strip() for row in cur.fetchall() if (row.get("垫片材料") or "").strip()]
 
-            # 取 y/m（优先精确命中当前材料；未命中则回退类型+标准）
-            ym = {}
+            row = {}
 
             # 1) 类型+标准+材料 优先
             if t and st and gm:
-                sql_ym = """
-                    SELECT 垫片比压力y, 垫片系数m
-                    FROM 垫片定义表
-                    WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s) AND 垫片材料=%s
-                    ORDER BY CASE WHEN 垫片标准=%s THEN 0 ELSE 1 END
-                    LIMIT 1
-                """
-                cur.execute(sql_ym, (t, st, f"%{st}%", gm, st))
-                ym = cur.fetchone() or {}
+                cur.execute(
+                    _row_sql.format(
+                        where="垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s) AND 垫片材料=%s"
+                    ),
+                    (t, st, f"%{st}%", gm, st),
+                )
+                row = cur.fetchone() or {}
 
             # 2) 类型+标准 回退
-            if (not ym) and t and st:
+            if (not row) and t and st:
                 cur.execute(
-                    """
-                    SELECT 垫片比压力y, 垫片系数m
-                    FROM 垫片定义表
-                    WHERE 垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s)
-                    ORDER BY CASE WHEN 垫片标准=%s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    """,
+                    _row_sql.format(
+                        where="垫片类型=%s AND (垫片标准=%s OR 垫片标准 LIKE %s)"
+                    ),
                     (t, st, f"%{st}%", st),
                 )
-                ym = cur.fetchone() or {}
+                row = cur.fetchone() or {}
 
             # 3) 仅按材料查（当类型/标准缺失或前面未命中）
-            if (not ym) and gm:
+            if (not row) and gm:
                 cur.execute(
                     """
-                    SELECT 垫片比压力y, 垫片系数m
+                    SELECT 垫片比压力y, 垫片系数m, 金属材料, 填充材料
                     FROM 垫片定义表
                     WHERE 垫片材料=%s
                     LIMIT 1
                     """,
                     (gm,),
                 )
-                ym = cur.fetchone() or {}
+                row = cur.fetchone() or {}
 
-            def _fmt(v):
-                return "" if v in (None, "") else str(v)
-
-            return {
-                "垫片材料候选": list(dict.fromkeys(mats)),  # 去重保序
-                "垫片比压力y": _fmt(ym.get("垫片比压力y")),
-                "垫片系数m": _fmt(ym.get("垫片系数m")),
-            }
+            props = _gasket_definition_row_to_props(row)
+            props["垫片材料候选"] = list(dict.fromkeys(mats))
+            return props
     finally:
         conn.close()
 
@@ -4619,101 +4668,6 @@ def restore_spacer_tube_status_to_defined(product_id: str):
         conn.rollback()
     finally:
         conn.close()
-
-
-
-def get_template_merged_para_element_ids(template_id):
-    """获取模板中所有有附加参数合并表的元件ID列表"""
-    connection = get_connection(**db_config_2)
-    try:
-        with connection.cursor() as cursor:
-            sql = """
-            SELECT DISTINCT 元件ID
-            FROM 元件附加参数合并表
-            WHERE 模板ID = %s
-            """
-            cursor.execute(sql, (template_id,))
-            result = cursor.fetchall()
-            return [row['元件ID'] for row in result]
-    finally:
-        connection.close()
-
-
-
-
-def insert_or_update_element_merged_para_data(product_id, element_id, merged_para_info, template_name):
-    """将元件附加参数合并表数据插入到产品活动库"""
-    if not merged_para_info:
-        print(f"[元件附加参数合并表] 元件 {element_id} 没有附加参数数据，跳过插入")
-        return
-
-    connection = get_connection(**db_config_1)
-    try:
-        with connection.cursor() as cursor:
-            # 先删除该元件的现有数据
-            cursor.execute("""
-                DELETE FROM 产品设计活动表_元件附加参数合并表
-                WHERE 产品ID = %s AND 元件ID = %s
-            """, (product_id, element_id))
-
-            # 插入新数据
-            insert_count = 0
-            for item in merged_para_info:
-                cursor.execute("""
-                    INSERT INTO 产品设计活动表_元件附加参数合并表
-                    (产品ID, 元件ID, 参数名称, 参数值, 参数单位, Tab分类, 模板名称, 模板ID)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    product_id,
-                    element_id,
-                    item.get('参数名称', ''),
-                    item.get('参数值', ''),
-                    item.get('参数单位', ''),
-                    item.get('Tab分类', ''),
-                    template_name,
-                    item.get('模板ID')
-                ))
-                insert_count += 1
-
-            connection.commit()
-            print(f"[元件附加参数合并表] 成功插入 {insert_count} 条 {element_id} 的附加参数数据")
-
-    except Exception as e:
-        print(f"[元件附加参数合并表] 插入失败: {e}")
-        connection.rollback()
-    finally:
-        connection.close()
-
-
-
-
-
-def batch_insert_element_merged_para_data(product_id, template_id, template_name):
-    """批量处理模板中所有有附加参数合并表的元件"""
-    # 获取所有需要处理的元件ID
-    element_ids = get_template_merged_para_element_ids(template_id)
-
-    if not element_ids:
-        print(f"[批量处理] 模板 {template_id} 没有找到需要处理的元件")
-        return
-
-    print(f"[批量处理] 开始处理 {len(element_ids)} 个元件的附加参数合并表数据: {element_ids}")
-
-    for element_id in element_ids:
-        try:
-            # 查询该元件的附加参数合并表数据
-            merged_para_info = query_template_element_merged_para_data(template_id, element_id)
-
-            # 插入到产品活动库
-            insert_or_update_element_merged_para_data(product_id, element_id, merged_para_info, template_name)
-
-        except Exception as e:
-            print(f"[批量处理] 处理元件 {element_id} 失败: {e}")
-            continue
-
-    print(f"[批量处理] 完成所有元件的附加参数合并表数据处理")
-
-
 
 
 # 11.16设备法兰

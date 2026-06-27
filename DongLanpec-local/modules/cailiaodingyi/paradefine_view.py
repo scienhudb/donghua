@@ -37,7 +37,7 @@ from modules.cailiaodingyi.db_cnt import get_connection
 from modules.cailiaodingyi.funcs.funcs_pdf_change import load_guankou_para_data_leibie, load_guankou_define_leibie, \
     load_updated_guankou_define_data, load_update_element_data, load_update_guankou_define_data, \
     load_update_guankou_para_data, load_update_element_merged_para_data, load_update_guankou_attachment_para_data, \
-    get_design_params_by_product_id, query_template_id, query_guankou_codes, insert_or_update_element_merged_para_data, \
+    get_design_params_by_product_id, query_template_id, query_guankou_codes, \
     DEBUG_VERBOSE_DEFINE_UI
 from modules.cailiaodingyi.controllers.style import ReturnKeyJumpFilter
 from modules.cailiaodingyi.funcs.funcs_pdf_input import (
