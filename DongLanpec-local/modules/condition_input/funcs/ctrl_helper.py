@@ -68,8 +68,8 @@ class UndoableItemDelegate(QStyledItemDelegate):
             if hasattr(self.table, "logical_headers"):
                 column_name = self.table.logical_headers[col]
             else:
-                header_item = self.table.horizontalHeaderItem(col)
-                column_name = header_item.text().strip() if header_item else ""
+                from modules.condition_input.funcs.funcs_cdt_input import resolve_header_field_name
+                column_name = resolve_header_field_name(self.table, col)
 
             print(f"[校核DEBUG] row={row}, col={col}, param={param_name}, col_name={column_name}, value={value}")
 
@@ -113,7 +113,8 @@ class SmartDelegate(QStyledItemDelegate):
             except Exception:
                 pass
             try:
-                editor.currentTextChanged.connect(lambda *_: self.commitData.emit(editor))
+                if not editor.isEditable():
+                    editor.currentTextChanged.connect(lambda *_: self.commitData.emit(editor))
             except Exception:
                 pass
         return editor
@@ -172,7 +173,7 @@ class ReturnKeyJumpFilter(QObject):
                 next_row = row + 1
 
                 if next_row >= self.table.rowCount():
-                    next_row = 0  # 到最后一行则回到第一行，可按需修改逻辑
+                    return True  # 到最后一行则直接拦截，不跳转也不进入编辑模式
 
                 self.table.setCurrentCell(next_row, col)
                 # 自动进入编辑模式，实现键盘直接键入
@@ -323,6 +324,19 @@ class TypeToStartEditFilter(QObject):
 
         if self.table.objectName() == "tableWidget_design_data" and current.column() == 1:
             return False
+
+        # 不可编辑的下拉格：禁止键入字符打开编辑（只能双击点选）
+        try:
+            if hasattr(self.smart_delegate, "is_dropdown_cell") and self.smart_delegate.is_dropdown_cell(current):
+                dd = getattr(self.smart_delegate, "dropdown_delegate", None)
+                if dd:
+                    param_item = self.table.item(current.row(), 1)
+                    param_name = param_item.text().strip() if param_item else ""
+                    conf = dd.config.get(param_name)
+                    if conf and conf.get("type") == "single" and not conf.get("editable", False):
+                        return False
+        except Exception:
+            pass
 
         self.table.edit(current)
         captured = ch

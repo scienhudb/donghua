@@ -95,6 +95,17 @@ class cpgl_Stats(QtWidgets.QWidget):
         bianl.image_label = self.findChild(QtWidgets.QLabel, "image_label")
         bianl.image_area = self.findChild(QtWidgets.QFrame, "image_area")
 
+        # 0526新修改-模块化设计禁用
+        bianl.radio_standard_design = self.findChild(QtWidgets.QRadioButton, "radio_standard_design")
+        bianl.radio_modular_design = self.findChild(QtWidgets.QRadioButton, "radio_modular_design")
+        if bianl.radio_modular_design:
+            bianl.radio_modular_design.setEnabled(False)
+            bianl.radio_modular_design.setChecked(False)
+        if bianl.radio_standard_design:
+            bianl.radio_standard_design.setChecked(True)
+
+
+
         #工作信息区 改77
         bianl.design_input = self.findChild(QtWidgets.QLineEdit, "design_input")
         bianl.proofread_input = self.findChild(QtWidgets.QLineEdit, "proofread_input")
@@ -242,6 +253,7 @@ class cpgl_Stats(QtWidgets.QWidget):
         bianl.product_type_combo.currentTextChanged.connect(main.load_product_forms)
         # lxy101
         bianl.product_type_combo.currentTextChanged.connect(main.on_product_type_changed)
+        bianl.product_form_combo.currentTextChanged.connect(main.on_product_form_changed)
 
         # 设计阶段 下拉框  改88
         # bianl.design_stage_combo.showPopup = main.wrap_show_popup(bianl.design_stage_combo.showPopup,

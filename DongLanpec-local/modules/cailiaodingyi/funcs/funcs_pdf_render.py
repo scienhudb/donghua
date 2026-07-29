@@ -1991,6 +1991,11 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
                 table.setProperty('gk_code_candidates', filtered_component_opts)
             except Exception:
                 pass
+            try:
+                from modules.cailiaodingyi.controllers.style import install_editable_only_tab
+                install_editable_only_tab(table, mode="editable")
+            except Exception:
+                pass
         else:
             # 创建新的tab页（设备法兰紧固件使用 tabWidget_3）
             from PyQt5 import QtWidgets, QtCore
@@ -2006,6 +2011,11 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
             table = QTableWidget()
             if CustomHeaderView:
                 table.setHorizontalHeader(CustomHeaderView(QtCore.Qt.Horizontal, table))
+            try:
+                from modules.cailiaodingyi.controllers.style import install_editable_only_tab
+                install_editable_only_tab(table, mode="editable")
+            except Exception:
+                pass
             table.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
             main_layout = QtWidgets.QVBoxLayout(page)
             w0 = tw.widget(0) if tw.count() > 0 else None
@@ -2038,6 +2048,12 @@ def render_fastener_param_to_ui(viewer_instance, fastener_para_info: list):
 
         if DEBUG_VERBOSE_DEFINE_UI:
             print(f"[DBG][fastener_render] 完成渲染 {pno_label}，共 {table.rowCount()} 行")
+
+    try:
+        from modules.cailiaodingyi.controllers.style import skip_tab_bar_focus
+        skip_tab_bar_focus(tw)
+    except Exception:
+        pass
 
     try:
         from modules.cailiaodingyi.controllers.add_tab import PlusTabManager

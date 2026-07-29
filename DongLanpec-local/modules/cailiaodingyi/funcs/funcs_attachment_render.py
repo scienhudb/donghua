@@ -9,9 +9,14 @@ from PyQt5.QtCore import Qt, QEvent, QTimer
 from PyQt5.QtGui import QFont, QColor
 from PyQt5.QtWidgets import QTableWidgetItem, QHeaderView, QAbstractItemView, QTableWidget, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QMessageBox, QComboBox, QMenu
 from modules.cailiaodingyi.controllers.add_tab import PlusTabManager
+from modules.cailiaodingyi.controllers.style import exec_message_box, show_warning
 
 from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
 from modules.cailiaodingyi.controllers.combo import ComboPopupEventFilter, MultiSelectRowComboDelegate, ComboDelegate, NonNegativeDoubleDelegate
+from modules.cailiaodingyi.controllers.table import (
+    setup_param_detail_table,
+    install_param_detail_selection_highlight,
+)
 from modules.cailiaodingyi.funcs.funcs_pdf_input import db_config_1, db_config_2, get_options_for_param
 from modules.cailiaodingyi.funcs.funcs_pdf_render import _set_table_tooltips, _install_tooltip_updater
 from modules.cailiaodingyi.funcs.funcs_pdf_change import (
@@ -518,6 +523,11 @@ def _setup_tab_bar(tab_widget, viewer_instance):
     bar.setElideMode(Qt.ElideNone)
     bar.setContextMenuPolicy(Qt.CustomContextMenu)
     bar.customContextMenuRequested.connect(lambda pos: _on_attachment_tab_right_menu(viewer_instance, pos))
+    try:
+        from modules.cailiaodingyi.controllers.style import skip_tab_bar_focus
+        skip_tab_bar_focus(tab_widget)
+    except Exception:
+        pass
     # 设置左右导航按钮背景为白色（背景色），边框也为白色
     bar.setStyleSheet("""
         QTabBar::scroller {
@@ -837,7 +847,7 @@ def _add_attachment_tab_from_current(viewer_instance, src_idx, src_name):
             import traceback
             traceback.print_exc()
             try:
-                QMessageBox.warning(viewer_instance, "错误", f"创建新tab页失败：{e}")
+                show_warning(viewer_instance, "错误", f"创建新tab页失败：{e}")
             except:
                 pass
     except Exception as outer_e:
@@ -933,30 +943,9 @@ def _calculate_pipe_code_options(product_id, attachment_type, tab_classification
 
 
 def _setup_table_header_style(table):
-    """设置表头样式"""
-    header = table.horizontalHeader()
-    for i in range(table.columnCount()):
-        header.setSectionResizeMode(i, QHeaderView.Stretch)
-    
-    header_qss = """
-        QHeaderView::section {
-            background-color: #F2F2F2;
-            color: black;
-            font-weight: bold;
-            text-align: center;
-            padding: 5px;
-            border: 1px solid #CCCCCC;
-            border-right: 1px solid #CCCCCC;
-            border-bottom: 1px solid #CCCCCC;
-        }
-        QHeaderView::section:first {
-            border-left: 1px solid #CCCCCC;
-        }
-    """
-    table.setStyleSheet(header_qss)
-    header.setStyleSheet(header_qss)
-    header.setDefaultAlignment(Qt.AlignCenter)
-    table.horizontalHeader().setFixedHeight(35)
+    """设置详细定义表样式（表头 + 选中/高亮，与普通元件新 UI 一致）"""
+    setup_param_detail_table(table)
+    install_param_detail_selection_highlight(table)
 
 
 def _toggle_group_expand(table, title_row):
@@ -2450,7 +2439,7 @@ def on_clear_attachment_param_update(viewer_instance):
     btn_ok = box.addButton("确认", QMessageBox.YesRole)
     btn_cancel = box.addButton("取消", QMessageBox.NoRole)
     box.setDefaultButton(btn_cancel)
-    box.exec_()
+    exec_message_box(box)
     if box.clickedButton() is not btn_ok:
         print("[清空] 用户取消操作")
         return
@@ -2579,14 +2568,14 @@ def on_confirm_attachment_param_update(viewer_instance):
     if tab_widget is None:
         box = QMessageBox(QMessageBox.Warning, "错误", "未找到管口附件Tab控件", QMessageBox.NoButton, viewer_instance)
         box.addButton("确认", QMessageBox.AcceptRole)
-        box.exec_()
+        exec_message_box(box)
         return
     
     cur_idx = tab_widget.currentIndex()
     if cur_idx < 0:
         box = QMessageBox(QMessageBox.Warning, "错误", "未选择Tab页", QMessageBox.NoButton, viewer_instance)
         box.addButton("确认", QMessageBox.AcceptRole)
-        box.exec_()
+        exec_message_box(box)
         return
     
     tab_name = tab_widget.tabText(cur_idx).strip()
@@ -2594,14 +2583,14 @@ def on_confirm_attachment_param_update(viewer_instance):
     if table is None:
         box = QMessageBox(QMessageBox.Warning, "错误", f"未找到 {tab_name} 的参数表", QMessageBox.NoButton, viewer_instance)
         box.addButton("确认", QMessageBox.AcceptRole)
-        box.exec_()
+        exec_message_box(box)
         return
     
     product_id = getattr(viewer_instance, "product_id", None)
     if not product_id:
         box = QMessageBox(QMessageBox.Warning, "错误", "未找到产品ID", QMessageBox.NoButton, viewer_instance)
         box.addButton("确认", QMessageBox.AcceptRole)
-        box.exec_()
+        exec_message_box(box)
         return
     
     # 2) 从表格中读取数据并更新到数据库
@@ -2741,7 +2730,7 @@ def on_confirm_attachment_param_update(viewer_instance):
         traceback.print_exc()
         box = QMessageBox(QMessageBox.Warning, "错误", f"保存失败：{e}", QMessageBox.NoButton, viewer_instance)
         box.addButton("确认", QMessageBox.AcceptRole)
-        box.exec_()
+        exec_message_box(box)
         _set_tip(viewer_instance, f"保存失败：{e}", success=False)
 
 
@@ -2803,7 +2792,7 @@ def _remove_attachment_tab(viewer_instance, index):
     if real_count <= 1:
         box = QMessageBox(QMessageBox.Information, "提示", "至少保留一个管口附件分类，不能删除最后一个 tab", QMessageBox.NoButton, tab_widget)
         box.addButton("确认", QMessageBox.AcceptRole)
-        box.exec_()
+        exec_message_box(box)
         def clear_removing_flag_after_dialog():
             viewer_instance._is_removing_attachment_tab = False
         QTimer.singleShot(200, clear_removing_flag_after_dialog)

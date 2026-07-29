@@ -15,7 +15,14 @@ from openpyxl.cell import MergedCell
 from openpyxl.styles import Border, Side, Font
 from openpyxl.utils import get_column_letter
 import pymysql
-from modules.guankoudingyi.funcs.funcs_pipe_comboBox_value import get_component_nominal_size_od, get_nominal_diameter
+from modules.guankoudingyi.funcs.funcs_pipe_comboBox_value import (
+    get_component_nominal_size_od,
+    get_nominal_diameter,
+    get_belong_options,
+    get_axial_position_base_options,
+    get_flange_standard_options_by_pressure_type,
+    get_pressure_levels_by_standard,
+)
 from modules.guankoudingyi.db_cnt import get_connection, db_config_2, db_config_1
 from modules.guankoudingyi.funcs.funcs_pipe_table import check_last_row_and_add_new, is_duplicate_port_code, delete_selected_pipe_rows
 
@@ -486,6 +493,9 @@ def query_element_calc_values(product_id: str, element_name: str, name_list=None
     return out
 
 
+
+
+
 # =========================
 # 通用导入：table_template 下的"导入excel模板"
 # =========================
@@ -570,23 +580,31 @@ def _clear_pipe_table_except_last_row(stats_widget):
         stats_widget.refresh_pipe_table_sequence()
 
 
-"""模板格式校验函数"""
-def validate_excel_template_format(worksheet):
+"""模板格式校验函数（管壳式热交换器专用）"""
+def validate_excel_template_format(worksheet, is_container=False):
     """
-    校验Excel模板格式是否正确
-    检查标题行是否包含预期的字段（不要求完全匹配）
+    校验 Excel 导入模板格式是否正确。
+    当前模板为管壳式热交换器专用（19 列，不含「内伸高度」）；
+    容器产品将使用独立导入模板，后续单独提供。
 
-    :param worksheet: Excel工作表对象
+    :param worksheet: Excel 工作表对象
+    :param is_container: 是否为容器产品（True 时直接拒绝当前模板）
     :return: (is_valid: bool, error_messages: list)
     """
     error_messages = []
 
-    try:
-        print(f"[DEBUG] 开始校验模板格式，最大行数: {worksheet.max_row}, 最大列数: {worksheet.max_column}")
+    if is_container:
+        error_messages.append(
+            "当前导入模板仅适用于管壳式热交换器；容器产品请使用专用导入模板（暂未提供）"
+        )
+        return False, error_messages
 
-        # 检查是否有足够的列
+    try:
+        print(f"[DEBUG] 开始校验换热器导入模板格式，最大行数: {worksheet.max_row}, 最大列数: {worksheet.max_column}")
+
+        # 换热器模板：序号 + 18 个业务列，共 19 列
         if worksheet.max_column < 19:
-            error_messages.append(f"模板列数不足，期望至少19列，实际{worksheet.max_column}列")
+            error_messages.append(f"模板列数不足，换热器模板期望至少19列，实际{worksheet.max_column}列")
             print(f"[DEBUG] 列数检查失败: 期望19列，实际{worksheet.max_column}列")
 
         # 检查是否有标题行（至少2行）
@@ -594,7 +612,7 @@ def validate_excel_template_format(worksheet):
             error_messages.append("模板缺少标题行，至少需要2行标题")
             print(f"[DEBUG] 标题行检查失败: 期望至少2行，实际{worksheet.max_row}行")
 
-        # 预期的列标题关键词（不要求完全匹配，只要包含这些关键词即可）
+        # 管壳式热交换器导入模板：预期的列标题关键词（不要求完全匹配）
         expected_keywords = {
             # 第1行标题关键词
             1: {
@@ -658,7 +676,7 @@ def validate_excel_template_format(worksheet):
                     print(f"[DEBUG] 第2行第{col}列标题检查失败: 期望包含'{keywords[0]}'，实际'{actual_header}'")
 
         is_valid = len(error_messages) == 0
-        print(f"[DEBUG] 模板格式校验结果: {'通过' if is_valid else '失败'}, 错误数量: {len(error_messages)}")
+        print(f"[DEBUG] 换热器模板格式校验结果: {'通过' if is_valid else '失败'}, 错误数量: {len(error_messages)}")
 
     except Exception as e:
         error_messages.append(f"模板格式校验过程中发生错误：{str(e)}")
@@ -735,13 +753,22 @@ def validate_pipe_attachment(attachment_value, row):
     return ";".join(unique_attachments), errors
 
 
-"""从Excel模板导入管口数据"""
+"""从Excel模板导入管口数据（管壳式热交换器）"""
 def import_nozzle_from_excel(stats_widget):
     """
-    从Excel模板导入管口数据
-    使用table_template下的导入模板.xlsx作为模板
+    从 Excel 模板导入管口数据。
+    当前仅支持管壳式热交换器产品；容器产品将使用独立导入模板。
     """
     try:
+        is_container = getattr(stats_widget, 'is_container_product', False)
+        if is_container:
+            QMessageBox.information(
+                stats_widget,
+                "暂不支持",
+                "当前导入功能仅适用于管壳式热交换器。\n容器产品将提供专用导入模板，请稍后再试。",
+            )
+            return False
+
         # 1. 获取模板文件路径
         proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         template_path = os.path.join(proj_root, "guankoudingyi", "table_template", "导入模板.xlsx")
@@ -769,10 +796,11 @@ def import_nozzle_from_excel(stats_widget):
             QMessageBox.critical(stats_widget, "文件读取失败", f"无法读取Excel文件：\n{str(e)}")
             return False
 
-        # 4. 校验导入文件格式
-        is_valid_format, format_errors = validate_excel_template_format(ws)
+        # 4. 校验导入文件格式（换热器模板）
+        is_valid_format, format_errors = validate_excel_template_format(ws, is_container=False)
         if not is_valid_format:
-            QMessageBox.warning(stats_widget, "导入失败", "导入模板失败")
+            detail = "\n".join(format_errors[:8]) if format_errors else "导入模板格式不正确"
+            QMessageBox.warning(stats_widget, "导入失败", detail)
             return False
 
         # 5. 先解析Excel数据，检查是否有有效的管口数据
@@ -1225,7 +1253,8 @@ def _parse_excel_data(worksheet, product_id=None):
                     pipe_belong_validated,
                     pipe_function_raw,
                     len(imported_data),  # 当前行在imported_data中的索引
-                    imported_data
+                    imported_data,
+                    product_id,
                 )
                 # 如果验证后为空，说明数据不合法，记录错误信息
                 if not axial_position_base_validated and axial_position_base_raw:
@@ -1268,9 +1297,9 @@ def _parse_excel_data(worksheet, product_id=None):
 
             # 当管口所属元件为管板类（固定管板/前端管板/后端管板）时，统一导入为“—”，方便界面侧直接识别为禁用状态
             if pipe_belong_validated in ["固定管板", "前端管板", "后端管板"]:
-                axial_angle_validated = "—"
-                circumferential_position_validated = "—"
-                eccentricity_validated = "—"
+                axial_angle_validated = "-"
+                circumferential_position_validated = "-"
+                eccentricity_validated = "-"
             else:
                 # 验证轴向夹角
                 if axial_angle_raw:
@@ -1704,20 +1733,6 @@ def validate_pipe_belong_by_product_type(pipe_belong_value, product_id, pipe_fun
         if not product_type:
             return pipe_belong_value
 
-        # 定义各产品类型允许的元件类型（通用场景）
-        allowed_components = {
-            "AEU": ["管箱圆筒", "管箱平盖", "壳体圆筒", "壳体封头","固定管板"],
-            "BEU": ["管箱圆筒", "管箱封头", "壳体圆筒", "壳体封头","固定管板"],
-            "AES": ["管箱圆筒", "管箱平盖", "壳体圆筒", "外头盖圆筒", "外头盖封头","固定管板"],
-            "BES": ["管箱圆筒", "管箱封头", "壳体圆筒", "外头盖圆筒", "外头盖封头","固定管板"],
-            "NEN": ["前端管箱圆筒", "后端管箱圆筒", "壳体圆筒", "前端管箱平盖", "后端管箱平盖","前端管板","后端管板"],
-            "BEM": ["前端管箱圆筒", "后端管箱圆筒", "壳体圆筒", "前端管箱封头", "后端管箱封头","前端管板","后端管板"],
-            "AEM": ["前端管箱圆筒", "后端管箱圆筒", "壳体圆筒", "前端管箱平盖", "后端管箱封头","前端管板","后端管板"],
-            "AKU": ["管箱圆筒", "管箱平盖", "壳程大端圆筒", "锥壳", "壳程封头"],
-            "BKU": ["管箱圆筒", "管箱封头", "壳程大端圆筒", "锥壳", "壳程封头"]
-
-        }
-
         # 特殊场景
         if pipe_function_value in ["管程入口", "管程出口"]:
             tube_allowed = {
@@ -1728,25 +1743,29 @@ def validate_pipe_belong_by_product_type(pipe_belong_value, product_id, pipe_fun
                 "NEN": ["前端管箱圆筒", "后端管箱圆筒", "前端管箱平盖", "后端管箱平盖"],
                 "BEM": ["前端管箱圆筒", "后端管箱圆筒", "前端管箱封头", "后端管箱封头"],
                 "AEM": ["前端管箱圆筒", "后端管箱圆筒", "前端管箱平盖", "后端管箱封头"],
+                "NEN(Head)": ["前端管箱圆筒", "后端管箱圆筒", "前端管箱封头", "后端管箱封头"],
                 "AKU": ["管箱圆筒", "管箱平盖"],
                 "BKU": ["管箱圆筒", "管箱封头"],
             }
             allowed_list = tube_allowed.get(product_version, [])
         elif pipe_function_value == "壳程入口" and product_version in ["AKU", "BKU"]:
-            allowed_list = ["壳程大端圆筒","锥壳"]
+            allowed_list = ["大端壳体圆筒","锥壳"]
         elif pipe_function_value in ["壳程入口", "壳程出口"]:
             if pipe_function_value == "壳程入口" and product_version in ["AKU", "BKU"]:
-              allowed_list = ["壳程大端圆筒","锥壳"]
+              allowed_list = ["大端壳体圆筒","锥壳"]
             else:
               allowed_list = ["壳体圆筒"]
         elif pipe_function_value in ["壳程气相出口", "壳程液相出口"] and product_version in ["AKU", "BKU"]:
-            allowed_list = ["壳程大端圆筒"]
-        elif pipe_function_value in ["壳程液位计接管1", "壳程液位计接管2","壳程温度计接管"] and product_version in ["AKU", "BKU"]:
-            allowed_list = ["壳程大端圆筒","壳程封头"]
+            allowed_list = ["大端壳体圆筒"]
+        elif pipe_function_value in ["壳程液位计1", "壳程液位计2","壳程温度计"] and product_version in ["AKU", "BKU"]:
+            allowed_list = ["大端壳体圆筒","壳体封头"]
 
         else:
-            # 其他保持原有逻辑
-            allowed_list = allowed_components.get(product_version, [])
+            # 通用场景：从元件库按当前产品类型/型式获取允许的管口所属元件
+            try:
+                allowed_list = get_belong_options(product_id)
+            except Exception:
+                allowed_list = []
 
         # 检查管口所属元件是否在允许列表中
         if pipe_belong_value in allowed_list:
@@ -1758,7 +1777,8 @@ def validate_pipe_belong_by_product_type(pipe_belong_value, product_id, pipe_fun
         return ""
 
 """验证轴向定位基准"""
-def validate_axial_position_base(axial_position_base_value, pipe_belong_value, pipe_function_value=None, current_row=None, imported_data=None):
+def validate_axial_position_base(axial_position_base_value, pipe_belong_value, pipe_function_value=None,
+                                 current_row=None, imported_data=None, product_id=None):
     """
     根据管口所属元件验证轴向定位基准是否合法
     同时处理壳程入口和壳程出口的轴向定位基准互斥逻辑
@@ -1767,45 +1787,18 @@ def validate_axial_position_base(axial_position_base_value, pipe_belong_value, p
     :param pipe_function_value: 管口功能值（用于互斥逻辑）
     :param current_row: 当前行号（用于互斥逻辑）
     :param imported_data: 导入的数据列表（用于互斥逻辑）
+    :param product_id: 产品ID，用于从元件库查询允许的轴向定位基准
     :return: 如果合法则返回原值，否则返回空字符串
     """
     try:
         if not axial_position_base_value or not pipe_belong_value:
             return ""
 
-        # 定义各元件类型允许的轴向定位基准
-        allowed_bases = {
-            # 圆筒类元件：左基准线或右基准线
-            "管箱圆筒": ["左基准线", "右基准线"],
-            "壳体圆筒": ["左基准线", "右基准线"],
-            "外头盖圆筒": ["左基准线", "右基准线"],
-            "前端管箱圆筒": ["左基准线", "右基准线"],
-            "后端管箱圆筒": ["左基准线", "右基准线"],
-            "壳程大端圆筒": ["左基准线", "右基准线"],
-            "锥壳": ["左基准线", "右基准线"],
-
-            # 平盖类元件：平盖中心线
-            "管箱平盖": ["平盖中心线"],
-            "前端管箱平盖": ["平盖中心线"],
-            "后端管箱平盖": ["平盖中心线"],
-
-            # 封头类元件：封头中心线
-            "管箱封头": ["封头中心线"],
-            "壳体封头": ["封头中心线"],
-            "壳程封头": ["封头中心线"],
-            "外头盖封头": ["封头中心线"],
-            "前端管箱封头": ["封头中心线"],
-            "后端管箱封头": ["封头中心线"],
-
-            #管板类元件：管程侧端面或壳程侧端面
-            "固定管板":["管程侧端面","壳程侧端面"],
-            "前端管板": ["管程侧端面", "壳程侧端面"],
-            "后端管板": ["管程侧端面", "壳程侧端面"]
-
-        }
-
-        # 获取当前元件类型允许的轴向定位基准
-        allowed_list = allowed_bases.get(pipe_belong_value, [])
+        # 从元件库按产品类型/型式及管口所属元件获取允许的轴向定位基准
+        try:
+            allowed_list = get_axial_position_base_options(product_id, pipe_belong_value)
+        except Exception:
+            allowed_list = []
 
         # 检查轴向定位基准是否在允许列表中
         if axial_position_base_value not in allowed_list:
@@ -1948,7 +1941,7 @@ def validate_axial_position_distance(axial_distance_value, nominal_size_value, p
                         max_distance = round(max_od * 2.5 - 0.5 * current_od, 2)
 
         # 壳体圆筒、壳程大端
-        elif ("壳体圆筒" in pipe_belong_str)or("壳程大端圆筒"in pipe_belong_str):
+        elif ("壳体圆筒" in pipe_belong_str)or("大端壳体圆筒"in pipe_belong_str):
             tube_ok, tube_nominal_diameter = get_nominal_diameter(product_id, "管箱")
             shell_ok, shell_nominal_diameter = get_nominal_diameter(product_id, "壳体")
             if (not tube_ok) or (tube_nominal_diameter is None):
@@ -1958,7 +1951,7 @@ def validate_axial_position_distance(axial_distance_value, nominal_size_value, p
             cone_length = (shell_nominal_diameter - tube_nominal_diameter) /math.tan(math.radians(30))
             if cone_length < 0:
                 cone_length = 0
-            if pipe_belong_value=="壳程大端圆筒":
+            if pipe_belong_value=="大端壳体圆筒":
                 min_distance = round(0.5 * current_od, 2)
                 tube_len = get_heat_exchanger_tube_length(product_id) if product_id else None
                 if isinstance(tube_len, (int, float)):
@@ -1981,11 +1974,6 @@ def validate_axial_position_distance(axial_distance_value, nominal_size_value, p
                 cone_length = 0
             if isinstance(cone_length, (int, float)):
                 max_distance = round(cone_length  - 0.5 * current_od, 2)
-
-
-
-
-
 
         else:
             # 其他类型暂不支持 → 置空
@@ -2057,54 +2045,7 @@ def validate_circumferential_position(circumferential_position_value):
         return ""
 
 """验证偏心距"""
-# def validate_eccentricity_with_error_info(eccentricity_value, pipe_belong_value, product_id, row,
-#                                           axial_angle_value=None):
-#     """
-#     验证偏心距是否合法，并返回验证结果和错误信息
-#     :param eccentricity_value: 偏心距值
-#     :param pipe_belong_value: 管口所属元件值
-#     :param product_id: 产品ID
-#     :param row: 行号
-#     :param axial_angle_value: 轴向夹角值
-#     :return: (验证后的值, 错误信息列表)
-#     """
-#     try:
-#         if not eccentricity_value:
-#             return eccentricity_value, []
-#
-#         # 1. 检查轴向夹角和偏心距是否同时赋值
-#         if axial_angle_value and axial_angle_value.strip():
-#             return "", [f"偏心距列，第{row}行数据不合法"]
-#
-#         # 2. 先检查管口所属元件是否填写
-#         if not pipe_belong_value:
-#             return "", [f"偏心距列，第{row}行数据不合法"]
-#
-#         # 3. 检查公称直径是否填写
-#         try:
-#             from modules.guankoudingyi.funcs.funcs_pipe_comboBox_value import get_nominal_diameter
-#             success, result = get_nominal_diameter(product_id, pipe_belong_value)
-#
-#             if not success:
-#                 return "", [f"偏心距列，第{row}行，请先在条件输入界面填写公称直径"]
-#
-#             # 4. 验证偏心距范围：-1/2*公称直径 ~ 1/2*公称直径
-#             try:
-#                 float_value = float(eccentricity_value)
-#                 half_diameter = result / 2
-#
-#                 if -half_diameter <= float_value <= half_diameter:
-#                     return eccentricity_value, []
-#                 else:
-#                     return "", [f"偏心距列，第{row}行数据不合法"]
-#             except (ValueError, TypeError):
-#                 return "", [f"偏心距列，第{row}行数据不合法"]
-#
-#         except Exception:
-#             return "", [f"偏心距列，第{row}行数据不合法"]
-#
-#     except Exception as e:
-#         return "", [f"偏心距列，第{row}行数据不合法"]
+
 def validate_eccentricity_with_error_info(eccentricity_value, pipe_belong_value, product_id, row,
                                           axial_angle_value=None):
     """
@@ -2225,9 +2166,7 @@ def validate_extension_height_with_error_info(extension_height_value, pipe_belon
 def validate_flange_standard_with_error_info(flange_standard_value, row, pressure_unit_type=None):
     """
     验证法兰标准是否合法，并返回验证结果和错误信息
-    根据压力类型验证法兰标准：
-    - Class压力类型：允许 HG/T 20615-2009, HG/T 20623-2009(A), HG/T 20623-2009(B)
-    - PN压力类型：允许 HG/T 20592-2009
+    根据压力类型从元件库公称压力类型标准对应表验证法兰标准
     :param flange_standard_value: 法兰标准值
     :param row: 行号
     :param pressure_unit_type: 压力等级的单位类型（Class或PN）
@@ -2237,26 +2176,25 @@ def validate_flange_standard_with_error_info(flange_standard_value, row, pressur
         if not flange_standard_value:
             return flange_standard_value, []
 
-        # 根据压力类型定义允许的法兰标准值
-        if pressure_unit_type == "Class":
-            # Class压力类型允许的法兰标准
-            allowed_standards = ["HG/T 20615-2009", "HG/T 20623-2009(A)", "HG/T 20623-2009(B)","SH/T 3406-2022","SH/T 3406-2022(A)","SH/T 3406-2022(B)"]
-        elif pressure_unit_type == "PN":
-            # PN压力类型允许的法兰标准
-            allowed_standards = ["HG/T 20592-2009(A)","HG/T 20592-2009(B)"]
-        else:
-            # 如果没有指定压力类型，允许所有标准（兼容旧逻辑）
-            allowed_standards = ["HG/T 20592-2009", "HG/T 20615-2009", "HG/T 20623-2009(A)", "HG/T 20623-2009(B)","SH/T 3406-2022","SH/T 3406-2022(A)","SH/T 3406-2022(B)"]
+        # 从元件库按压力类型获取允许的法兰标准
+        try:
+            if pressure_unit_type in ("Class", "PN"):
+                allowed_standards = get_flange_standard_options_by_pressure_type(pressure_unit_type)
+            else:
+                class_opts = get_flange_standard_options_by_pressure_type("Class")
+                pn_opts = get_flange_standard_options_by_pressure_type("PN")
+                allowed_standards = list(dict.fromkeys(class_opts + pn_opts))
+        except Exception:
+            allowed_standards = []
 
         # 检查是否为允许的法兰标准
         if flange_standard_value in allowed_standards:
             return flange_standard_value, []
         else:
-            # 根据压力类型生成更详细的错误信息
-            if pressure_unit_type == "Class":
-                error_msg = f"法兰标准列，第{row}行数据不合法（Class压力类型仅允许：HG/T 20615-2009、HG/T 20623-2009(A)、HG/T 20623-2009(B),SH/T 3406-2022,SH/T 3406-2022(A),SH/T 3406-2022(B)）"
-            elif pressure_unit_type == "PN":
-                error_msg = f"法兰标准列，第{row}行数据不合法（PN压力类型仅允许：HG/T 20592-2009）"
+            if allowed_standards:
+                opts_str = "、".join(allowed_standards)
+                type_hint = f"{pressure_unit_type}压力类型" if pressure_unit_type in ("Class", "PN") else "当前压力类型"
+                error_msg = f"法兰标准列，第{row}行数据不合法（{type_hint}仅允许：{opts_str}）"
             else:
                 error_msg = f"法兰标准列，第{row}行数据不合法"
             return "", [error_msg]
@@ -2268,70 +2206,63 @@ def validate_flange_standard_with_error_info(flange_standard_value, row, pressur
 def validate_pressure_level_with_error_info(pressure_level_value, unit_type, row, flange_standard=None):
     """
     验证压力等级是否合法，并返回验证结果和错误信息
-    根据法兰标准限制Class压力等级的允许值：
-    - HG/T 20623-2009(A) 和 HG/T 20623-2009(B)：Class允许 150, 300, 600, 900
-    - HG/T 20615-2009：Class允许 150, 300, 600, 900, 1500, 2500
-    - PN类型：允许 2.5, 6, 10, 16, 25, 40, 63, 100, 160
+    根据法兰标准与公称压力类型，从元件库管口压力等级表查询允许值
     :param pressure_level_value: 压力等级值
     :param unit_type: 单位类型（Class或PN）
     :param row: 行号
-    :param flange_standard: 法兰标准（用于限制Class压力等级范围）
+    :param flange_standard: 法兰标准（用于查询允许的压力等级）
     :return: (验证后的值, 错误信息列表)
     """
     try:
         if not pressure_level_value:
             return pressure_level_value, []
 
-        # 定义各单位类型允许的压力等级值
-        if unit_type == "Class":
-            # 根据法兰标准确定Class允许的压力等级
-            if flange_standard in ["HG/T 20623-2009(A)", "HG/T 20623-2009(B)"]:
-                # HG/T 20623-2009(A)和(B)只允许150, 300, 600, 900
-                allowed_values = {"Class": ["150", "300", "600", "900"]}
-            elif flange_standard == "HG/T 20615-2009":
-                # HG/T 20615-2009允许全部Class压力等级
-                allowed_values = {"Class": ["150", "300", "600", "900","1500", "2500"]}
-            elif flange_standard == "SH/T 3406-2022":
-                allowed_values = {"Class": ["150", "300", "400","600","900","1500", "2500"]}
-            elif flange_standard in ["SH/T 3406-2022(A)" ,"SH/T 3406-2022(B)"] :
-                allowed_values = {"Class": ["75","150", "300","600", "900"]}
-            else:
-                # 默认允许全部Class压力等级（兼容旧逻辑）
-                allowed_values = {"Class": ["150", "300", "600", "900", "1500", "2500"]}
-        elif unit_type == "PN":
-            # PN类型的压力等级
-            allowed_values = {"PN": ["2.5", "6", "10", "16", "25", "40", "63", "100", "160"]}
-        else:
+        if unit_type not in ("Class", "PN"):
             return "", [f"压力等级列，第{row}行数据不合法"]
 
-        # 检查单位类型是否支持
-        if unit_type not in allowed_values:
+        if not flange_standard:
+            return "", [f"压力等级列，第{row}行数据不合法（请先填写合法的法兰标准）"]
+
+        try:
+            allowed_levels = get_pressure_levels_by_standard(flange_standard, unit_type)
+        except Exception:
+            allowed_levels = []
+
+        if not allowed_levels:
             return "", [f"压力等级列，第{row}行数据不合法"]
 
-        # 将输入值转换为字符串进行比较
         input_value = str(pressure_level_value).strip()
 
-        # 检查是否为允许的压力等级值
-        if input_value in allowed_values[unit_type]:
-            return pressure_level_value, []
-        else:
-            # 生成更详细的错误提示
-            if unit_type == "Class" and flange_standard:
-                if flange_standard in ["HG/T 20623-2009(A)", "HG/T 20623-2009(B)"]:
-                    error_msg = f"压力等级列，第{row}行数据不合法（{flange_standard}标准下Class压力等级仅允许：150、300、600、900）"
-                elif flange_standard == "HG/T 20615-2009":
-                    error_msg = f"压力等级列，第{row}行数据不合法（{flange_standard}标准下Class压力等级仅允许：150、300、600、900、1500、2500）"
-                elif flange_standard == "SH/T 3406-2022":
-                    error_msg = f"压力等级列，第{row}行数据不合法（{flange_standard}标准下Class压力等级仅允许：150、300、400、600、900、1500、2500）"
-                elif flange_standard in ["SH/T 3406-2022(A)", "SH/T 3406-2022(B)"]:
-                    error_msg = f"压力等级列，第{row}行数据不合法（{flange_standard}标准下Class压力等级仅允许：150、300、600、900）"
+        def _format_levels(levels):
+            parts = []
+            for lv in levels:
+                if unit_type == "PN":
+                    f = float(lv)
+                    parts.append(str(int(f)) if f == int(f) else str(f))
                 else:
-                    error_msg = f"压力等级列，第{row}行数据不合法"
-            elif unit_type == "PN":
-                error_msg = f"压力等级列，第{row}行数据不合法（PN压力等级仅允许：2.5、6、10、16、25、40、63、100、160）"
+                    parts.append(str(int(lv)))
+            return parts
+
+        allowed_strs = _format_levels(allowed_levels)
+
+        matched = False
+        try:
+            if unit_type == "Class":
+                matched = int(float(input_value)) in allowed_levels
             else:
-                error_msg = f"压力等级列，第{row}行数据不合法"
-            return "", [error_msg]
+                matched = float(input_value) in allowed_levels
+        except (ValueError, TypeError):
+            matched = input_value in allowed_strs
+
+        if matched:
+            return pressure_level_value, []
+
+        opts_str = "、".join(allowed_strs)
+        error_msg = (
+            f"压力等级列，第{row}行数据不合法"
+            f"（{flange_standard}标准下{unit_type}压力等级仅允许：{opts_str}）"
+        )
+        return "", [error_msg]
 
     except Exception as e:
         return "", [f"压力等级列，第{row}行数据不合法"]

@@ -12,7 +12,9 @@ from PyQt5.QtGui import QPixmap
 import shutil
 
 import modules.chanpinguanli.bianl as bianl
+from modules.chanpinguanli import tube_bundle_toolbar as tbt
 # 按钮文件导入
+
 
 # 0506新修改--产品信息非法字符约束
 class TableLineEditFilter(QObject):
@@ -730,17 +732,27 @@ def unlock_combo(combo: QComboBox):
     combo.setEnabled(True)
     combo.setMinimumWidth(0)
 
+    # 0526新修改-使用 QListView 代替 Windows 原生视图，以使下拉菜单样式表（字号等）生效
+    from PyQt5.QtWidgets import QListView
+    combo.setView(QListView())
+
     # 获取图片路径（使用主程序目录 + 相对路径）
     base_dir = os.getcwd()  # main.py 的位置
     image_path = os.path.join(base_dir, "modules", "chanpinguanli", "icons", "下箭头.png").replace("\\", "/")
     combo.setStyleSheet(f"""
+
         QComboBox {{
             background-color: 000000;  /* 更浅的，更贴近你的图片 */
             color: black;
             border: 1px solid rgb(180, 180, 180);  /* 中灰边框 */
             border-radius: 2px;
-            padding: 6px 8px 6px 8px;  /* 左右内边距大一点，给右侧箭头留空间 */
-            font-size: 11pt;
+            padding: 2px 8px 2px 8px;  /* 限制上下内边距为 2px，左右为 8px */
+            font-size: 9pt;           /* 字体字号改为标准的 9pt */
+            font-family: '宋体';
+        }}
+
+        QComboBox QAbstractItemView {{
+            font-size: 11pt;          /* 下拉菜单内的选项字体字号改回 11pt */
             font-family: '宋体';
         }}
 
@@ -749,21 +761,23 @@ def unlock_combo(combo: QComboBox):
             border: 1px solid rgb(51, 153, 255);
         }}
 
+
         QComboBox::drop-down {{
             subcontrol-origin: padding;
             subcontrol-position: top right;
-            width: 30px;
+            width: 24px;
             border: none;
             background: transparent;
         }}
 
         QComboBox::down-arrow {{
             image: url("{image_path}");
-            width: 30px;
-            height: 20px;
+            width: 14px;
+            height: 14px;
         }}
     """)
     _install_no_wheel_on_combo(combo)
+
 
 
 # --- QLineEdit 控件状态管理 ---
@@ -1104,6 +1118,8 @@ def on_product_row_clicked(row, column):
 
     # ✅ 每次点击统一刷新高亮：
     highlight_row_except_current(row, column)
+
+    tbt.refresh_for_product(bianl.product_id)
 
 
 # 初始的
@@ -1562,27 +1578,122 @@ def load_product_forms():
 #         except: pass
 
 
-# lxy101=== 新增函数：用于处理产品类型变化的提示 ===
-def on_product_type_changed(text):
-    """当产品类型下拉框内容改变时，更新提示信息"""
-    developing_types = ["立式容器", "卧式容器"]
+# lxy101=== 容器产品定义：开发中判定与提示 ===
+def _is_container_definition_developing(product_type: str, product_form: str = "") -> bool:
+    """立式容器整类开发中；卧式容器仅双腔型开发中。"""
+    product_type = (product_type or "").strip()
+    product_form = (product_form or "").strip()
+    if product_type == "立式容器":
+        return True
+    if product_type == "卧式容器" and product_form == "双腔型":
+        return True
+    return False
 
-    # 检查当前选中的文本是否在“开发中”列表里
-    if text in developing_types:
-        # 如果是，就显示橙色警告提示
+
+def update_container_developing_tip():
+    """根据当前类型+型式更新底部「开发中」提示。"""
+    product_type = bianl.product_type_combo.currentText().strip()
+    product_form = bianl.product_form_combo.currentText().strip()
+    if _is_container_definition_developing(product_type, product_form):
         bianl.main_window.line_tip.setText("该容器正在开发中！")
         bianl.main_window.line_tip.setToolTip("该容器正在开发中！")
         bianl.main_window.line_tip.setStyleSheet("color: black;")
-        # # 5秒后自动清除提示1014
-        # QTimer.singleShot(5000, clear_line_tip)
-    else:
-        # 如果不是，就清空这条特定的警告信息
-        # （这里加一个判断，避免清除其他正常提示）
-        if bianl.main_window.line_tip.text() == "该容器正在开发中！":
-            bianl.main_window.line_tip.clear()
-            bianl.main_window.line_tip.setStyleSheet("color: black;")
-            # # 5秒后自动清除提示1014
-            # QTimer.singleShot(5000, clear_line_tip)
+    elif bianl.main_window.line_tip.text() == "该容器正在开发中！":
+        bianl.main_window.line_tip.clear()
+        bianl.main_window.line_tip.setStyleSheet("color: black;")
+
+
+def on_product_type_changed(text):
+    """当产品类型下拉框内容改变时，更新提示信息"""
+    update_container_developing_tip()
+
+
+def on_product_form_changed(text):
+    """当产品型式下拉框内容改变时，更新提示信息"""
+    update_container_developing_tip()
+
+
+def _resolve_product_folder_abs_for_definition(product_id, row: int) -> str:
+    """
+    产品定义保存时解析本地产品文件夹绝对路径。
+    优先使用活动表中已登记且磁盘上仍存在的路径；否则按表格与项目路径规则计算（与 save_new_product 一致）。
+    """
+    if product_id:
+        try:
+            conn_act = common_usage.get_mysql_connection_active()
+            cur_act = conn_act.cursor()
+            cur_act.execute(
+                "SELECT 产品文件夹绝对路径 FROM 产品设计活动表 WHERE 产品ID = %s",
+                (product_id,),
+            )
+            act_row = cur_act.fetchone()
+            cur_act.close()
+            conn_act.close()
+            stored = ""
+            if act_row:
+                if isinstance(act_row, dict):
+                    stored = (act_row.get("产品文件夹绝对路径") or "").strip()
+                else:
+                    stored = (act_row[0] or "").strip()
+            if stored:
+                stored_abs = os.path.normpath(os.path.abspath(stored))
+                if os.path.isdir(stored_abs):
+                    print(f"[confirm_product_definition] 使用活动表已有路径: {stored_abs}")
+                    return stored_abs
+                print(f"[confirm_product_definition] 活动表路径不存在，按表格重算: {stored_abs}")
+        except Exception as e:
+            print(f"[confirm_product_definition] 读取活动表路径失败: {e}")
+
+    if row < 0:
+        return ""
+
+    try:
+        _conn_p = common_usage.get_mysql_connection_project()
+        _cur_p = _conn_p.cursor()
+        _cur_p.execute(
+            "SELECT 项目保存路径 FROM 项目需求表 WHERE 项目ID = %s",
+            (bianl.current_project_id,),
+        )
+        _r_p = _cur_p.fetchone()
+        _cur_p.close()
+        _conn_p.close()
+        if not (_r_p and _r_p.get("项目保存路径")):
+            return ""
+
+        project_root = os.path.join(
+            _r_p["项目保存路径"],
+            f"{bianl.owner_input.text().strip()}_{bianl.project_name_input.text().strip()}",
+        )
+        serial_raw = (
+            (bianl.product_table.item(row, 0).text() or "").strip()
+            if bianl.product_table.item(row, 0)
+            else ""
+        )
+        serial = serial_raw.zfill(3) if serial_raw and serial_raw.isdigit() else serial_raw
+        name = (
+            (bianl.product_table.item(row, 1).text() or "").strip()
+            if bianl.product_table.item(row, 1)
+            else ""
+        )
+        position = (
+            (bianl.product_table.item(row, 2).text() or "").strip()
+            if bianl.product_table.item(row, 2)
+            else ""
+        )
+        number = (
+            (bianl.product_table.item(row, 3).text() or "").strip()
+            if bianl.product_table.item(row, 3)
+            else ""
+        )
+        folder_name = product_confirm_qianzhi.build_pd_folder_name(serial, name, position, number)
+        if not folder_name:
+            return ""
+        calculated = os.path.abspath(os.path.join(project_root, folder_name))
+        print(f"[confirm_product_definition] 按表格计算路径: {calculated}")
+        return calculated
+    except Exception as e:
+        print(f"[confirm_product_definition] 按表格计算路径失败: {e}")
+        return ""
 
 
 def confirm_product_definition():
@@ -1593,6 +1704,16 @@ def confirm_product_definition():
     if not bianl.product_id:
         print("当前产品未保存，无法进行定义操作。")
         QMessageBox.critical(bianl.main_window, "错误", "当前产品未保存，无法进行定义操作。")
+        return False
+
+    # 方案 B：产品信息处于 edit（已改表格、未点产品信息确认）时，不允许保存产品定义
+    row_status = bianl.product_table_row_status.get(row, {})
+    if isinstance(row_status, dict) and row_status.get("status") == "edit":
+        QMessageBox.warning(
+            bianl.main_window,
+            "请先保存产品信息",
+            "产品信息已修改但尚未保存，请先点击「产品信息」区域的保存按钮，再保存产品定义。",
+        )
         return False
 
     # 2) 读取 UI 字段
@@ -1612,9 +1733,17 @@ def confirm_product_definition():
         f"读取的产品信息：产品类型: {product_type}, 产品形式: {product_form},  产品型号: {product_model}, 图号前缀: {drawing_prefix}")
 
     # lxy101=== 在这里添加保存前的最终校验 ===
-    developing_types = ["立式容器", "卧式容器"]
-    if product_type in developing_types:
-        QMessageBox.critical(bianl.main_window, "无法保存", f"产品类型 '{product_type}' 尚在开发中，无法进行产品定义。")
+    if _is_container_definition_developing(product_type, product_form):
+        if product_type == "立式容器":
+            QMessageBox.critical(
+                bianl.main_window, "无法保存",
+                f"产品类型 '{product_type}' 尚在开发中，无法进行产品定义。"
+            )
+        else:
+            QMessageBox.critical(
+                bianl.main_window, "无法保存",
+                f"产品类型 '{product_type}' 与产品型式 '{product_form}' 尚在开发中，无法进行产品定义。"
+            )
         return False
 
     # 3) 以数据库为准判定是否“首次保存”
@@ -1684,32 +1813,9 @@ def confirm_product_definition():
         conn2 = common_usage.get_mysql_connection_active()
         cursor2 = conn2.cursor()
 
-        # 计算当前产品的文件夹绝对路径（与表格行一致）
+        # 方案 A：优先使用活动表已有且存在的路径，否则按表格规则计算
         row = bianl.product_table.currentRow()
-        product_folder_abs = ""
-        try:
-            _conn_p = common_usage.get_mysql_connection_project()
-            _cur_p = _conn_p.cursor()
-            _cur_p.execute("SELECT 项目保存路径 FROM 项目需求表 WHERE 项目ID = %s", (bianl.current_project_id,))
-            _r_p = _cur_p.fetchone()
-            _cur_p.close()
-            _conn_p.close()
-            if _r_p and _r_p.get("项目保存路径"):
-                project_root = os.path.join(
-                    _r_p["项目保存路径"],
-                    f"{bianl.owner_input.text().strip()}_{bianl.project_name_input.text().strip()}"
-                )
-                serial_raw = (bianl.product_table.item(row, 0).text() or "").strip() if bianl.product_table.item(row, 0) else ""
-                # 序号与新建产品时一致：纯数字时按 3 位补零（006），避免 06 导致路径少一位
-                serial = serial_raw.zfill(3) if serial_raw and serial_raw.isdigit() else serial_raw
-                name = (bianl.product_table.item(row, 1).text() or "").strip() if bianl.product_table.item(row, 1) else ""
-                position = (bianl.product_table.item(row, 2).text() or "").strip() if bianl.product_table.item(row, 2) else ""
-                number = (bianl.product_table.item(row, 3).text() or "").strip() if bianl.product_table.item(row, 3) else ""
-                folder_name = product_confirm_qianzhi.build_pd_folder_name(serial, name, position, number)
-                if folder_name:
-                    product_folder_abs = os.path.abspath(os.path.join(project_root, folder_name))
-        except Exception as _e_path:
-            print(f"[confirm_product_definition] 计算产品文件夹路径失败: {_e_path}")
+        product_folder_abs = _resolve_product_folder_abs_for_definition(bianl.product_id, row)
 
         upsert_sql = """
             INSERT INTO 产品设计活动表
@@ -1745,9 +1851,38 @@ def confirm_product_definition():
         if row not in bianl.product_table_row_status or not isinstance(bianl.product_table_row_status[row], dict):
             bianl.product_table_row_status[row] = {}
         bianl.product_table_row_status[row]["definition_status"] = "view"
+        if bianl.product_id:
+            bianl.product_table_row_status[row]["product_id"] = bianl.product_id
         print(f"第 {row} 行定义状态已更新: view（保存成功）")
 
         if is_first_time:
+            # 容器类型：首次定义保存时用容器专属模板覆盖新建时的默认本地文件
+            from modules.chanpinguanli import local_product_folder as lpf
+
+            if (
+                lpf._is_container_product_type(product_type)
+                and product_folder_abs
+                and os.path.exists(product_folder_abs)
+            ):
+                try:
+                    condition_template = lpf._condition_template_path(product_type)
+                    target_xlsx_path = os.path.join(product_folder_abs, "条件输入数据表.xlsx")
+                    if os.path.exists(condition_template):
+                        shutil.copy(condition_template, target_xlsx_path)
+                        print(f"[confirm_product_definition] 已用容器条件模板覆盖: {target_xlsx_path}")
+                    else:
+                        print(f"[confirm_product_definition] 未找到容器条件模板: {condition_template}")
+
+                    nozzle_template = lpf._nozzle_template_path(product_type)
+                    target_nozzle_path = os.path.join(product_folder_abs, lpf._NOZZLE_REQUIRED_FILE)
+                    if os.path.exists(nozzle_template):
+                        shutil.copy(nozzle_template, target_nozzle_path)
+                        print(f"[confirm_product_definition] 已用容器管口模板覆盖: {target_nozzle_path}")
+                    else:
+                        print(f"[confirm_product_definition] 未找到容器管口模板: {nozzle_template}")
+                except Exception as e_copy:
+                    print(f"[confirm_product_definition] 覆盖容器本地模板失败: {e_copy}")
+
             # 只有首次需要把必填项锁死（类型/形式）
             lock_combo(bianl.product_type_combo)
             lock_combo(bianl.product_form_combo)
@@ -1764,6 +1899,7 @@ def confirm_product_definition():
         bianl.main_window.line_tip.setStyleSheet("color: black;")
         # 5秒后自动清除提示1014
         QTimer.singleShot(5000, clear_line_tip)
+        tbt.refresh_for_product(bianl.product_id, product_type_hint=product_type)
         return True
 
     except Exception as e:
@@ -1973,19 +2109,32 @@ def _generate_unique_folder_path(base_folder_path: str) -> str:
         index += 1
 
 
-def _prepare_new_product_folder(source_folder: str, target_folder: str, new_product_id: str):
+def _prepare_new_product_folder(
+    source_folder: str,
+    target_folder: str,
+    new_product_id: str,
+    product_type: str = "",
+):
     """复制或初始化产品目录，并写入新产品ID。"""
     if source_folder and os.path.isdir(source_folder):
         shutil.copytree(source_folder, target_folder)
     else:
+        from modules.chanpinguanli import local_product_folder as lpf
+
         os.makedirs(target_folder, exist_ok=True)
-        # 源目录缺失时仍补齐模板文件，保证新产品可用
-        template_path = os.path.join(os.path.dirname(__file__), "条件输入数据表.xlsx")
-        template_path2 = os.path.join(os.path.dirname(__file__), "管口导入模板.xlsx")
-        if os.path.exists(template_path):
-            shutil.copy(template_path, os.path.join(target_folder, "条件输入数据表.xlsx"))
-        if os.path.exists(template_path2):
-            shutil.copy(template_path2, os.path.join(target_folder, "管口导入模板.xlsx"))
+        # 源目录缺失时按产品类型补齐模板（容器/换热器使用各自的条件表与管口模板）
+        condition_template = lpf._condition_template_path(product_type)
+        if os.path.exists(condition_template):
+            shutil.copy(
+                condition_template,
+                os.path.join(target_folder, "条件输入数据表.xlsx"),
+            )
+        nozzle_template = lpf._nozzle_template_path(product_type)
+        if os.path.exists(nozzle_template):
+            shutil.copy(
+                nozzle_template,
+                os.path.join(target_folder, lpf._NOZZLE_REQUIRED_FILE),
+            )
 
     with open(os.path.join(target_folder, "pro_id.csv"), "w", encoding="utf-8") as f:
         f.write(str(new_product_id))
@@ -2173,7 +2322,12 @@ def copy_selected_product():
             source_folder = (source_activity_main.get("产品文件夹绝对路径") or "").strip()
 
         # 先处理本地目录，确保数据库路径写入的是可用目录
-        _prepare_new_product_folder(source_folder, target_folder, new_product_id)
+        _prepare_new_product_folder(
+            source_folder,
+            target_folder,
+            new_product_id,
+            source_product_row.get("产品类型") or "",
+        )
         target_folder_abs = os.path.abspath(target_folder)
 
         # 开始写库（产品库 + 活动库）
@@ -2958,15 +3112,8 @@ def load_last_project():
 
                     bianl.product_type_combo.setCurrentText(first_product.get("产品类型", "") or "")
                     bianl.product_form_combo.setCurrentText(first_product.get("产品型式", "") or "")
-                    bianl.product_model_input.setText(first_product.get("设计版次", "") or "")
+                    bianl.product_model_input.setText(first_product.get("产品型号", "") or "")
                     bianl.drawing_prefix_input.setText(first_product.get("图号前缀", "") or "")
-
-                    bianl.design_input.setText(first_product.get("设计", "") or "")
-                    bianl.proofread_input.setText(first_product.get("校对", "") or "")
-                    bianl.review_input.setText(first_product.get("审核", "") or "")
-                    bianl.standardization_input.setText(first_product.get("标准化", "") or "")
-                    bianl.approval_input.setText(first_product.get("批准", "") or "")
-                    bianl.co_signature_input.setText(first_product.get("会签", "") or "")
 
                     if row0_status == "view":
                         bianl.product_table_row_status[0]["definition_status"] = "view"
@@ -3036,6 +3183,9 @@ def load_last_project():
             log_file.write("\n\n")
     # 在load_last_project函数的最后添加
     print(f"[验证] 加载完成后，bianl.current_project_id = {bianl.current_project_id}")
+    tbt.refresh_for_product(
+        getattr(bianl, "product_id", None) or getattr(bianl, "current_product_id", None)
+    )
 
 # yxx改 高亮这一列
 # def highlight_column(col):

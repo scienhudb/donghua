@@ -1905,6 +1905,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 如果关闭的是"管口及附件定义"，或者关闭的不是"管口及附件定义"且当前激活的也不是"管口及附件定义"，则启动定时器
         if tab_text == "管口及附件定义" or current_active_tab != "管口及附件定义":
             self._tip_timer.start(5000)
+        if hasattr(widget, "_clear_structure_tree_cancel_tip"):
+            widget._clear_structure_tree_cancel_tip()
         self.tab_widget.removeTab(index)
 
         # 重新连接信号

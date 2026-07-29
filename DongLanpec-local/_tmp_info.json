@@ -1,0 +1,41 @@
+{
+  "count": {
+    "cnt": 0
+  },
+  "indexes": [
+    {
+      "Table": "产品设计活动表_附件表",
+      "Non_unique": 0,
+      "Key_name": "PRIMARY",
+      "Seq_in_index": 1,
+      "Column_name": "附件ID",
+      "Collation": "A",
+      "Cardinality": 0,
+      "Sub_part": null,
+      "Packed": null,
+      "Null": "",
+      "Index_type": "BTREE",
+      "Comment": "",
+      "Index_comment": "",
+      "Visible": "YES",
+      "Expression": null
+    },
+    {
+      "Table": "产品设计活动表_附件表",
+      "Non_unique": 1,
+      "Key_name": "附件_产品ID",
+      "Seq_in_index": 1,
+      "Column_name": "产品ID",
+      "Collation": "A",
+      "Cardinality": 0,
+      "Sub_part": null,
+      "Packed": null,
+      "Null": "",
+      "Index_type": "BTREE",
+      "Comment": "",
+      "Index_comment": "",
+      "Visible": "YES",
+      "Expression": null
+    }
+  ]
+}

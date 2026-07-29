@@ -98,6 +98,10 @@ QScrollBar::sub-line:vertical {
 QScrollBar::add-page:vertical,
 QScrollBar::sub-page:vertical {
     background: none;
+}
+/* 仅替换表格内 QComboBox 的下拉箭头图片，其余样式继承全局 */
+QTableWidget QComboBox::down-arrow {
+    image: url(modules/chanpinguanli/icons/下箭头.png);
 }</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout" stretch="0,0">
