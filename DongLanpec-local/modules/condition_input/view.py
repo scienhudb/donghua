@@ -18,16 +18,35 @@ from modules.condition_input.funcs.funcs_cdt_input import load_design_data_if_ex
     render_coating_table, set_multilevel_headers, setup_container_trail_qheader, apply_table_style, highlight_missing_required_rows, \
     validate_required_fields, import_all_reference_data, save_local_condition_file, save_all_tables, \
     trigger_all_cross_table_relations, apply_design_data_dropdowns, apply_general_data_dropdowns, \
-    apply_trail_data_dropdowns, TrailTableComboDelegate, highlight_entire_row, shrink_index_column, shrink_unit_column, \
+    apply_trail_data_dropdowns, TrailTableComboDelegate, highlight_entire_row, \
     get_ref_data_excel_path, fetch_all_mode_orders, capture_default_order, apply_mode_param_order, \
     restore_default_order, autofill_outer_diameter, autofill_container_outer_diameter, \
-    refresh_container_outer_diameter_linkage, CONTAINER_OD_SERIES_DEFAULT
+    refresh_container_outer_diameter_linkage, CONTAINER_OD_SERIES_DEFAULT, \
+    setup_all_condition_tables_proportional_layout, refresh_all_condition_tables_proportional_layout, \
+    refresh_condition_table_proportional_layout, apply_condition_table_cell_tooltips, \
+    _format_design_param_name_display, _fix_design_data_row_heights
+from modules.condition_input.funcs.funcs_def_check import normalize_param_name, param_name_from_item
 from modules.chanpinguanli.chanpinguanli_main import product_manager
 from modules.condition_input.funcs.design_data_delegate import DesignDataDelegate  # 根据实际路径调整
 # from modules.yudingyi.luoshuan import update_user_config_for_2_6_1
-from modules.chanpinguanli.project_confirm_btn import show_confirm_dialog
+from modules.chanpinguanli.project_confirm_btn import (
+    show_confirm_dialog,
+    show_info_dialog,
+    show_warning_dialog,
+    show_critical_dialog,
+    show_yes_no_dialog,
+)
 
 product_id = None
+
+# 条件输入五表（屏幕70%列宽布局）
+_CONDITION_TABLE_NAMES = (
+    "tableWidget_product_std",
+    "tableWidget_design_data",
+    "tableWidget_general_data",
+    "tableWidget_trail_data",
+    "tableWidget_coating_data",
+)
 
 
 def on_product_id_changed(new_id):
@@ -90,7 +109,7 @@ class DesignConditionInputViewer(QWidget):
         print("准备检查项目和产品状态...")
         can_open, msg = check_project_and_product()
         if not can_open:
-            QMessageBox.information(self, "提示", msg)
+            show_info_dialog(self, "提示", msg)
             self.deleteLater()  # 不打开界面
             return  # 立即返回
 
@@ -149,7 +168,7 @@ class DesignConditionInputViewer(QWidget):
         except Exception:
             self._mode_orders = {}
 
-        self._default_mode_name = "设计模式"
+        self._default_mode_name = "简洁输入"
         combo = getattr(self, "combo_mode", None)  # 直接取 UI 里的 combo_mode
 
         if combo is None:
@@ -195,30 +214,45 @@ class DesignConditionInputViewer(QWidget):
             header_height = font_metrics.height() + 12
             table.horizontalHeader().setFixedHeight(header_height)
 
+        if self._is_valid_product:
+            # 先挂比例布局，再 apply_table_style（避免 Stretch 冲掉列宽）
+            try:
+                setup_all_condition_tables_proportional_layout(self)
+            except Exception as e:
+                print(f"[条件输入列宽] 布局初始化失败: {e}")
+
         for table in tables:
             apply_table_style(table)
 
         if self._is_valid_product:
-            # 新增
-            for table1 in [
-                self.tableWidget_design_data,
-                self.tableWidget_general_data,
-                self.tableWidget_product_std
-            ]:
-                shrink_index_column(table1, width=100)
-
-            # 新增
-            for table2 in [
-                self.tableWidget_design_data,
-                self.tableWidget_general_data
-            ]:
-                shrink_unit_column(table2, width=200)
+            # 条件输入五表：屏幕分辨率70%居中（不随窗口拖拽变）+ 列比例 + 超长省略/悬停
+            try:
+                refresh_all_condition_tables_proportional_layout(self, force=True)
+                for delay_ms in (0, 50, 150, 300):
+                    QTimer.singleShot(
+                        delay_ms,
+                        lambda: refresh_all_condition_tables_proportional_layout(self, force=True),
+                    )
+            except Exception as e:
+                print(f"[条件输入列宽] 初始化失败: {e}")
 
         for table in tables:
             table.itemSelectionChanged.connect(lambda t=table: highlight_entire_row(t))
         design_config = apply_design_data_dropdowns(product_id=self.product_id, viewer=self)
         general_config = apply_general_data_dropdowns()
         trail_config = apply_trail_data_dropdowns()
+        try:
+            refresh_all_condition_tables_proportional_layout(self, force=True)
+        except Exception:
+            pass
+        # 编辑后同步悬停全文
+        try:
+            for _tname in _CONDITION_TABLE_NAMES:
+                _tw = getattr(self, _tname, None)
+                if _tw is not None:
+                    _tw.itemChanged.connect(self._on_condition_table_item_changed_for_tooltip)
+        except Exception:
+            pass
         enable_full_undo(self.tableWidget_product_std, self, mode="product")
         enable_full_undo(self.tableWidget_design_data, self, mode="design", dropdown_config=design_config)
         enable_full_undo(self.tableWidget_general_data, self, mode="general", dropdown_config=general_config)
@@ -500,7 +534,7 @@ class DesignConditionInputViewer(QWidget):
         result = load_design_data_if_exists(product_id, product_form)
 
         if not result or not result.get("import_status"):
-            QMessageBox.information(self, "提示", "未找到设计数据，表格将保持为空。")
+            show_info_dialog(self, "提示", "未找到设计数据，表格将保持为空。")
             # 如果没有导入数据，默认为新产品（未保存到设计活动库）#1106新修改
             self._is_saved_to_design_db = False
             self.design_data_source = "条件模板"
@@ -514,7 +548,7 @@ class DesignConditionInputViewer(QWidget):
 
         # ❗️没有导入数据，提示后返回（错误/空数据情况需要用户知道）
         if not result.get("import_status", False):
-            QMessageBox.information(self, "提示", "未在产品设计活动库中找到该产品的设计数据。")
+            show_info_dialog(self, "提示", "未在产品设计活动库中找到该产品的设计数据。")
             return
 
         # ✅ 成功导入时不弹窗，用 print 或 QLabel 替代
@@ -576,6 +610,12 @@ class DesignConditionInputViewer(QWidget):
                 coating_std_value = row.get("规范/标准代号", "").strip()
                 break
         render_coating_table(self.tableWidget_coating_data, data["涂漆数据"]["格式化"], coating_std_value)
+        # 检测/涂漆渲染后刷新屏幕70%列宽（与 fill_table 三表一致）
+        try:
+            refresh_condition_table_proportional_layout(self, "tableWidget_trail_data", force=True)
+            refresh_condition_table_proportional_layout(self, "tableWidget_coating_data", force=True)
+        except Exception as e_trail_coat:
+            print(f"[条件输入列宽] 检测/涂漆刷新失败: {e_trail_coat}")
         if hasattr(self, 'undo_stack'):
             self.undo_stack.clear()
         # 专门用于触发“绝热层类型”的联动
@@ -811,6 +851,11 @@ class DesignConditionInputViewer(QWidget):
                 is_unit_column = key == "参数单位"  # 修改
                 # 0522新修改-ui修改
                 if key == "参数名称":
+                    # 隔板两侧压力差值：显示从括号换行；UserRole 存库内单行名
+                    canonical = normalize_param_name(value)
+                    display = _format_design_param_name_display(canonical)
+                    item.setText(display)
+                    item.setData(Qt.UserRole, canonical)
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 elif is_name_column:
@@ -828,6 +873,10 @@ class DesignConditionInputViewer(QWidget):
 
                 table_widget.setItem(row_idx, col_idx + extra_col, item)
 
+        # 设计数据：仅「隔板两侧压力差值」等含显式换行的行加高，其余保持默认单行高度
+        if table_widget.objectName() == "tableWidget_design_data":
+            _fix_design_data_row_heights(table_widget)
+
         # ✅ 仅对涂漆表设置 logical_headers，避免误操作其他表
         if table_widget.objectName() == "tableWidget_coating_data":
             table_widget.logical_headers = [
@@ -839,6 +888,15 @@ class DesignConditionInputViewer(QWidget):
         # 1111新修改-2金属温度单元格不可编辑-仅对设计数据表应用特殊只读逻辑
         if table_widget.objectName() == "tableWidget_design_data":
             self._apply_special_readonly_for_nen_bem()
+
+        # 条件输入列宽：填充后按屏幕70% + 列比例刷新
+        try:
+            name = table_widget.objectName()
+            if name in _CONDITION_TABLE_NAMES:
+                apply_condition_table_cell_tooltips(table_widget)
+                refresh_condition_table_proportional_layout(self, name, force=True)
+        except Exception as e:
+            print(f"[条件输入列宽] 填充后刷新失败: {e}")
 
     # 1111新修改-2金属温度单元格不可编辑
     def _apply_special_readonly_for_nen_bem(self):
@@ -868,7 +926,7 @@ class DesignConditionInputViewer(QWidget):
             param_item = self.tableWidget_design_data.item(row, 1)
             if not param_item:
                 continue
-            param_name = param_item.text().strip()
+            param_name = param_name_from_item(param_item)
 
             # "沿长度平均的换热管金属温度*" 的壳程数值列（第3列）设为只读
             if param_name == "沿长度平均的换热管金属温度*":
@@ -891,10 +949,11 @@ class DesignConditionInputViewer(QWidget):
         if table is None:
             return -1
         try:
+            target = normalize_param_name(target_name)
             rows = table.rowCount()
             for r in range(rows):
                 item = table.item(r, 1)
-                if item and item.text().strip() == target_name:
+                if item and param_name_from_item(item) == target:
                     return r
         except Exception:
             pass
@@ -1224,7 +1283,7 @@ class DesignConditionInputViewer(QWidget):
             try:
                 # 执行导入操作
                 import_all_reference_data(file_path, self)
-                QMessageBox.information(self, "成功", "成功导入参考数据！")
+                show_info_dialog(self, "成功", "成功导入参考数据！")
 
                 # 1112新修改-条件输入表格实质性变化：导入后不更新快照，让系统检测到这是相对于初始状态的变化
                 # 这样关闭界面时会提示保存
@@ -1244,13 +1303,20 @@ class DesignConditionInputViewer(QWidget):
                 self.tableWidget_general_data.blockSignals(False)
 
         except Exception as e:
-            QMessageBox.critical(self, "导入失败", str(e))
+            show_critical_dialog(self, "导入失败", str(e))
             # 确保异常时也恢复信号 #1106新修改
             self.tableWidget_design_data.blockSignals(False)
             self.tableWidget_general_data.blockSignals(False)
 
     def render_grouped_table(self, table_widget, grouped_data, headers, group_key_column=0):
         render_grouped_table(table_widget, grouped_data, headers, group_key_column)
+        try:
+            name = table_widget.objectName()
+            if name:
+                apply_condition_table_cell_tooltips(table_widget)
+                refresh_condition_table_proportional_layout(self, name, force=True)
+        except Exception as e:
+            print(f"[条件输入列宽] render_grouped_table 后刷新失败: {e}")
 
     def _is_container_product(self):
         return "容器" in (getattr(self, "product_type", "") or "")
@@ -1337,16 +1403,13 @@ class DesignConditionInputViewer(QWidget):
             save_all_tables(self, self.product_id)
             # update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
 
-            # ✅ 保存成功后，同步固定鞍座的鞍座高度
+            # ✅ 保存成功后：按壳程公称直径纠正鞍式支座型号（冲突写 BI），并同步鞍座高度
             try:
-                from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
-                    get_fixed_saddle_element_id_from_db
-                element_id = get_fixed_saddle_element_id_from_db(self.product_id)
-                if element_id:
-                    sync_saddle_height_on_tab_refresh(self.product_id, element_id)
-                    print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                from modules.cailiaodingyi.controllers.datamanager import sync_support_after_condition_dn_change
+                sync_support_after_condition_dn_change(self.product_id)
+                print(f"[条件输入保存] 已同步支座型号/鞍座高度: 产品{self.product_id}")
             except Exception as e:
-                print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+                print(f"[条件输入保存] 支座型号/鞍座高度同步失败: {e}")
 
             # 保存成功后清理状态
             self._validation_triggered = False
@@ -1372,7 +1435,7 @@ class DesignConditionInputViewer(QWidget):
             return (True, [])
 
         except Exception as e:
-            QMessageBox.critical(self, "保存失败", f"保存数据出错：\n{str(e)}")
+            show_critical_dialog(self, "保存失败", f"保存数据出错：\n{str(e)}")
             return (False, [])
 
     def _offer_discard_when_local_xlsx_missing(self, *, for_close_tab: bool) -> bool:
@@ -1393,7 +1456,7 @@ class DesignConditionInputViewer(QWidget):
         if getattr(self, "_local_condition_xlsx_missing", False):
             return self._offer_discard_when_local_xlsx_missing(for_close_tab=True)
 
-        QMessageBox.warning(
+        show_warning_dialog(
             self,
             "保存失败",
             f"保存数据时发生错误，无法自动保存。\n\n错误信息：{exc}",
@@ -1437,16 +1500,13 @@ class DesignConditionInputViewer(QWidget):
                             raise IOError("保存本地条件文件失败。")
                         save_all_tables(self, self.product_id)
                         # update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
-                        # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                        # ✅ 保存成功后：按壳程公称直径纠正鞍式支座型号（冲突写 BI），并同步鞍座高度
                         try:
-                            from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
-                                get_fixed_saddle_element_id_from_db
-                            element_id = get_fixed_saddle_element_id_from_db(self.product_id)
-                            if element_id:
-                                sync_saddle_height_on_tab_refresh(self.product_id, element_id)
-                                print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                            from modules.cailiaodingyi.controllers.datamanager import sync_support_after_condition_dn_change
+                            sync_support_after_condition_dn_change(self.product_id)
+                            print(f"[条件输入保存] 已同步支座型号/鞍座高度: 产品{self.product_id}")
                         except Exception as e:
-                            print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+                            print(f"[条件输入保存] 支座型号/鞍座高度同步失败: {e}")
 
                         # 保存成功后，重置状态并允许关闭
                         self._is_modified = False
@@ -1493,16 +1553,13 @@ class DesignConditionInputViewer(QWidget):
                 save_all_tables(self, self.product_id)
                 # update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
 
-                # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                # ✅ 保存成功后：按壳程公称直径纠正鞍式支座型号（冲突写 BI），并同步鞍座高度
                 try:
-                    from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
-                        get_fixed_saddle_element_id_from_db
-                    element_id = get_fixed_saddle_element_id_from_db(self.product_id)
-                    if element_id:
-                        sync_saddle_height_on_tab_refresh(self.product_id, element_id)
-                        print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                    from modules.cailiaodingyi.controllers.datamanager import sync_support_after_condition_dn_change
+                    sync_support_after_condition_dn_change(self.product_id)
+                    print(f"[条件输入保存] 已同步支座型号/鞍座高度: 产品{self.product_id}")
                 except Exception as e:
-                    print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+                    print(f"[条件输入保存] 支座型号/鞍座高度同步失败: {e}")
 
                 # 保存成功后，重置状态并允许关闭
                 self._is_modified = False
@@ -1533,7 +1590,7 @@ class DesignConditionInputViewer(QWidget):
 
         except Exception as e:
             print(f"检查数据出错：{str(e)}")
-            QMessageBox.critical(self, "检查失败", f"检查数据时发生错误：\n{str(e)}")
+            show_critical_dialog(self, "检查失败", f"检查数据时发生错误：\n{str(e)}")
             return (False, [])
 
         finally:
@@ -1568,16 +1625,13 @@ class DesignConditionInputViewer(QWidget):
                             raise IOError("保存本地条件文件失败。")
                         save_all_tables(self, self.product_id)
                         # update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
-                        # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                        # ✅ 保存成功后：按壳程公称直径纠正鞍式支座型号（冲突写 BI），并同步鞍座高度
                         try:
-                            from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
-                                get_fixed_saddle_element_id_from_db
-                            element_id = get_fixed_saddle_element_id_from_db(self.product_id)
-                            if element_id:
-                                sync_saddle_height_on_tab_refresh(self.product_id, element_id)
-                                print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                            from modules.cailiaodingyi.controllers.datamanager import sync_support_after_condition_dn_change
+                            sync_support_after_condition_dn_change(self.product_id)
+                            print(f"[条件输入保存] 已同步支座型号/鞍座高度: 产品{self.product_id}")
                         except Exception as e:
-                            print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+                            print(f"[条件输入保存] 支座型号/鞍座高度同步失败: {e}")
 
                         # 保存成功后，重置状态并允许切换
                         self._is_modified = False
@@ -1606,7 +1660,7 @@ class DesignConditionInputViewer(QWidget):
                             if self._offer_discard_when_local_xlsx_missing(for_close_tab=False):
                                 return (True, [])
                             return (False, [])
-                        QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，切换操作已取消。\n\n错误信息: {e}")
+                        show_critical_dialog(self, "保存失败", f"保存数据时发生错误，切换操作已取消。\n\n错误信息: {e}")
                         return (False, [])
                 # 必填项完整，没有修改，直接允许切换
                 return (True, [])
@@ -1627,16 +1681,13 @@ class DesignConditionInputViewer(QWidget):
                     raise IOError("保存本地条件文件失败。")
                 save_all_tables(self, self.product_id)
                 # update_user_config_for_2_6_1(product_id, json_path="modules/yudingyi/dn_pressure_table.json")
-                # ✅ 保存成功后，同步固定鞍座的鞍座高度
+                # ✅ 保存成功后：按壳程公称直径纠正鞍式支座型号（冲突写 BI），并同步鞍座高度
                 try:
-                    from modules.cailiaodingyi.controllers.datamanager import sync_saddle_height_on_tab_refresh, \
-                        get_fixed_saddle_element_id_from_db
-                    element_id = get_fixed_saddle_element_id_from_db(self.product_id)
-                    if element_id:
-                        sync_saddle_height_on_tab_refresh(self.product_id, element_id)
-                        print(f"[条件输入保存] 已同步固定鞍座高度: 产品{self.product_id}")
+                    from modules.cailiaodingyi.controllers.datamanager import sync_support_after_condition_dn_change
+                    sync_support_after_condition_dn_change(self.product_id)
+                    print(f"[条件输入保存] 已同步支座型号/鞍座高度: 产品{self.product_id}")
                 except Exception as e:
-                    print(f"[条件输入保存] 鞍座高度同步失败: {e}")
+                    print(f"[条件输入保存] 支座型号/鞍座高度同步失败: {e}")
 
                 # 保存成功后，重置状态并允许切换
                 self._is_modified = False
@@ -1665,12 +1716,12 @@ class DesignConditionInputViewer(QWidget):
                     if self._offer_discard_when_local_xlsx_missing(for_close_tab=False):
                         return (True, missing_fields)
                     return (False, missing_fields)
-                QMessageBox.critical(self, "保存失败", f"保存数据时发生错误，切换操作已取消。\n\n错误信息: {e}")
+                show_critical_dialog(self, "保存失败", f"保存数据时发生错误，切换操作已取消。\n\n错误信息: {e}")
                 return (False, missing_fields)
 
         except Exception as e:
             print(f"检查数据出错：{str(e)}")
-            QMessageBox.critical(self, "检查失败", f"检查数据时发生错误：\n{str(e)}")
+            show_critical_dialog(self, "检查失败", f"检查数据时发生错误：\n{str(e)}")
             return (False, [])
 
     # lxy101 新增清除高亮
@@ -1767,7 +1818,7 @@ class DesignConditionInputViewer(QWidget):
                 self.line_tip.setText(err_msg[:80])
                 self.line_tip.setToolTip(err_msg)
             else:
-                QMessageBox.critical(self, "导出失败", err_msg)
+                show_critical_dialog(self, "导出失败", err_msg)
 
     # 1111新修改-2金属温度单元格不可编辑
     # 新增 模式切换处理函数
@@ -1793,11 +1844,16 @@ class DesignConditionInputViewer(QWidget):
                 if specific_mode_name in self._mode_orders:
                     mode_lookup_name = specific_mode_name
 
+        # 仅「简洁输入」需要把带*必填项全部提到前面；完整输入等严格按模板顺序
+        prioritize_starred = str(mode_lookup_name).startswith("简洁输入")
+
         # 默认模式（设计模式）也优先使用模板排序，如果没找到对应模板再恢复默认顺序
         if mode_lookup_name == self._default_mode_name or mode_lookup_name.strip() == "":
             target_ids = self._mode_orders.get(mode_lookup_name)
             if target_ids:
-                apply_mode_param_order(self.tableWidget_design_data, target_ids)
+                apply_mode_param_order(
+                    self.tableWidget_design_data, target_ids, prioritize_starred=prioritize_starred
+                )
             else:
                 restore_default_order(self.tableWidget_design_data)
                 
@@ -1818,7 +1874,9 @@ class DesignConditionInputViewer(QWidget):
 
             # 仅重排三张含“参数ID”的表
             # apply_mode_param_order(self.tableWidget_product_std, target_ids)
-            apply_mode_param_order(self.tableWidget_design_data, target_ids)
+            apply_mode_param_order(
+                self.tableWidget_design_data, target_ids, prioritize_starred=prioritize_starred
+            )
             # apply_mode_param_order(self.tableWidget_general_data, target_ids)
 
         # ===== 新增：模式切换后，将设计数据表格的序号列设为不可编辑 =====
@@ -1843,6 +1901,44 @@ class DesignConditionInputViewer(QWidget):
                 refresh_container_outer_diameter_linkage(self)
         except Exception as e_outer:
             print(f"[容器外径联动] 模式切换后刷新失败: {e_outer}")
+
+        try:
+            refresh_all_condition_tables_proportional_layout(self, force=True)
+        except Exception as e_prop:
+            print(f"[条件输入列宽] 模式切换后刷新失败: {e_prop}")
+
+    def _on_condition_table_item_changed_for_tooltip(self, item):
+        """条件输入表格单元格变更时更新悬停全文。"""
+        if self._is_loading_data or item is None:
+            return
+        text = item.text() if item.text() else ""
+        item.setToolTip(text)
+
+    def _maybe_refresh_condition_tables_for_screen_change(self):
+        """仅当所在屏幕分辨率宽度变化时重算各表宽（不跟窗口拖拽变）。"""
+        try:
+            if getattr(self, "_is_valid_product", False):
+                refresh_all_condition_tables_proportional_layout(self, force=False)
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._maybe_refresh_condition_tables_for_screen_change()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._maybe_refresh_condition_tables_for_screen_change()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            if getattr(self, "_is_valid_product", False):
+                QTimer.singleShot(
+                    0, lambda: refresh_all_condition_tables_proportional_layout(self, force=True)
+                )
+        except Exception:
+            pass
 
     def eventFilter(self, obj, event):
         """
@@ -1946,15 +2042,16 @@ class DesignConditionInputViewer(QWidget):
             current_dn = self._get_ui_nominal_diameter()
             initial_dn = getattr(self, "_initial_nominal_diameter", None)
             if initial_dn is not None and current_dn is not None and initial_dn != current_dn:
-                reply = QMessageBox.question(
-                    self, 
-                    "提示", 
+                reply = show_yes_no_dialog(
+                    self,
+                    "提示",
                     "是否需要根据公称直径重新推荐管口的公称尺寸和偏心距？",
-                    QMessageBox.Yes | QMessageBox.No, 
-                    QMessageBox.No
+                    yes_text="确认",
+                    no_text="取消",
+                    default_no=True,
                 )
-                if reply == QMessageBox.Yes:
-                    QMessageBox.information(self, "提示", "请至”管口及附件定义“界面，重新确认管口信息。")
+                if reply:
+                    show_info_dialog(self, "提示", "请至”管口及附件定义“界面，重新确认管口信息。")
                     set_pipe_recommend_choice(self.product_id, True)
                 else:
                     set_pipe_recommend_choice(self.product_id, False)
