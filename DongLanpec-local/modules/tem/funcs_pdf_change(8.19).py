@@ -52,18 +52,6 @@ _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE = None
 _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE = None
 _FLOATING_HEAD_HMIN_FROM_CONFIG_CACHE = None
 
-
-def invalidate_user_config_value_caches():
-    """预定义修改 user_config 后调用，确保后续读取走最新配置。"""
-    global _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE
-    global _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE
-    global _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE
-    global _FLOATING_HEAD_HMIN_FROM_CONFIG_CACHE
-    _CLADDING_GROOVE_DEPTH_FROM_CONFIG_CACHE = None
-    _QIUGUAN_GROOVE_CONFIG_ENABLED_CACHE = None
-    _QIUGUAN_GROOVE_DN_THRESHOLD_CACHE = None
-    _FLOATING_HEAD_HMIN_FROM_CONFIG_CACHE = None
-
 # 元件定义界面冗长调试输出总开关（默认关闭；开发排查时在下方置 True）
 # 控制：垫片尺寸/PN 计算、[DBG] 垫片联动、支座/铭牌/保温的合并表与支座联动、[铭牌附属元件显隐]、[保温装置-螺柱型式显隐]、
 # [DBG][fastener_render]/[DBG][fastener_data]、材料组识别与 get_options_for_param 的[警告]、

@@ -470,7 +470,7 @@ class UserPage(QWidget):
 
 from modules.chanpinguanli.chanpinguanli_main import product_manager
 from modules.chanpinguanli.common_usage import get_mysql_connection_product, get_mysql_connection_active
-from modules.chanpinguanli.project_confirm_btn import show_confirm_dialog
+from modules.chanpinguanli.project_confirm_btn import apply_msgbox_button_style, show_confirm_dialog
 
 
 def on_product_id_changed(new_id):
@@ -793,13 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.action_help_doc:
             self.action_help_doc.triggered.connect(self.show_help_document)  # 新增
         if self.action_18:
-            self.action_18.triggered.connect(
-                lambda: setattr(self, 'config_lib_window', ConfigLibraryWidget()) or self.config_lib_window.show())
-
-        try:
-            self._init_backup_restore_menu()
-        except Exception as e:
-            print(f"[backup restore menu] init failed: {e}")
+            self.action_18.triggered.connect(self.yudingyi)  # 新增
 
         # 0719菜单栏改动
         # ✅ 字体大小：挂在菜单栏「偏好设置」下；顶栏配置仅保留预定义
@@ -837,18 +831,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 btn.clicked.connect(lambda _, t=title, w=widget_class: self.safe_open_tab(t, w))
                 btn.setEnabled(False)  # 初始禁用
 
-    # 方法定义
-    def open_config_library(self):
-        # 创建实例
-        w = ConfigLibraryWidget()
-        # 显示为独立窗口
-        w.setWindowTitle("Config Library")
-        w.resize(900, 700)
-        w.show()
-        # 防止被垃圾回收
-        self.config_lib_window = w
-
-
     # 1112新修改-切换产品提示优化
     def build_product_switch_message(self, product_name, device_tag, product_number):
         """构建产品切换确认消息，只显示非空字段"""
@@ -861,8 +843,6 @@ class MainWindow(QtWidgets.QMainWindow):
             parts.append(f"产品编号为 {product_number} ")
 
         return f"是否切换为{', '.join(parts)}的产品？"
-
-
 
     def select_product(self, product_id):
         """
@@ -2462,6 +2442,8 @@ if __name__ == "__main__":
                 ok_btn = box.button(QtWidgets.QMessageBox.Ok)
                 if ok_btn is not None:
                     ok_btn.setText("确认")
+                # 与项目管理/条件输入弹窗按钮样式一致
+                apply_msgbox_button_style(box)
                 return box.exec_()
             else:
                 return _orig_information(parent, title, text, buttons, defaultButton)
@@ -2479,6 +2461,7 @@ if __name__ == "__main__":
                 ok_btn = box.button(QtWidgets.QMessageBox.Ok)
                 if ok_btn is not None:
                     ok_btn.setText("确认")
+                apply_msgbox_button_style(box)
                 return box.exec_()
             else:
                 return _orig_critical(parent, title, text, buttons, defaultButton)
@@ -2496,6 +2479,7 @@ if __name__ == "__main__":
                 ok_btn = box.button(QtWidgets.QMessageBox.Ok)
                 if ok_btn is not None:
                     ok_btn.setText("确认")
+                apply_msgbox_button_style(box)
                 return box.exec_()
             else:
                 return _orig_warning(parent, title, text, buttons, defaultButton)
@@ -2523,6 +2507,7 @@ if __name__ == "__main__":
                 btn = box.button(std_btn)
                 if btn is not None:
                     btn.setText(label)
+            apply_msgbox_button_style(box)
             return box.exec_()
 
 
@@ -2597,7 +2582,7 @@ if __name__ == "__main__":
     # import modules.chanpinguanli.main as cpgl_main
     from modules.buguan.buguan_ziyong.My_Piping import TubeLayoutEditor
     from modules.qiangdujisuan.jiekou_python.jisuanjiemian import JisuanResultViewer
-    from modules.yudingyi.predefined import ConfigLibraryWidget
+    from modules.yudingyi.predefined import yudingyi
     from modules.chanpinguanli.main2 import cpgl_Stats
 
     window.showMaximized()#0524新修改-初始界面最大化

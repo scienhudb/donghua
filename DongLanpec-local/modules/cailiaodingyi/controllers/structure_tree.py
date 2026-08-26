@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""元件定义 - 结构树：配置读取、对话框、写库与清空隐藏元件数据。"""
+"""元件定义 - 结构树：配置读取、对话框、写库；隐藏清空材料并删除附加参数行，再显示时从模板回填。"""
 
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -269,10 +269,27 @@ def show_structure_tree_dialog(
 
 
 def clear_element_product_data(product_id: str, element_id) -> None:
-    """清空某元件在活动库中的材料及附加参数值（保留行结构；保留参数「元件名称」）。"""
+    """
+    隐藏元件：清空材料表业务字段并标记是否显示=否；
+    删除该元件在「元件附加参数表」中的全部行（再选中时从模板回填）；
+    合并表仍清空参数值（保留行结构，保留「元件名称」）。
+    """
     conn = get_connection(**db_config_1)
+    elem_name = ""
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 元件名称 FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cur.fetchone()
+            if row:
+                elem_name = str((row.get("元件名称") if isinstance(row, dict) else row[0]) or "").strip()
+
             cur.execute(
                 """
                 UPDATE 产品设计活动表_元件材料表
@@ -283,15 +300,15 @@ def clear_element_product_data(product_id: str, element_id) -> None:
                 """,
                 (product_id, element_id),
             )
+            # 未选元件：直接删除附加参数行（不再仅清空参数值）
             cur.execute(
                 """
-                UPDATE 产品设计活动表_元件附加参数表
-                SET 参数值 = ''
+                DELETE FROM 产品设计活动表_元件附加参数表
                 WHERE 产品ID = %s AND 元件ID = %s
-                  AND 参数名称 <> '元件名称'
                 """,
                 (product_id, element_id),
             )
+            # 合并表：其它参数清空，明确保留「元件名称」
             cur.execute(
                 """
                 UPDATE 产品设计活动表_元件附加参数合并表
@@ -307,19 +324,190 @@ def clear_element_product_data(product_id: str, element_id) -> None:
     finally:
         conn.close()
 
+    # 保温装置：清空后若元件名称为空，按管口附件表回填（不回填材料等模板参数）
+    if elem_name == "保温装置":
+        try:
+            from modules.cailiaodingyi.controllers.datamanager import (
+                sync_insulation_merged_component_names_from_attachment,
+            )
+            sync_insulation_merged_component_names_from_attachment(product_id, element_id)
+        except Exception as e:
+            print(f"[结构树][保温装置] 清空后回填元件名称失败: {e}")
+
+
+def _get_element_visibility_flag(product_id: str, element_id) -> Optional[str]:
+    """返回 '是' / '否' / None（无行或空值）。"""
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 是否显示 FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            flag = str((row.get("是否显示") if isinstance(row, dict) else row[0]) or "").strip()
+            if _is_yes(flag):
+                return "是"
+            if flag in ("否", "0", "false", "False", "N", "n"):
+                return "否"
+            return None
+    except pymysql.MySQLError:
+        return None
+    finally:
+        conn.close()
+
+
+def _element_para_row_count(product_id: str, element_id) -> int:
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM 产品设计活动表_元件附加参数表
+                WHERE 产品ID = %s AND 元件ID = %s
+                """,
+                (product_id, element_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return 0
+            return int(row.get("cnt") if isinstance(row, dict) else row[0] or 0)
+    except pymysql.MySQLError:
+        return 0
+    finally:
+        conn.close()
+
+
+def _needs_element_para_restore(product_id: str, element_id) -> bool:
+    """
+    需要从模板回填附加参数：此前隐藏（是否显示=否），或附加参数表已无行。
+    已显示且仍有参数行时不回填，避免覆盖用户已改数据。
+    """
+    if _get_element_visibility_flag(product_id, element_id) == "否":
+        return True
+    return _element_para_row_count(product_id, element_id) <= 0
+
+
+def _resolve_product_template_name(product_id: str, all_elements: Optional[List[dict]] = None) -> str:
+    for item in all_elements or []:
+        name = (item.get("模板名称") or "").strip()
+        if name:
+            return name
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 模板名称 FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s
+                LIMIT 1
+                """,
+                (product_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                return str((row.get("模板名称") if isinstance(row, dict) else row[0]) or "").strip() or "None"
+    except pymysql.MySQLError as e:
+        print(f"[结构树] 读取模板名称失败: {e}")
+    finally:
+        conn.close()
+    return "None"
+
+
+def restore_element_para_from_template(
+    product_id: str,
+    element_id,
+    template_id=None,
+    template_name: Optional[str] = None,
+) -> None:
+    """
+    再次选中（此前隐藏）时：从材料库模板读出该元件有哪些附加参数行并 INSERT；
+    参数值一律为空（仅「元件名称」写标准名）。
+    未选中时已删除附加参数行，此处不再重复 DELETE。
+    """
+    if not product_id or element_id is None:
+        return
+
+    from modules.cailiaodingyi.funcs.funcs_pdf_input import (
+        get_template_id_by_name,
+        query_template_element_para_data,
+    )
+
+    tpl_name = (template_name or "").strip() or "None"
+    if template_id is None:
+        template_id = get_template_id_by_name(tpl_name)
+    if template_id is None:
+        print(f"[结构树] 无法解析模板ID，跳过附加参数回填 product={product_id} element={element_id} template={tpl_name}")
+        return
+
+    template_rows = query_template_element_para_data(template_id) or []
+    eid_str = str(element_id).strip()
+    element_rows = [
+        r for r in template_rows
+        if str(r.get("元件ID") or "").strip() == eid_str
+    ]
+    if not element_rows:
+        print(f"[结构树] 模板无附加参数可回填 product={product_id} element={element_id} template_id={template_id}")
+        return
+
+    conn = get_connection(**db_config_1)
+    try:
+        with conn.cursor() as cur:
+            for item in element_rows:
+                param_name = str(item.get("参数名称", "") or "").strip()
+                element_name = str(item.get("元件名称", "") or "").strip()
+                # 只恢复参数行结构；业务参数值清空。元件名称与旧清空逻辑一致予以保留。
+                if param_name == "元件名称":
+                    param_value = element_name
+                else:
+                    param_value = ""
+                para_id = item.get("元件附加参数ID")
+                if para_id is None:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO 产品设计活动表_元件附加参数表
+                    (元件附加参数ID, 产品ID, 元件ID, 元件名称, 参数名称, 参数值, 参数单位)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        para_id,
+                        product_id,
+                        item.get("元件ID"),
+                        item.get("元件名称"),
+                        item.get("参数名称"),
+                        param_value,
+                        item.get("参数单位"),
+                    ),
+                )
+        conn.commit()
+        print(f"[结构树] 已从模板回填附加参数结构(参数值清空) product={product_id} element={element_id} rows={len(element_rows)}")
+    except pymysql.MySQLError as e:
+        print(f"[结构树] 从模板回填附加参数失败 product={product_id} element={element_id}: {e}")
+    finally:
+        conn.close()
+
 
 def ensure_element_name_param(product_id: str, element_id, element_name: str) -> None:
     """显示元件时，若附加参数中「元件名称」为空则写回标准名。"""
     name = (element_name or "").strip()
     if not name:
         return
+    # 保温装置合并表「元件名称」是子零件多选 JSON，不能写成父级名
+    skip_merged = name == "保温装置"
     conn = get_connection(**db_config_1)
     try:
         with conn.cursor() as cur:
-            for table in (
-                "产品设计活动表_元件附加参数表",
-                "产品设计活动表_元件附加参数合并表",
-            ):
+            tables = ["产品设计活动表_元件附加参数表"]
+            if not skip_merged:
+                tables.append("产品设计活动表_元件附加参数合并表")
+            for table in tables:
                 cur.execute(
                     f"""
                     UPDATE {table}
@@ -421,15 +609,43 @@ def apply_structure_tree_selection(
     visible_element_ids: List,
 ) -> None:
     """
-    按用户选择写是否显示；隐藏项清空业务数据，显示项仅标记是否显示=是（不恢复模板数据）。
+    按用户选择写是否显示：
+    - 隐藏：清空材料表字段 + 删除元件附加参数表行 + 清空合并表参数值；
+    - 显示：标记是否显示=是；若此前隐藏或附加参数已无行，则从模板恢复参数行结构（参数值清空，仅保留元件名称）。
     """
     visible_set = set(visible_element_ids or [])
+    template_name = _resolve_product_template_name(product_id, all_elements)
+    template_id = None
+    try:
+        from modules.cailiaodingyi.funcs.funcs_pdf_input import get_template_id_by_name
+        template_id = get_template_id_by_name(template_name)
+    except Exception as e:
+        print(f"[结构树] 解析模板ID失败 template={template_name}: {e}")
+
     for item in all_elements or []:
         eid = item.get("元件ID")
         if eid is None:
             continue
         if eid in visible_set:
+            # 必须在改「是否显示」之前判断，才能识别「再次选中」
+            need_restore = _needs_element_para_restore(product_id, eid)
+            item_tpl_id = item.get("模板ID")
             set_element_visible(product_id, eid, True)
+            if need_restore:
+                restore_element_para_from_template(
+                    product_id,
+                    eid,
+                    template_id=item_tpl_id if item_tpl_id is not None else template_id,
+                    template_name=(item.get("模板名称") or template_name),
+                )
             ensure_element_name_param(product_id, eid, _element_display_name(item))
         else:
             clear_element_product_data(product_id, eid)
+    # 保温装置：无附件触发时不应残留合并表结构（与管口附件一致）
+    try:
+        from modules.cailiaodingyi.controllers.datamanager import (
+            reconcile_insulation_merged_para_with_attachment,
+        )
+        reconcile_insulation_merged_para_with_attachment(product_id)
+    except Exception as e:
+        print(f"[结构树][保温装置] 合并表对齐失败: {e}")

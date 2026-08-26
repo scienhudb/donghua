@@ -1,0 +1,10 @@
+2026-08-24 16:33:18,035 [INFO] [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+2026-08-24 16:33:18,035 [INFO] [33mPress CTRL+C to quit[0m
+2026-08-24 16:33:18,420 [INFO] 127.0.0.1 - - [24/Aug/2026 16:33:18] "GET / HTTP/1.1" 200 -
+2026-08-24 16:33:18,689 [INFO] 127.0.0.1 - - [24/Aug/2026 16:33:18] "[33mGET /hybridaction/zybTrackerStatisticsAction?data={}&__callback__=__cb__zybTrackerStatisticsAction__19a5e2d2_e5f8_4d22_b725_b78bb9f0221b__0 HTTP/1.1[0m" 404 -
+2026-08-24 16:33:19,206 [INFO] 127.0.0.1 - - [24/Aug/2026 16:33:19] "[33mGET /hybridaction/zybTrackerStatisticsAction?data={}&__callback__=__cb__zybTrackerStatisticsAction__4d284db6_d081_4cd1_b179_fb2facec2d81__1 HTTP/1.1[0m" 404 -
+2026-08-24 16:33:24,348 [INFO] 127.0.0.1 - - [24/Aug/2026 16:33:24] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+2026-08-24 16:35:21,313 [INFO] 127.0.0.1 - - [24/Aug/2026 16:35:21] "GET / HTTP/1.1" 200 -
+2026-08-24 16:35:21,617 [INFO] 127.0.0.1 - - [24/Aug/2026 16:35:21] "[33mGET /hybridaction/zybTrackerStatisticsAction?data={}&__callback__=__cb__zybTrackerStatisticsAction__54030e8f_f6d9_4a27_8bcb_2fae57ea3b14__0 HTTP/1.1[0m" 404 -
+2026-08-24 16:35:22,141 [INFO] 127.0.0.1 - - [24/Aug/2026 16:35:22] "[33mGET /hybridaction/zybTrackerStatisticsAction?data={}&__callback__=__cb__zybTrackerStatisticsAction__be30d4a1_c3f0_4659_998f_3d443e5f3375__1 HTTP/1.1[0m" 404 -

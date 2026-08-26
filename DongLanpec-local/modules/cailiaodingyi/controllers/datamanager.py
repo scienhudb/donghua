@@ -1358,6 +1358,11 @@ def _element_name_for_material_linkage(viewer_instance, table=None, param_col=0,
 # 注：设备法兰紧固件走独立多列表格，按列「元件类型」(螺柱/螺母)过滤，不在此集合
 _MERGED_PARENT_ELEMENT_NAMES = frozenset({"支座", "铭牌", "保温装置"})
 
+# 保温装置：合并表「元件名称」固定三选项；管口附件表以支撑板/支撑环为触发
+INSULATION_DEVICE_NAME = "保温装置"
+INSULATION_COMPONENT_OPTIONS = ["保温支撑板", "支耳(保温)", "保温支撑环"]
+INSULATION_ATTACHMENT_TRIGGER_BASES = frozenset({"保温支撑板", "保温支撑环"})
+
 
 def _part_names_for_material_type_filter(viewer_instance, table=None, param_col=0, value_col=1):
     """
@@ -2353,7 +2358,7 @@ def load_data_by_template(viewer_instance, template_name):
             # 获取当前模板ID对应的元件附加参数信息
             element_para_info = query_template_element_para_data(first_template_id)
             # 更新产品活动库中的元件附加参数表
-            insert_or_update_element_para_data(product_id, element_para_info)
+            insert_or_update_element_para_data(product_id, element_para_info, template_name)
             sync_design_params_to_element_params(product_id)
 
             # 获取当前模板ID对应的管口参数信息
@@ -3284,8 +3289,47 @@ def _handle_table_click_impl(viewer_instance, row, col):
     element_name = clicked_element_data.get("零件名称", "")
     # print(f"元件ID{element_id}")
 
-    # 判断是否为支座/铭牌/保温装置（使用同一套UI和逻辑）  # 新增保温装置
-    if element_name in ["支座", "铭牌", "保温装置"]:  # 新增保温装置
+    # 保温装置：无附件且无合并表结构时不进专用页；曾定义后管口删光则允许进空白 Tab
+    if element_name == "保温装置":
+        product_id = getattr(viewer_instance, "product_id", None)
+        has_attach = has_insulation_device_from_attachment(product_id)
+        has_merged = _count_element_merged_para_rows(product_id, element_id) > 0
+        if not has_attach and not has_merged:
+            tip = getattr(viewer_instance, "line_tip", None)
+            if tip is not None:
+                tip.setText("无保温装置，保持当前元件")
+                tip.setStyleSheet("color: orange;")
+            print("[保温装置] 附件表无保温支撑板/环且无合并表，保持当前元件界面")
+            return
+        try:
+            reconcile_insulation_merged_para_with_attachment(product_id)
+        except Exception as e:
+            print(f"[保温装置] 点击时合并表对齐失败: {e}")
+        if hasattr(viewer_instance, "stackedWidget"):
+            viewer_instance.stackedWidget.setCurrentIndex(2)
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print("[保温装置] 切换到页面: page_3")
+        try:
+            saddle_data = load_element_merged_para_product_data(product_id, element_id)
+            if not saddle_data:
+                clear_element_merged_para_ui(viewer_instance)
+                tip = getattr(viewer_instance, "line_tip", None)
+                if tip is not None:
+                    tip.setText("保温装置参数尚未生成，请重试或检查模板")
+                    tip.setStyleSheet("color: orange;")
+                print("[保温装置] 合并表仍无数据，已清空残留UI")
+                return
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[保温装置] 加载数据: {len(saddle_data)} 条")
+            render_element_merged_para_data_to_ui(viewer_instance, saddle_data, element_name)
+        except Exception as e:
+            print(f"[保温装置] 数据加载失败: {e}")
+            import traceback
+            traceback.print_exc()
+        return
+
+    # 判断是否为支座/铭牌（使用同一套UI和逻辑）
+    if element_name in ["支座", "铭牌"]:
         # ✅ 切换到支座/铭牌页面 (page_3)
         if hasattr(viewer_instance, 'stackedWidget'):
             viewer_instance.stackedWidget.setCurrentIndex(2)
@@ -8210,22 +8254,274 @@ def batch_insert_element_merged_para_data(product_id, template_id, template_name
     #     return
     #
     # print(f"[批量处理] 开始处理 {len(element_ids)} 个元件的附加参数合并表数据: {element_ids}")
-    
+
+    has_insul_attach = has_insulation_device_from_attachment(product_id)
+
     for element_id in element_ids:
         try:
-            # print(f"[调试] 处理元件: {element_id}")
-            # 查询该元件的附加参数合并表数据
+            ename = _get_product_element_name(product_id, element_id)
+            if ename == INSULATION_DEVICE_NAME:
+                if not has_insul_attach:
+                    # 无附件触发：不写入合并表
+                    delete_element_merged_para_rows(product_id, element_id)
+                    print(f"[保温装置] 附件表无触发，跳过合并表模板灌入 element_id={element_id}")
+                    continue
+                if get_insulation_device_visibility_flag(product_id, element_id) == "否":
+                    # 结构树不显示：保留已清空后的合并表（含元件名称），勿用模板覆写
+                    print(f"[保温装置] 结构树不显示，跳过模板覆写合并表 element_id={element_id}")
+                    continue
+                # 有附件且显示：灌模板结构后，再用管口附件回填空的「元件名称」
+                # （模板里元件名称常为空；名称来自附件表/用户勾选，不能只靠模板）
+
             merged_para_info = query_template_element_merged_para_data(template_id, element_id)
-            # print(f"[调试] 查询到 {len(merged_para_info)} 条数据")
-            
-            # 插入到产品活动库
             insert_or_update_element_merged_para_data(product_id, element_id, merged_para_info, template_name)
-            
+
         except Exception as e:
             print(f"[批量处理] 处理元件 {element_id} 失败: {e}")
             continue
-    
+
+    if has_insul_attach:
+        try:
+            reconcile_insulation_merged_para_with_attachment(product_id)
+        except Exception as e:
+            print(f"[保温装置] 批量灌入后按附件对齐失败: {e}")
+
     print(f"[批量处理] 完成所有元件的附加参数合并表数据处理")
+
+
+def _get_product_element_name(product_id, element_id) -> str:
+    if not product_id or element_id is None:
+        return ""
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 元件名称
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return ""
+            return str((row.get("元件名称") if isinstance(row, dict) else row[0]) or "").strip()
+    except Exception:
+        return ""
+    finally:
+        connection.close()
+
+
+def delete_element_merged_para_rows(product_id, element_id) -> int:
+    """删除某元件在活动库合并表中的全部行（保温装置无附件触发时用）。"""
+    if not product_id or element_id is None:
+        return 0
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s AND 元件ID = %s
+                """,
+                (product_id, element_id),
+            )
+            n = cursor.rowcount or 0
+            connection.commit()
+            if n:
+                print(f"[保温装置] 已删除合并表数据 product={product_id} element={element_id} rows={n}")
+            return n
+    except Exception as e:
+        print(f"[保温装置] 删除合并表失败: {e}")
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        connection.close()
+
+
+def _count_element_merged_para_rows(product_id, element_id) -> int:
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s AND 元件ID = %s
+                """,
+                (product_id, element_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return 0
+            return int((row.get("cnt") if isinstance(row, dict) else row[0]) or 0)
+    except Exception:
+        return 0
+    finally:
+        connection.close()
+
+
+def ensure_insulation_merged_para_from_template(product_id, element_id=None, force_reload: bool = False) -> bool:
+    """
+    按当前产品模板灌入保温装置合并表（材料库「元件附加参数合并表」）。
+
+    force_reload=False（默认/场景②）：仅当活动库尚无合并表行时写入；已有行（含结构树清空后的空行）不覆盖。
+    force_reload=True（场景③）：强制按模板重灌，覆盖结构树清空留下的空参数行。
+    """
+    if not product_id or not has_insulation_device_from_attachment(product_id):
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    if not force_reload and _count_element_merged_para_rows(product_id, element_id) > 0:
+        return False
+
+    template_name = "None"
+    template_id = None
+
+    # 1) 元件材料表只有「模板名称」（无模板ID列）
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 模板名称
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cursor.fetchone()
+            if row:
+                template_name = str(
+                    (row.get("模板名称") if isinstance(row, dict) else row[0]) or "None"
+                ).strip() or "None"
+            # 同产品其它合并元件行上常带有模板ID
+            cursor.execute(
+                """
+                SELECT 模板ID, 模板名称
+                FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s
+                  AND 模板ID IS NOT NULL AND TRIM(CAST(模板ID AS CHAR)) <> ''
+                  AND TRIM(CAST(模板ID AS CHAR)) <> '0'
+                LIMIT 1
+                """,
+                (product_id,),
+            )
+            row2 = cursor.fetchone()
+            if row2:
+                tid = row2.get("模板ID") if isinstance(row2, dict) else row2[0]
+                tname = row2.get("模板名称") if isinstance(row2, dict) else (row2[1] if len(row2) > 1 else None)
+                if tid not in (None, ""):
+                    try:
+                        template_id = int(tid)
+                    except (TypeError, ValueError):
+                        template_id = tid
+                if tname and (not template_name or template_name.lower() == "none"):
+                    template_name = str(tname).strip() or template_name
+    except Exception as e:
+        print(f"[保温装置] 读取产品模板信息失败: {e}")
+    finally:
+        connection.close()
+
+    # 2) 按模板名称解析
+    if not template_id and template_name and template_name.lower() != "none":
+        try:
+            from modules.cailiaodingyi.funcs.funcs_pdf_input import get_template_id_by_name
+            template_id = get_template_id_by_name(template_name)
+        except Exception as e:
+            print(f"[保温装置] get_template_id_by_name 失败: {e}")
+            template_id = None
+
+    # 3) 材料库：按元件ID反查任一模板
+    if not template_id:
+        connection = get_connection(**db_config_2)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT 模板ID FROM 元件附加参数合并表
+                    WHERE 元件ID = %s
+                    ORDER BY 模板ID DESC
+                    LIMIT 1
+                    """,
+                    (element_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    template_id = row.get("模板ID") if isinstance(row, dict) else row[0]
+        except Exception as e:
+            print(f"[保温装置] 材料库反查模板ID失败: {e}")
+        finally:
+            connection.close()
+
+    if not template_id:
+        print(f"[保温装置] 无法解析模板ID，跳过合并表灌入 product={product_id} template_name={template_name}")
+        return False
+
+    merged_para_info = query_template_element_merged_para_data(template_id, element_id)
+    if not merged_para_info:
+        print(f"[保温装置] 模板无合并表结构 template_id={template_id} element_id={element_id}")
+        return False
+    insert_or_update_element_merged_para_data(product_id, element_id, merged_para_info, template_name)
+    print(f"[保温装置] 已按模板灌入合并表 product={product_id} element={element_id} template_id={template_id}")
+    return True
+
+
+def clear_element_merged_para_ui(viewer_instance):
+    """清空合并元件 Tab UI，避免残留上一元件（如铭牌）页面。"""
+    try:
+        tab_widget = getattr(viewer_instance, "tabWidget_2", None)
+        if tab_widget is not None:
+            while tab_widget.count() > 0:
+                tab_widget.removeTab(0)
+        if hasattr(viewer_instance, "dynamic_element_merged_para_tabs"):
+            viewer_instance.dynamic_element_merged_para_tabs = {}
+    except Exception as e:
+        print(f"[合并元件] 清空UI失败: {e}")
+
+
+def reconcile_insulation_merged_para_with_attachment(product_id) -> None:
+    """
+    保温装置合并表与附件表对齐（不含场景③强制灌模板；场景③走 ensure_insulation_device_visible(..., force=True)）：
+    - 无附件触发：
+        · 合并表已有结构（曾定义过，管口后删光）→ 取消全部勾选并收成空白 Tab，不整表删除
+        · 合并表无行 → 无需处理（点进仍提示无保温装置）
+        · 结构树不显示 → 删除残留合并表
+    - 有附件但结构树不显示（场景②清空态）：不灌模板，仅必要时回填空的「元件名称」
+    - 有附件且已显示：仅当合并表无行时补模板结构；元件名称为空时按附件回填
+    对齐后始终按 Tab 重算「是否定义」（不照搬模板表定义状态）。
+    """
+    if not product_id:
+        return
+    element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return
+    if not has_insulation_device_from_attachment(product_id):
+        flag = get_insulation_device_visibility_flag(product_id, element_id)
+        if flag == "是" and _count_element_merged_para_rows(product_id, element_id) > 0:
+            blank_insulation_merged_when_no_attachment(product_id, element_id)
+        else:
+            delete_element_merged_para_rows(product_id, element_id)
+        refresh_insulation_define_status(product_id, element_id)
+        return
+    if get_insulation_device_visibility_flag(product_id, element_id) == "否":
+        # 场景②：不显示则不灌模板参数
+        sync_insulation_merged_component_names_from_attachment(product_id, element_id)
+        return
+    # 已显示：不 force_reload，避免场景②「清空后再选回」被模板重新填满
+    ensure_insulation_merged_para_from_template(product_id, element_id, force_reload=False)
+    sync_insulation_merged_component_names_from_attachment(product_id, element_id)
+    # 场景③收尾：合并表已有材料、左侧仍空 → 从元件材料模板表补左侧
+    maybe_restore_insulation_left_material_from_template(product_id, element_id)
+    refresh_insulation_define_status(product_id, element_id)
 
 
 def get_first_tab_for_element(product_id, element_id):
@@ -8911,22 +9207,37 @@ def on_confirm_element_merged_para_param(viewer_instance):
         # 2) 保存当前Tab页的所有参数到数据库
         update_element_merged_para_tab_data_from_table(table_param, product_id, element_id, tab_name)
 
+        # 2.5) 保温装置：元件名称为空则删 Tab / 收成空白 Tab（须在刷新 UI 前）
+        insulation_pruned = False
+        if element_name in ["保温装置"]:
+            try:
+                insulation_pruned = bool(
+                    prune_insulation_tabs_with_empty_component_names(product_id, element_id)
+                )
+            except Exception as e:
+                print(f"[保温装置] 确定时清理空Tab失败: {e}")
+
         # 2) 强制提交数据库事务
         if hasattr(viewer_instance, "force_commit"):
             viewer_instance.force_commit()
 
-        # 3) 同步关键参数到其他Tab页
-        try:
-            sync_fixed_saddle_param_across_tabs(viewer_instance, product_id, tab_name)
-        except Exception as e:
-            print(f"[支座确定] 关键参数同步失败：{e}")
+        # 3) 同步支座关键参数到其他Tab页（仅支座；保温装置/铭牌勿走此逻辑）
+        if element_name == "支座":
+            try:
+                sync_fixed_saddle_param_across_tabs(viewer_instance, product_id, tab_name)
+            except Exception as e:
+                print(f"[支座确定] 关键参数同步失败：{e}")
 
-        # 4) 刷新当前Tab页的UI
+        # 4) 刷新 UI
         try:
-            data = load_element_merged_para_tab_data(product_id, element_id, tab_name)
-            render_element_merged_para_table_data(table_param, data, element_name)
-            is_readonly = not is_first_tab_for_element(product_id, element_id, tab_name)
-            apply_element_merged_para_paramname_combobox(table_param, 0, 1, viewer_instance, data, is_readonly=is_readonly)
+            if insulation_pruned:
+                all_data = load_element_merged_para_product_data(product_id, element_id)
+                render_element_merged_para_data_to_ui(viewer_instance, all_data, element_name)
+            else:
+                data = load_element_merged_para_tab_data(product_id, element_id, tab_name)
+                render_element_merged_para_table_data(table_param, data, element_name)
+                is_readonly = not is_first_tab_for_element(product_id, element_id, tab_name)
+                apply_element_merged_para_paramname_combobox(table_param, 0, 1, viewer_instance, data, is_readonly=is_readonly)
         except Exception as e:
             print(f"[支座确定] UI刷新失败：{e}")
 
@@ -9485,7 +9796,7 @@ def _add_single_element_merged_para_tab_copy_only(viewer_instance, source_tab_in
         elif element_name in ["铭牌"]:
             all_options = ["铭牌垫板", "铭牌支架", "铭牌板", "铆钉"]
         elif element_name in ["保温装置"]:
-            all_options = ["支撑板", "支撑环", "支撑条", "螺母", "螺柱"]
+            all_options = list(INSULATION_COMPONENT_OPTIONS)
 
         if all_options:
             avail = [opt for opt in all_options if opt not in used_names]
@@ -9670,8 +9981,10 @@ def patch_element_merged_para_params_for_current_tab(table, tab_name, viewer_ins
 def render_element_merged_para_data_to_ui(viewer_instance, merged_para_data, element_name=None):
     """将元件附加参数合并表数据渲染到UI（完全模仿apply_paramname_combobox的逻辑）"""
     if not merged_para_data:
+        # 无数据时必须清空旧 Tab，否则会残留上一元件（如铭牌）界面
+        clear_element_merged_para_ui(viewer_instance)
         if DEBUG_VERBOSE_DEFINE_UI:
-            print("[附加参数合并表] 没有数据需要渲染")
+            print("[附加参数合并表] 没有数据需要渲染，已清空UI")
         return
 
     # 如果没有传入element_name，尝试从viewer_instance中获取
@@ -10333,9 +10646,9 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
     
     # 只读参数
     READONLY_PARAMS = {"零件名称"}
-    # 合并元件「元件名称」仅展示不可编辑（支座/铭牌/保温装置）；多选下拉逻辑仍保留在安装分支中，便于恢复
+    # 合并元件「元件名称」仅展示不可编辑（支座/铭牌）；保温装置可编辑多选。多选下拉逻辑仍保留在安装分支中，便于恢复
     SUPPORT_COMPONENT_NAME_READONLY = True
-    COMPONENT_NAME_READONLY_ELEMENTS = frozenset({"支座", "铭牌", "保温装置"})
+    COMPONENT_NAME_READONLY_ELEMENTS = frozenset({"支座", "铭牌"})
     
     # 数值参数
     NUMERIC_PARAMS = {"鞍座高度", "腐蚀裕量", "内件重量占容器重量百分比"}
@@ -10496,7 +10809,7 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
                         print(f"[铭牌] 元件名称总可选: {all_options}, 其他Tab已选: {selected_in_other_tabs}, 当前Tab可选: {available_options}")
                     return available_options
                 if element_name in ["保温装置"]:  # 新增保温装置
-                    all_options = ["支撑板", "支撑环", "支撑条", "螺母", "螺柱"]
+                    all_options = list(INSULATION_COMPONENT_OPTIONS)
                     selected_in_other_tabs = get_selected_component_names_from_other_tabs(table, None)
                     available_options = [opt for opt in all_options if opt not in selected_in_other_tabs]
                     if DEBUG_VERBOSE_DEFINE_UI:
@@ -10940,7 +11253,7 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
                             else:
                                 display_value = v
                             
-                            # 支座/铭牌/保温装置：元件名称不可编辑；多选下拉逻辑保留在 else，便于恢复
+                            # 支座/铭牌：元件名称不可编辑；保温装置走 else 多选下拉
                             if SUPPORT_COMPONENT_NAME_READONLY and element_name in COMPONENT_NAME_READONLY_ELEMENTS:
                                 ensure_readonly_item(row, value_col, display_value)
                                 table.setItemDelegateForRow(row, ReadOnlyDelegate(table))
@@ -11071,7 +11384,7 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
                             else:
                                 display_value = v
                             
-                            # 支座/铭牌/保温装置：元件名称不可编辑；多选下拉逻辑保留在 else，便于恢复
+                            # 支座/铭牌：元件名称不可编辑；保温装置走 else 多选下拉
                             if SUPPORT_COMPONENT_NAME_READONLY and element_name in COMPONENT_NAME_READONLY_ELEMENTS:
                                 ensure_readonly_item(row, value_col, display_value)
                                 table.setItemDelegateForRow(row, ReadOnlyDelegate(table))
@@ -11163,22 +11476,9 @@ def apply_element_merged_para_paramname_combobox(table: QTableWidget, param_col:
     install_material_delegate_linkage(table, param_col, value_col, viewer_instance)
 
     def _clear_material_fields_if_component_name_empty(element_name, val):
-        s = (val or "").strip()
-        is_empty = False
-        if not s or s == "[]":
-            is_empty = True
-        elif s.startswith("[") and s.endswith("]"):
-            try:
-                import json
-                parsed = json.loads(s)
-                if not parsed:
-                    is_empty = True
-            except json.JSONDecodeError:
-                pass
-        elif "、" in s:
-            parts = [x.strip() for x in s.split("、") if x.strip()]
-            if len(parts) == 0:
-                is_empty = True
+        # 仅当元件名称真正空了才清材料；部分取消勾选（仍有其它名称）不动材料
+        names = parse_component_names_cell(val)
+        is_empty = len(names) == 0
         if is_empty:
             print(f"[{element_name}] 元件名称为空，清空材料四字段")
             material_fields = ["材料类型", "材料牌号", "材料标准", "供货状态"]
@@ -12056,6 +12356,871 @@ def check_nameplate_component_completeness(product_id, element_id):
     return (is_complete, list(missing_or_incomplete), all_selected)
 
 
+# 保温装置辅助逻辑（附件表联动 / 结构树强制显示）
+
+
+def _insulation_attachment_base_name(name: str) -> str:
+    """附件表元件名去尾号：保温支撑板1 → 保温支撑板。"""
+    s = (name or "").strip()
+    if not s:
+        return ""
+    m = re.match(r"^(.*?)(\d+)$", s)
+    return ((m.group(1) if m else s) or "").strip()
+
+
+def query_insulation_related_attachment_names(product_id):
+    """从产品设计活动表_附件表读取与保温装置相关的元件名称（原始值，含编号）。"""
+    if not product_id:
+        return []
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 元件名称
+                FROM 产品设计活动表_附件表
+                WHERE 产品ID = %s
+                  AND 元件名称 IS NOT NULL
+                  AND TRIM(元件名称) <> ''
+                """,
+                (product_id,),
+            )
+            rows = cursor.fetchall() or []
+        out = []
+        for row in rows:
+            raw = (row.get("元件名称") if isinstance(row, dict) else (row[0] if row else "")) or ""
+            raw = str(raw).strip()
+            if not raw:
+                continue
+            if _insulation_attachment_base_name(raw) in INSULATION_ATTACHMENT_TRIGGER_BASES:
+                out.append(raw)
+        return out
+    except Exception as e:
+        print(f"[保温装置] 读取附件表失败: {e}")
+        return []
+    finally:
+        connection.close()
+
+
+def has_insulation_device_from_attachment(product_id) -> bool:
+    """管口定义附件表是否已定义保温支撑板或保温支撑环（含编号变体）。"""
+    return bool(query_insulation_related_attachment_names(product_id))
+
+
+def build_insulation_component_names_from_attachment(product_id):
+    """
+    按附件表生成合并表初始「元件名称」列表：
+    - 有保温支撑板 → 写入 保温支撑板 + 支耳(保温)
+    - 有保温支撑环 → 写入 保温支撑环
+    """
+    has_plate = False
+    has_ring = False
+    for raw in query_insulation_related_attachment_names(product_id):
+        base = _insulation_attachment_base_name(raw)
+        if base == "保温支撑板":
+            has_plate = True
+        elif base == "保温支撑环":
+            has_ring = True
+    names = []
+    if has_plate:
+        names.extend(["保温支撑板", "支耳(保温)"])
+    if has_ring:
+        names.append("保温支撑环")
+    # 去重保序
+    seen = set()
+    ordered = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+
+def find_insulation_device_element_id(product_id):
+    """活动库元件材料表中「保温装置」的元件ID。"""
+    if not product_id:
+        return None
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 元件ID
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件名称 = %s
+                LIMIT 1
+                """,
+                (product_id, INSULATION_DEVICE_NAME),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return row.get("元件ID") if isinstance(row, dict) else row[0]
+    except Exception as e:
+        print(f"[保温装置] 查找元件ID失败: {e}")
+        return None
+    finally:
+        connection.close()
+
+
+def query_insulation_attachment_bases(product_id) -> set:
+    """附件表中当前存在的保温触发基名集合：{'保温支撑板','保温支撑环'}。"""
+    bases = set()
+    for raw in query_insulation_related_attachment_names(product_id):
+        base = _insulation_attachment_base_name(raw)
+        if base in INSULATION_ATTACHMENT_TRIGGER_BASES:
+            bases.add(base)
+    return bases
+
+
+def _list_insulation_merged_tabs(product_id, element_id):
+    """返回 [(Tab分类, Tab_ID), ...]，按 Tab_ID 升序。"""
+    if not product_id or element_id is None:
+        return []
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT Tab分类, MIN(Tab_ID) AS Tab_ID
+                FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s AND 元件ID = %s
+                GROUP BY Tab分类
+                ORDER BY MIN(Tab_ID) ASC
+                """,
+                (product_id, element_id),
+            )
+            rows = cursor.fetchall() or []
+        out = []
+        for row in rows:
+            if isinstance(row, dict):
+                out.append((str(row.get("Tab分类") or "").strip(), row.get("Tab_ID")))
+            else:
+                out.append((str(row[0] or "").strip(), row[1] if len(row) > 1 else None))
+        return [(n, tid) for n, tid in out if n]
+    except Exception as e:
+        print(f"[保温装置] 列举Tab失败: {e}")
+        return []
+    finally:
+        connection.close()
+
+
+def _get_tab_component_names(product_id, element_id, tab_name):
+    from modules.cailiaodingyi.funcs.funcs_pdf_change import parse_component_names_cell
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 参数值
+                FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s AND 元件ID = %s AND Tab分类 = %s AND 参数名称 = '元件名称'
+                LIMIT 1
+                """,
+                (product_id, element_id, tab_name),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+            raw = (row.get("参数值") if isinstance(row, dict) else row[0]) or ""
+            return parse_component_names_cell(str(raw).strip())
+    except Exception:
+        return []
+    finally:
+        connection.close()
+
+
+def _set_tab_component_names(product_id, element_id, tab_name, names) -> bool:
+    names = [n for n in (names or []) if str(n).strip()]
+    new_val = json.dumps(names, ensure_ascii=False) if names else "[]"
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE 产品设计活动表_元件附加参数合并表
+                SET 参数值 = %s
+                WHERE 产品ID = %s AND 元件ID = %s AND Tab分类 = %s AND 参数名称 = '元件名称'
+                """,
+                (new_val, product_id, element_id, tab_name),
+            )
+            connection.commit()
+            return True
+    except Exception as e:
+        print(f"[保温装置] 写回元件名称失败 tab={tab_name}: {e}")
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        connection.close()
+
+
+def clear_insulation_tab_param_values(product_id, element_id, tab_name) -> bool:
+    """清空某 Tab 全部参数值（元件名称写成 []），保留行结构 → 空白 tab。"""
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE 产品设计活动表_元件附加参数合并表
+                SET 参数值 = CASE
+                    WHEN 参数名称 = '元件名称' THEN '[]'
+                    ELSE ''
+                END
+                WHERE 产品ID = %s AND 元件ID = %s AND Tab分类 = %s
+                """,
+                (product_id, element_id, tab_name),
+            )
+            connection.commit()
+            return True
+    except Exception as e:
+        print(f"[保温装置] 清空Tab参数失败 tab={tab_name}: {e}")
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        connection.close()
+
+
+def prune_insulation_tabs_with_empty_component_names(product_id, element_id=None) -> bool:
+    """
+    元件名称为空的 Tab：
+    - 仍有其它 Tab：删除该 Tab 整页数据
+    - 只剩最后一个：
+        · 附件侧板+环都没了 → 清空全部参数，保留一个空白 Tab
+        · 附件侧仍有保温触发 → 只保持名称空，不清材料（避免删板后名称短暂变空把材料清掉，随后又勾上环）
+    """
+    if not product_id:
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    tabs = _list_insulation_merged_tabs(product_id, element_id)
+    if not tabs:
+        return False
+    changed = False
+    empty_tabs = []
+    for tab_name, _tid in tabs:
+        names = _get_tab_component_names(product_id, element_id, tab_name)
+        if not names:
+            empty_tabs.append(tab_name)
+
+    if not empty_tabs:
+        return False
+
+    allow_blank_clear = not has_insulation_device_from_attachment(product_id)
+    remaining = len(tabs)
+    for tab_name in empty_tabs:
+        if remaining > 1:
+            delete_element_merged_para_data_from_db(product_id, element_id, tab_name)
+            remaining -= 1
+            changed = True
+            print(f"[保温装置] 元件名称为空，已删除Tab: {tab_name}")
+        else:
+            if allow_blank_clear:
+                clear_insulation_tab_param_values(product_id, element_id, tab_name)
+                changed = True
+                print(f"[保温装置] 附件已无板/环，保留空白Tab并清空材料: {tab_name}")
+            else:
+                # 名称已是 []，材料等参数原样保留
+                print(
+                    f"[保温装置] Tab[{tab_name}] 元件名称为空但附件仍有保温项，"
+                    f"不清空材料（仅取消名称勾选）"
+                )
+            break
+    return changed
+
+
+def sync_insulation_names_after_attachment_change(product_id, removed_bases=None) -> bool:
+    """
+    管口附件变更后，按「被删掉的基名」取消元件侧勾选（只改「元件名称」，不主动清材料）：
+    - 删了保温支撑板 → 取消「保温支撑板」+「支耳(保温)」
+    - 删了保温支撑环 → 取消「保温支撑环」
+    - 板+环都没了 → 取消三项，并收成空白 Tab（此时才清空材料）
+    某 Tab 名称被取消后若仍有其它勾选：材料保持不动。
+    """
+    if not product_id:
+        return False
+    element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    if _count_element_merged_para_rows(product_id, element_id) <= 0:
+        return False
+
+    removed_bases = set(removed_bases or [])
+    to_remove = set()
+    if "保温支撑板" in removed_bases:
+        to_remove.add("保温支撑板")
+        to_remove.add("支耳(保温)")
+    if "保温支撑环" in removed_bases:
+        to_remove.add("保温支撑环")
+    if not has_insulation_device_from_attachment(product_id):
+        to_remove = set(INSULATION_COMPONENT_OPTIONS)
+
+    if not to_remove:
+        return False
+
+    changed = False
+    for tab_name, _tid in _list_insulation_merged_tabs(product_id, element_id):
+        names = _get_tab_component_names(product_id, element_id, tab_name)
+        if not names:
+            continue
+        new_names = [n for n in names if n not in to_remove]
+        if new_names != names:
+            _set_tab_component_names(product_id, element_id, tab_name, new_names)
+            changed = True
+            print(f"[保温装置] Tab[{tab_name}] 按附件取消勾选: {names} -> {new_names}")
+
+    if changed or to_remove:
+        if prune_insulation_tabs_with_empty_component_names(product_id, element_id):
+            changed = True
+        try:
+            is_complete, _, _ = check_insulation_support_completeness(product_id, element_id)
+            update_insulation_support_material_status(product_id, element_id, bool(is_complete))
+        except Exception as e:
+            print(f"[保温装置] 取消勾选后刷新定义状态失败: {e}")
+    return changed
+
+
+def _find_insulation_tab_containing_name(product_id, element_id, component_name: str):
+    """返回包含指定子零件名的 Tab分类；没有则 None。"""
+    name = (component_name or "").strip()
+    if not name:
+        return None
+    for tab_name, _tid in _list_insulation_merged_tabs(product_id, element_id):
+        names = _get_tab_component_names(product_id, element_id, tab_name)
+        if name in names:
+            return tab_name
+    return None
+
+
+def _first_insulation_tab_name(product_id, element_id):
+    tabs = _list_insulation_merged_tabs(product_id, element_id)
+    return tabs[0][0] if tabs else None
+
+
+def _append_names_to_tab(product_id, element_id, tab_name, names_to_add) -> bool:
+    """向某 Tab 的元件名称追加（去重保序）；成功返回是否有变化。"""
+    if not tab_name or not names_to_add:
+        return False
+    cur = _get_tab_component_names(product_id, element_id, tab_name)
+    new_names = list(cur)
+    changed = False
+    for n in names_to_add:
+        n = (n or "").strip()
+        if n and n not in new_names:
+            new_names.append(n)
+            changed = True
+    if changed:
+        _set_tab_component_names(product_id, element_id, tab_name, new_names)
+        print(f"[保温装置] Tab[{tab_name}] 按附件追加勾选: {cur} -> {new_names}")
+    return changed
+
+
+def sync_insulation_names_after_attachment_add(product_id, added_bases=None) -> bool:
+    """
+    管口附件新增保温基名后，把对应勾选补到已有 Tab（不新建 Tab）：
+    - 新增「保温支撑环」→ 勾到含「保温支撑板」的 Tab（无板则落到首 Tab）
+    - 新增「保温支撑板」→ 「保温支撑板」+「支耳(保温)」都勾到含「保温支撑环」的 Tab
+      （支耳若在其他 Tab，先从他页拿掉再放到目标 Tab，避免跨 Tab 重复）
+    已存在同名勾选则跳过（幂等）。
+    """
+    if not product_id:
+        return False
+    element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    if _count_element_merged_para_rows(product_id, element_id) <= 0:
+        return False
+
+    added_bases = set(added_bases or [])
+    if not added_bases:
+        return False
+
+    changed = False
+
+    # 1) 新增支撑环 → 跟支撑板同 Tab
+    if "保温支撑环" in added_bases:
+        if not _find_insulation_tab_containing_name(product_id, element_id, "保温支撑环"):
+            target = _find_insulation_tab_containing_name(product_id, element_id, "保温支撑板")
+            if not target:
+                target = _first_insulation_tab_name(product_id, element_id)
+            if target and _append_names_to_tab(product_id, element_id, target, ["保温支撑环"]):
+                changed = True
+
+    # 2) 新增支撑板 → 板+支耳都跟支撑环同 Tab
+    if "保温支撑板" in added_bases:
+        if not _find_insulation_tab_containing_name(product_id, element_id, "保温支撑板"):
+            target = _find_insulation_tab_containing_name(product_id, element_id, "保温支撑环")
+            if not target:
+                target = _first_insulation_tab_name(product_id, element_id)
+            if target:
+                # 支耳与板配套：先从其他 Tab 移除，再与板一起写入目标 Tab
+                for tab_name, _tid in _list_insulation_merged_tabs(product_id, element_id):
+                    if tab_name == target:
+                        continue
+                    names = _get_tab_component_names(product_id, element_id, tab_name)
+                    if "支耳(保温)" not in names:
+                        continue
+                    new_names = [n for n in names if n != "支耳(保温)"]
+                    _set_tab_component_names(product_id, element_id, tab_name, new_names)
+                    changed = True
+                    print(f"[保温装置] Tab[{tab_name}] 支耳改挂到支撑板所在Tab，已从本页移除")
+                if _append_names_to_tab(
+                    product_id, element_id, target, ["保温支撑板", "支耳(保温)"]
+                ):
+                    changed = True
+
+    if changed:
+        if prune_insulation_tabs_with_empty_component_names(product_id, element_id):
+            changed = True
+        try:
+            is_complete, _, _ = check_insulation_support_completeness(product_id, element_id)
+            update_insulation_support_material_status(product_id, element_id, bool(is_complete))
+        except Exception as e:
+            print(f"[保温装置] 追加勾选后刷新定义状态失败: {e}")
+    return changed
+
+
+def blank_insulation_merged_when_no_attachment(product_id, element_id=None) -> bool:
+    """
+    附件表已无保温触发、但合并表仍有结构（曾定义过）：
+    取消全部三项勾选并收成一个空白 Tab；不整表删除（便于左侧仍可见空白详细页）。
+    """
+    if not product_id:
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    if has_insulation_device_from_attachment(product_id):
+        return False
+    if _count_element_merged_para_rows(product_id, element_id) <= 0:
+        return False
+    return sync_insulation_names_after_attachment_change(
+        product_id, removed_bases=set(INSULATION_ATTACHMENT_TRIGGER_BASES)
+    )
+
+
+def sync_insulation_merged_component_names_from_attachment(product_id, element_id=None) -> bool:
+    """
+    附件表有触发时，若首 Tab「元件名称」仍为空/[]/误写成父级名，则按附件规则写入 JSON。
+    不覆盖用户已勾选的内容。
+    """
+    if not product_id or not has_insulation_device_from_attachment(product_id):
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    seed_names = build_insulation_component_names_from_attachment(product_id)
+    if not seed_names:
+        return False
+    first_tab = get_first_tab_for_element(product_id, element_id)
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 参数值
+                FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s AND 元件ID = %s AND Tab分类 = %s AND 参数名称 = '元件名称'
+                LIMIT 1
+                """,
+                (product_id, element_id, first_tab),
+            )
+            row = cursor.fetchone()
+            cur_val = ""
+            if row:
+                cur_val = (row.get("参数值") if isinstance(row, dict) else row[0]) or ""
+            cur_val = str(cur_val).strip()
+            from modules.cailiaodingyi.funcs.funcs_pdf_change import parse_component_names_cell
+            parsed = parse_component_names_cell(cur_val)
+            # 空、或误写成父级「保温装置」时才灌入
+            if parsed and not (len(parsed) == 1 and parsed[0] == INSULATION_DEVICE_NAME):
+                return False
+            new_val = json.dumps(seed_names, ensure_ascii=False)
+            cursor.execute(
+                """
+                UPDATE 产品设计活动表_元件附加参数合并表
+                SET 参数值 = %s
+                WHERE 产品ID = %s AND 元件ID = %s AND Tab分类 = %s AND 参数名称 = '元件名称'
+                """,
+                (new_val, product_id, element_id, first_tab),
+            )
+            if cursor.rowcount == 0:
+                print(f"[保温装置] 首Tab无元件名称行，跳过灌入 product={product_id} element={element_id}")
+                connection.rollback()
+                return False
+            connection.commit()
+            print(f"[保温装置] 已从附件表灌入元件名称: {seed_names}")
+            return True
+    except Exception as e:
+        print(f"[保温装置] 灌入元件名称失败: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        connection.close()
+
+
+def get_insulation_device_visibility_flag(product_id, element_id=None):
+    """
+    读取保温装置「是否显示」。
+    返回 '是' / '否' / None（活动库尚无该行，如初次结构树确认前）。
+    """
+    if not product_id:
+        return None
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return None
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 是否显示
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            flag = str((row.get("是否显示") if isinstance(row, dict) else row[0]) or "").strip()
+            if flag in ("是", "1", "true", "True", "Y", "y"):
+                return "是"
+            if flag in ("否", "0", "false", "False", "N", "n"):
+                return "否"
+            return None
+    except Exception as e:
+        print(f"[保温装置] 读取是否显示失败: {e}")
+        return None
+    finally:
+        connection.close()
+
+
+def _insulation_left_materials_blank(product_id, element_id) -> bool:
+    """左侧元件材料表四字段是否均为空（结构树清空后的典型状态）。"""
+    if not product_id or element_id is None:
+        return False
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 材料类型, 材料牌号, 材料标准, 供货状态
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            if isinstance(row, dict):
+                vals = [row.get("材料类型"), row.get("材料牌号"), row.get("材料标准"), row.get("供货状态")]
+            else:
+                vals = list(row[:4])
+            return all(not str(v or "").strip() for v in vals)
+    except Exception:
+        return False
+    finally:
+        connection.close()
+
+
+def _insulation_merged_has_material_values(product_id, element_id) -> bool:
+    """合并表是否已有材料参数（用于区分场景③已灌模板 vs 场景②仅清空）。"""
+    if not product_id or element_id is None:
+        return False
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 参数值
+                FROM 产品设计活动表_元件附加参数合并表
+                WHERE 产品ID = %s AND 元件ID = %s AND 参数名称 = '材料类型'
+                LIMIT 5
+                """,
+                (product_id, element_id),
+            )
+            rows = cursor.fetchall() or []
+            for row in rows:
+                val = (row.get("参数值") if isinstance(row, dict) else row[0]) or ""
+                if str(val).strip():
+                    return True
+            return False
+    except Exception:
+        return False
+    finally:
+        connection.close()
+
+
+def restore_insulation_left_material_from_template(product_id, element_id=None) -> bool:
+    """
+    从材料库「元件材料模板表」恢复保温装置左侧零件列表行
+    （材料类型/牌号/标准/供货状态/有无覆层/示意图）。
+    不照搬模板「定义状态」——由 refresh_insulation_define_status 按 Tab 重算。
+    场景③：结构树清空过左侧，合并表已从模板灌入后，左侧仍为空时调用。
+    """
+    if not product_id:
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+
+    template_name = ""
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 模板名称
+                FROM 产品设计活动表_元件材料表
+                WHERE 产品ID = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (product_id, element_id),
+            )
+            row = cursor.fetchone()
+            if row:
+                template_name = str(
+                    (row.get("模板名称") if isinstance(row, dict) else row[0]) or ""
+                ).strip()
+    except Exception as e:
+        print(f"[保温装置] 读取模板名称失败: {e}")
+        return False
+    finally:
+        connection.close()
+
+    if not template_name or template_name.lower() == "none":
+        print(f"[保温装置] 无有效模板名称，跳过左侧材料恢复 product={product_id}")
+        return False
+
+    tpl = None
+    connection = get_connection(**db_config_2)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 材料类型, 材料牌号, 材料标准, 供货状态, 有无覆层, 元件示意图
+                FROM 元件材料模板表
+                WHERE 模板名称 = %s AND 元件ID = %s
+                LIMIT 1
+                """,
+                (template_name, element_id),
+            )
+            tpl = cursor.fetchone()
+            if not tpl:
+                cursor.execute(
+                    """
+                    SELECT 材料类型, 材料牌号, 材料标准, 供货状态, 有无覆层, 元件示意图
+                    FROM 元件材料模板表
+                    WHERE 模板名称 = %s AND 元件名称 = %s
+                    LIMIT 1
+                    """,
+                    (template_name, INSULATION_DEVICE_NAME),
+                )
+                tpl = cursor.fetchone()
+    except Exception as e:
+        print(f"[保温装置] 查询元件材料模板表失败: {e}")
+        return False
+    finally:
+        connection.close()
+
+    if not tpl:
+        print(f"[保温装置] 模板无保温装置材料行 template={template_name} element={element_id}")
+        return False
+
+    def _g(key, idx):
+        if isinstance(tpl, dict):
+            return tpl.get(key) or ""
+        return tpl[idx] if len(tpl) > idx else ""
+
+    mat_type = str(_g("材料类型", 0) or "").strip()
+    mat_grade = str(_g("材料牌号", 1) or "").strip()
+    mat_std = str(_g("材料标准", 2) or "").strip()
+    mat_state = str(_g("供货状态", 3) or "").strip()
+    clad = str(_g("有无覆层", 4) or "").strip()
+    sketch = str(_g("元件示意图", 5) or "").strip()
+
+    connection = get_connection(**db_config_1)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE 产品设计活动表_元件材料表
+                SET 材料类型 = %s, 材料牌号 = %s, 材料标准 = %s, 供货状态 = %s,
+                    有无覆层 = %s, 元件示意图 = COALESCE(NULLIF(%s, ''), 元件示意图)
+                WHERE 产品ID = %s AND 元件ID = %s
+                """,
+                (
+                    mat_type, mat_grade, mat_std, mat_state,
+                    clad, sketch,
+                    product_id, element_id,
+                ),
+            )
+            n = cursor.rowcount or 0
+            connection.commit()
+            if n:
+                print(
+                    f"[保温装置] 已从元件材料模板表恢复左侧材料 "
+                    f"product={product_id} element={element_id} type={mat_type!r}"
+                )
+            return n > 0
+    except Exception as e:
+        print(f"[保温装置] 恢复左侧材料失败: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        connection.close()
+
+
+def maybe_restore_insulation_left_material_from_template(product_id, element_id=None) -> bool:
+    """
+    场景③收尾：左侧材料空、但合并表已有材料参数 → 从元件材料模板表恢复左侧。
+    场景②（合并表材料亦空）不会触发。
+    """
+    if not product_id or not has_insulation_device_from_attachment(product_id):
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    if get_insulation_device_visibility_flag(product_id, element_id) != "是":
+        return False
+    if not _insulation_left_materials_blank(product_id, element_id):
+        return False
+    if not _insulation_merged_has_material_values(product_id, element_id):
+        return False
+    ok = restore_insulation_left_material_from_template(product_id, element_id)
+    if ok:
+        refresh_insulation_define_status(product_id, element_id)
+    return ok
+
+
+def ensure_insulation_device_visible_from_attachment(product_id, force: bool = False) -> bool:
+    """
+    附件表已有保温支撑板/环时的显示与灌入。
+
+    force=True（管口附件刚保存，场景③）：
+      结构树原先未选保温装置（是否显示≠是）时，强制显示，并**从合并表模板重灌参数**；
+      同时恢复左侧零件列表材料行；再按管口附件回填空的「元件名称」。
+    force=False：
+      若已为不显示则尊重场景②，不拉回、不灌模板；
+      已显示时仅补「无行」结构；若左侧空且合并表已有材料则补左侧（场景③收尾）。
+    返回是否需要刷新左表（显示状态变化或左侧材料刚恢复）。
+    """
+    if not product_id or not has_insulation_device_from_attachment(product_id):
+        return False
+    element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+
+    flag = get_insulation_device_visibility_flag(product_id, element_id)
+    was_not_visible = flag != "是"
+    if not force and flag == "否":
+        # 尊重结构树「不显示」：不强制拉回左侧零件列表（场景②）
+        return False
+
+    changed = False
+    if force or flag != "是":
+        connection = get_connection(**db_config_1)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE 产品设计活动表_元件材料表
+                    SET 是否显示 = '是'
+                    WHERE 产品ID = %s AND 元件ID = %s
+                    """,
+                    (product_id, element_id),
+                )
+                if cursor.rowcount:
+                    connection.commit()
+                    if flag != "是":
+                        changed = True
+                        print(f"[保温装置] 附件表已有相关定义，已显示元件ID={element_id} force={force}")
+        except Exception as e:
+            print(f"[保温装置] 强制显示失败: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            connection.close()
+
+    # 仅场景③（force 且此前未显示）：强制读合并表模板；场景②再选回不走这里的 force
+    force_reload = bool(force and was_not_visible)
+    ensure_insulation_merged_para_from_template(
+        product_id, element_id, force_reload=force_reload
+    )
+    sync_insulation_merged_component_names_from_attachment(product_id, element_id)
+
+    # 场景③：合并表有了模板材料后，左侧零件列表也要从「元件材料模板表」恢复
+    if force_reload:
+        if restore_insulation_left_material_from_template(product_id, element_id):
+            changed = True
+    elif maybe_restore_insulation_left_material_from_template(product_id, element_id):
+        changed = True
+
+    # 左侧可能早已有「见参数定义/未定义」（结构树或模板灌入），也须按 Tab 重算
+    refresh_insulation_define_status(product_id, element_id)
+    return changed
+
+
+def augment_structure_tree_for_insulation(product_id, all_elements, visible_ids, mandatory_ids):
+    """
+    结构树：附件表已有保温相关时：
+    - 活动库尚无「是否显示」记录（初次进入）：默认放入右侧，可移到左侧
+    - 活动库已为「否」：尊重用户选择，不再强行放回右侧
+    - 活动库已为「是」：保持在右侧（visible_ids 通常已含）
+    """
+    visible_ids = list(visible_ids or [])
+    mandatory_ids = set(mandatory_ids or set())
+    if not has_insulation_device_from_attachment(product_id):
+        return visible_ids, mandatory_ids
+
+    eid = None
+    for item in all_elements or []:
+        name = (item.get("零件名称") or item.get("元件名称") or "").strip()
+        if name == INSULATION_DEVICE_NAME:
+            eid = item.get("元件ID")
+            break
+    if eid is None:
+        eid = find_insulation_device_element_id(product_id)
+    if eid is None:
+        return visible_ids, mandatory_ids
+
+    flag = get_insulation_device_visibility_flag(product_id, eid)
+    if flag == "否":
+        # 用户已明确不显示：从右侧拿掉（防止其它逻辑误加入）
+        visible_ids = [x for x in visible_ids if x != eid]
+        return visible_ids, mandatory_ids
+
+    if eid not in visible_ids:
+        visible_ids.append(eid)
+    return visible_ids, mandatory_ids
+
+
 def update_insulation_support_material_status(product_id, element_id, is_complete):
     """更新保温装置元件的左侧材料表状态"""
     try:
@@ -12082,15 +13247,49 @@ def update_insulation_support_material_status(product_id, element_id, is_complet
         traceback.print_exc()
 
 
+def refresh_insulation_define_status(product_id, element_id=None) -> bool:
+    """
+    按合并表 Tab 重算活动库「定义状态」，不照搬元件材料模板表。
+    模板表「未定义」只作初始默认；有附件触发且 Tab 材料已齐 → 已定义。
+    """
+    if not product_id:
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    try:
+        # 无附件且无合并表结构：与点进「无保温装置」一致，强制未定义
+        if (
+            not has_insulation_device_from_attachment(product_id)
+            and _count_element_merged_para_rows(product_id, element_id) <= 0
+        ):
+            update_insulation_support_material_status(product_id, element_id, False)
+            return False
+        is_complete, _, _ = check_insulation_support_completeness(product_id, element_id)
+        update_insulation_support_material_status(product_id, element_id, bool(is_complete))
+        return bool(is_complete)
+    except Exception as e:
+        print(f"[保温装置] 刷新定义状态失败: {e}")
+        return False
+
+
 def check_insulation_support_completeness(product_id, element_id):
-    """检查保温装置元件完整性"""
+    """
+    保温装置「是否定义」：按元件侧 Tab 判定。
+    - 至少有一个 Tab 勾选了「元件名称」
+    - 凡已勾选元件名称的 Tab，材料四字段（类型/牌号/标准/供货状态）均已填齐
+    → 已定义；不再要求三项子零件全部选齐。
+    返回 (is_complete, incomplete_tabs, all_selected_names)
+    """
     all_selected = get_all_component_names_from_tabs(product_id, element_id)
-    required_components = {"支撑板", "支撑环", "支撑条", "螺母", "螺柱"}
     rows = load_element_merged_para_product_data(product_id, element_id) or []
     tab_to_names = {}
     tab_to_materials = {}
     for row in rows:
         tab = (row.get("Tab分类") or "").strip()
+        if not tab:
+            continue
         pname = (row.get("参数名称") or "").strip()
         pval = (row.get("参数值") or "").strip()
         if pname == "元件名称":
@@ -12109,27 +13308,25 @@ def check_insulation_support_completeness(product_id, element_id):
         elif pname in {"材料类型", "材料牌号", "材料标准", "供货状态"}:
             m = tab_to_materials.setdefault(tab, {})
             m[pname] = pval
-    missing_or_incomplete = set()
-    for comp in required_components:
-        if comp not in all_selected:
-            missing_or_incomplete.add(comp)
-            continue
-        candidate_tabs = [t for t, names in tab_to_names.items() if comp in (names or set())]
-        has_complete_materials = False
-        for t in candidate_tabs:
-            mvals = tab_to_materials.get(t, {})
-            if (
-                (mvals.get("材料类型") or "").strip()
-                and (mvals.get("材料牌号") or "").strip()
-                and (mvals.get("材料标准") or "").strip()
-                and (mvals.get("供货状态") or "").strip()
-            ):
-                has_complete_materials = True
-                break
-        if not has_complete_materials:
-            missing_or_incomplete.add(comp)
-    is_complete = len(missing_or_incomplete) == 0
-    return (is_complete, list(missing_or_incomplete), all_selected)
+
+    tabs_with_names = [t for t, names in tab_to_names.items() if names]
+    if not tabs_with_names:
+        # 无任何勾选 → 未定义
+        return (False, ["(无勾选元件名称)"], all_selected)
+
+    incomplete_tabs = []
+    for tab in tabs_with_names:
+        mvals = tab_to_materials.get(tab, {})
+        if not (
+            (mvals.get("材料类型") or "").strip()
+            and (mvals.get("材料牌号") or "").strip()
+            and (mvals.get("材料标准") or "").strip()
+            and (mvals.get("供货状态") or "").strip()
+        ):
+            incomplete_tabs.append(tab)
+
+    is_complete = len(incomplete_tabs) == 0
+    return (is_complete, incomplete_tabs, all_selected)
 
 def update_fixed_saddle_material_status(product_id, element_id, is_complete):
     try:

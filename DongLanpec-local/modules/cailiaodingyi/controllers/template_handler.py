@@ -26,6 +26,47 @@ from modules.condition_input.funcs.funcs_cdt_input import clear_manual_flags_for
 
 
 
+def _template_combo_lookup_text(template_name: str) -> str:
+    """库内/缓存的模板名 → 下拉框 item 文本（空项对应 None）。"""
+    name = (template_name or "").strip()
+    if not name or name.lower() == "none":
+        return ""
+    return name
+
+
+def _restore_template_combo_after_cancel(viewer_instance, old_template: str):
+    """
+    用户取消切换时回滚「模板选用」下拉。
+    必须按旧模板名 findText，不能依赖可能未初始化的 _template_prev_index
+    （未初始化时默认 0，正好是空白项，多次取消后就会把名称清空）。
+    延后到下一轮事件循环执行，避免 QComboBox 弹层关闭时把回滚结果再盖掉。
+    """
+    lookup = _template_combo_lookup_text(old_template)
+    stored_name = "None" if not lookup else lookup
+
+    def _do_restore():
+        combo = getattr(viewer_instance, "comboBox_template", None)
+        if combo is None:
+            return
+        restore_idx = combo.findText(lookup)
+        if restore_idx < 0:
+            restore_idx = getattr(viewer_instance, "_template_prev_index", -1)
+        if restore_idx is None or restore_idx < 0 or restore_idx >= combo.count():
+            print(f"[模板切换] 取消回滚失败：找不到旧模板 {old_template!r}")
+            return
+        try:
+            viewer_instance._template_reverting = True
+            combo.blockSignals(True)
+            combo.setCurrentIndex(restore_idx)
+            viewer_instance._template_prev_index = restore_idx
+            viewer_instance.current_template_name = stored_name
+        finally:
+            combo.blockSignals(False)
+            viewer_instance._template_reverting = False
+
+    QTimer.singleShot(0, _do_restore)
+
+
 def handle_template_change(viewer_instance, index):
     if getattr(viewer_instance, "_template_reverting", False):
         return
@@ -62,13 +103,7 @@ def handle_template_change(viewer_instance, index):
     )
     if not ok:
         print("[模板切换] 用户取消")
-        try:
-            viewer_instance._template_reverting = True
-            viewer_instance.comboBox_template.blockSignals(True)
-            viewer_instance.comboBox_template.setCurrentIndex(getattr(viewer_instance, "_template_prev_index", 0))
-        finally:
-            viewer_instance.comboBox_template.blockSignals(False)
-            viewer_instance._template_reverting = False
+        _restore_template_combo_after_cancel(viewer_instance, old_template)
         return
 
     # 真正切换

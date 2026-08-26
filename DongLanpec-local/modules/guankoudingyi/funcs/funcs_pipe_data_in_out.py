@@ -18,13 +18,23 @@ import pymysql
 from modules.guankoudingyi.funcs.funcs_pipe_comboBox_value import (
     get_component_nominal_size_od,
     get_nominal_diameter,
+    get_container_shell_length,
     get_belong_options,
     get_axial_position_base_options,
     get_flange_standard_options_by_pressure_type,
     get_pressure_levels_by_standard,
+    validate_container_axial_position_distance,
+    validate_internal_extension_height,
 )
 from modules.guankoudingyi.db_cnt import get_connection, db_config_2, db_config_1
-from modules.guankoudingyi.funcs.funcs_pipe_table import check_last_row_and_add_new, is_duplicate_port_code, delete_selected_pipe_rows
+from modules.guankoudingyi.funcs.funcs_pipe_table import (
+    check_last_row_and_add_new,
+    is_duplicate_port_code,
+    delete_selected_pipe_rows,
+    get_pipe_column_map,
+    show_styled_message,
+    show_styled_warning,
+)
 
 # —— 需要写入模板的字段（界面 -> 模板中文名）——
 # 管口定义界面的映射：左边是界面列的中文名（表格里用的），右边是模板里“参数中文名”所在单元格的文字。
@@ -152,6 +162,88 @@ def _build_row_index_by_param_name(ws):
             if isinstance(v, str) and v.strip():
                 name2row.setdefault(v.strip(), r)
     return name2row
+
+
+def _resolve_product_and_project_id(stats_widget):
+    """从界面或产品管理上下文解析当前产品ID、项目ID。"""
+    product_id = getattr(stats_widget, "product_id", None)
+    project_id = getattr(stats_widget, "project_id", None)
+    if not product_id:
+        try:
+            from modules.chanpinguanli.chanpinguanli_main import product_manager
+            product_id = getattr(product_manager, "product_id", None)
+        except Exception:
+            pass
+    if not project_id:
+        try:
+            from modules.chanpinguanli import bianl
+            project_id = getattr(bianl, "current_project_id", None)
+        except Exception:
+            pass
+    return product_id, project_id
+
+
+def _get_product_folder_abs_path(stats_widget) -> str:
+    """
+    按项目ID+产品ID查询产品设计活动库.产品设计活动表.产品文件夹绝对路径，
+    作为导出默认目录。
+    """
+    product_id, project_id = _resolve_product_and_project_id(stats_widget)
+    if not product_id:
+        return ""
+    try:
+        connection = get_connection(**db_config_2)
+        with connection.cursor() as cursor:
+            if project_id:
+                cursor.execute(
+                    """
+                    SELECT `产品文件夹绝对路径`
+                    FROM `产品设计活动表`
+                    WHERE `产品ID` = %s AND `项目ID` = %s
+                    LIMIT 1
+                    """,
+                    (product_id, project_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT `产品文件夹绝对路径`
+                    FROM `产品设计活动表`
+                    WHERE `产品ID` = %s
+                    LIMIT 1
+                    """,
+                    (product_id,),
+                )
+            row = cursor.fetchone()
+        connection.close()
+        if not row:
+            return ""
+        raw = row.get("产品文件夹绝对路径") if isinstance(row, dict) else row[0]
+        folder = (raw or "").strip().strip("'\"")
+        return os.path.normpath(folder) if folder else ""
+    except Exception as e:
+        print(f"[_get_product_folder_abs_path] {e}")
+        return ""
+
+
+def _suggest_export_save_path(stats_widget, suggested_name: str) -> str:
+    """另存为对话框的默认路径：产品文件夹绝对路径 + 建议文件名。"""
+    folder = _get_product_folder_abs_path(stats_widget)
+    if folder:
+        return os.path.join(folder, suggested_name)
+    return suggested_name
+
+
+def _prompt_open_export_folder(parent, out_path: str) -> None:
+    """导出成功后直接打开文件所在文件夹，不再弹确认框。"""
+    if not out_path:
+        return
+    folder = os.path.dirname(os.path.abspath(out_path))
+    try:
+        if os.path.isdir(folder):
+            os.startfile(folder)
+    except Exception as e:
+        show_styled_warning(parent, "打开失败", f"无法打开文件夹：\n{folder}\n{e}")
 
 
 def export_nozzle_listing(stats_widget, template_rel_dir="guankoudingyi/table_template",
@@ -291,15 +383,16 @@ def export_nozzle_listing(stats_widget, template_rel_dir="guankoudingyi/table_te
     title_cell = ws.cell(row=1, column=1)
     title_cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center")
 
-    # 10) 另存为：让用户选择保存路径和文件名（而不是固定到项目/exports）
+    # 10) 另存为：默认目录取产品设计活动表.产品文件夹绝对路径
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    suggested_name = f"NOZZLE_LISTING_导出_{ts}.xlsx"
+    suggested_name = f"管口总览表{ts}.xlsx"
+    default_path = _suggest_export_save_path(stats_widget, suggested_name)
 
     # 弹出“另存为”对话框
     out_path, _ = QFileDialog.getSaveFileName(
         stats_widget,  # 用你的窗口/控件作为父级
         "另存为",
-        suggested_name,  # 默认文件名
+        default_path,  # 默认：产品文件夹 + 文件名
         "Excel 工作簿 (*.xlsx)"  # 过滤器
     )
 
@@ -318,6 +411,127 @@ def export_nozzle_listing(stats_widget, template_rel_dir="guankoudingyi/table_te
         QMessageBox.warning(stats_widget, "保存失败", "文件可能正在被占用，请关闭后重试。")
         return None
 
+    _prompt_open_export_folder(stats_widget, out_path)
+    return out_path
+
+
+# ——换热器「管口导出表」横表模板：Excel 列号(1起) → 界面字段名——
+# 对应 table_template/导出模板.xlsx（A~S）；容器模板后续另配映射
+NOZZLE_SHEET_EXPORT_COLUMNS = [
+    (1, None),                 # 序号（导出时生成）
+    (2, "管口代号"),
+    (3, "管口功能"),
+    (4, "管口用途"),
+    (5, "公称尺寸"),
+    (6, "法兰标准"),
+    (7, "压力等级"),
+    (8, "法兰型式"),
+    (9, "密封面型式"),
+    (10, "焊端规格"),
+    (11, "管口所属元件"),
+    (12, "轴向定位基准"),
+    (13, "轴向定位距离"),
+    (14, "轴向夹角（°）"),
+    (15, "周向方位（°）"),
+    (16, "偏心距"),
+    (17, "外伸高度"),
+    (18, "管口附件"),
+    (19, "管口载荷"),
+]
+
+
+def _apply_export_sheet_unit_headers(ws, stats_widget):
+    """
+    按界面当前单位同步导出模板表头单位后缀：
+    E列 公称尺寸DN/NPS，G列 压力等级Class/PN，J列 焊端规格mm/Sch。
+    """
+    from modules.guankoudingyi.funcs.pipe_get_units_types import get_current_unit_types_from_ui
+
+    units = get_current_unit_types_from_ui(stats_widget) or {}
+    size_unit = (units.get("公称尺寸类型") or "DN").strip() or "DN"
+    pressure_unit = (units.get("公称压力类型") or "Class").strip() or "Class"
+    weld_unit = (units.get("焊端规格类型") or "mm").strip() or "mm"
+
+    # E1（合并区左上角）、G2、J2 —— 与导出模板.xlsx 一致
+    _set_cell_safely(ws, 1, 5, f"公称尺寸{size_unit}")
+    _set_cell_safely(ws, 2, 7, f"压力等级{pressure_unit}")
+    _set_cell_safely(ws, 2, 10, f"焊端规格{weld_unit}")
+
+
+def export_nozzle_define_sheet(
+    stats_widget,
+    template_rel_dir="guankoudingyi/table_template",
+    template_name="导出模板.xlsx",
+):
+    """
+    将管口定义界面数据填入横表模板（导出模板.xlsx），另存为「管口导出表+日期」。
+    与 export_nozzle_listing（管口总览表）相互独立；当前模板面向换热器。
+    返回导出绝对路径；用户取消返回 None。
+    """
+    proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    # 预留：容器产品后续可换成独立模板
+    if getattr(stats_widget, "is_container_product", False):
+        raise RuntimeError("容器产品管口导出模板尚未配置，请使用换热器产品或后续容器专用模板。")
+
+    template_path = os.path.join(proj_root, template_rel_dir, template_name)
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"未找到导出模板：{template_path}")
+
+    nozzle_rows = _collect_nozzle_rows_from_ui(stats_widget)
+    if not nozzle_rows:
+        raise RuntimeError("没有可导出的管口数据（请先输入管口代号等信息）")
+
+    wb = load_workbook(template_path)
+    ws = wb.active
+    # 表头单位与界面下拉（DN/NPS、Class/PN、mm/Sch）同步
+    _apply_export_sheet_unit_headers(ws, stats_widget)
+    data_start_row = 3
+    max_col = 19
+
+    # 以模板第 3 行样式为基准，保证写入后边框/对齐一致
+    sample_cells = [ws.cell(data_start_row, c) for c in range(1, max_col + 1)]
+
+    for i, row_data in enumerate(nozzle_rows):
+        excel_row = data_start_row + i
+        for col_idx, field in NOZZLE_SHEET_EXPORT_COLUMNS:
+            cell = ws.cell(excel_row, col_idx)
+            sample = sample_cells[col_idx - 1]
+            if sample.has_style:
+                cell.font = sample.font.copy()
+                cell.border = sample.border.copy()
+                cell.fill = sample.fill.copy()
+                cell.alignment = sample.alignment.copy()
+                cell.number_format = sample.number_format
+            if field is None:
+                cell.value = i + 1
+            else:
+                cell.value = row_data.get(field, "")
+            if cell.alignment is None or not cell.alignment.horizontal:
+                cell.alignment = openpyxl.styles.Alignment(
+                    horizontal="center", vertical="center", wrap_text=True
+                )
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suggested_name = f"管口导出表{ts}.xlsx"
+    default_path = _suggest_export_save_path(stats_widget, suggested_name)
+    out_path, _ = QFileDialog.getSaveFileName(
+        stats_widget,
+        "另存为",
+        default_path,
+        "Excel 工作簿 (*.xlsx)",
+    )
+    if not out_path:
+        return None
+    if not out_path.lower().endswith(".xlsx"):
+        out_path += ".xlsx"
+
+    try:
+        wb.save(out_path)
+    except PermissionError:
+        QMessageBox.warning(stats_widget, "保存失败", "文件可能正在被占用，请关闭后重试。")
+        return None
+
+    _prompt_open_export_folder(stats_widget, out_path)
     return out_path
 
 
@@ -333,18 +547,38 @@ def _set_cell_safely(ws, row, col, value):
         cell.value = value
 
 
-def _resolve_value_field_by_belong(pipe_belong: str):
+def _resolve_value_field_by_belong(pipe_belong: str, product_id: str = None):
     """
-    根据“管口所属元件”判断取值列：
-    - 包含“管箱” → 管程数值
-    - 包含“壳体”或“外头盖” → 壳程数值
+    根据“管口所属元件”判断取值列（与 get_nominal_diameter 一致）：
+    - 容器产品且所属元件为「圆筒」→ 壳程数值
+    - 管箱 / 管板 / 锥壳 → 管程数值
+    - 壳体 / 壳程 / 外头盖 / 右封头 / 左封头 → 壳程数值
     其余情况返回 None
     """
-    if not pipe_belong:
+    belong = (pipe_belong or "").strip()
+    if not belong:
         return None
-    if "管箱" in pipe_belong:
+
+    is_container = False
+    if product_id:
+        try:
+            from modules.guankoudingyi.obtain_product_type_version import get_product_type_and_version
+            product_type, _ = get_product_type_and_version(product_id)
+            is_container = bool(product_type and "容器" in str(product_type))
+        except Exception:
+            is_container = False
+
+    if is_container and belong == "圆筒":
+        return "壳程数值"
+    if ("管箱" in belong) or ("管板" in belong) or ("锥壳" in belong):
         return "管程数值"
-    if ("壳体" in pipe_belong) or ("外头盖" in pipe_belong):
+    if (
+        ("壳体" in belong)
+        or ("壳程" in belong)
+        or ("外头盖" in belong)
+        or ("右封头" in belong)
+        or ("左封头" in belong)
+    ):
         return "壳程数值"
     return None
 
@@ -355,7 +589,7 @@ def _get_weld_joint_efficiency(product_id: str, pipe_belong: str):
     会根据“管口所属元件”自动选择 管程数值/壳程数值。
     返回 (ok: bool, value_or_msg: float|str)
     """
-    value_field = _resolve_value_field_by_belong(pipe_belong)
+    value_field = _resolve_value_field_by_belong(pipe_belong, product_id)
     if not value_field:
         return False, "无效的管口所属元件"
 
@@ -580,24 +814,44 @@ def _clear_pipe_table_except_last_row(stats_widget):
         stats_widget.refresh_pipe_table_sequence()
 
 
+# 容器竖表「输出至管口定义界面」块：D 列参数名关键词 → 内部字段名
+_CONTAINER_OUTPUT_FIELD_KEYWORDS = OrderedDict([
+    ("管口代号", ["管口代号"]),
+    ("管口功能", ["管口功能"]),
+    ("管口用途", ["管口用途", "用途"]),
+    ("公称尺寸", ["公称尺寸"]),
+    ("法兰标准", ["法兰标准"]),
+    ("压力等级", ["压力等级"]),
+    ("法兰型式", ["法兰型式", "型式"]),
+    ("密封面型式", ["密封面型式", "密封面"]),
+    ("焊端规格", ["焊端规格", "焊端"]),
+    ("管口所属元件", ["管口所属元件", "所属元件"]),
+    ("轴向定位基准", ["轴向定位基准", "轴向定位距基准", "定位距基准", "轴向基准", "定位基准"]),
+    ("轴向定位距离", ["轴向定位距离", "轴向距离", "定位距离"]),
+    ("轴向夹角（°）", ["轴向夹角", "夹角"]),
+    ("周向方位（°）", ["周向方位", "周向"]),
+    ("偏心距", ["偏心距", "偏心"]),
+    ("外伸高度", ["外伸高度", "外伸"]),
+    ("内伸高度", ["接管实际内伸高度", "内伸高度", "内伸"]),
+])
+
+
 """模板格式校验函数（管壳式热交换器专用）"""
 def validate_excel_template_format(worksheet, is_container=False):
     """
     校验 Excel 导入模板格式是否正确。
-    当前模板为管壳式热交换器专用（19 列，不含「内伸高度」）；
-    容器产品将使用独立导入模板，后续单独提供。
+    换热器：横表 19 列；容器请使用 validate_container_excel_template_format。
 
     :param worksheet: Excel 工作表对象
-    :param is_container: 是否为容器产品（True 时直接拒绝当前模板）
+    :param is_container: 兼容旧调用；True 时请改走容器校验
     :return: (is_valid: bool, error_messages: list)
     """
     error_messages = []
 
     if is_container:
-        error_messages.append(
-            "当前导入模板仅适用于管壳式热交换器；容器产品请使用专用导入模板（暂未提供）"
-        )
-        return False, error_messages
+        return validate_container_excel_template_format(worksheet)
+
+    error_messages = []
 
     try:
         print(f"[DEBUG] 开始校验换热器导入模板格式，最大行数: {worksheet.max_row}, 最大列数: {worksheet.max_column}")
@@ -686,15 +940,268 @@ def validate_excel_template_format(worksheet, is_container=False):
     return is_valid, error_messages
 
 
+def _locate_container_output_block(worksheet):
+    """
+    定位容器模板「输出至管口定义界面」块。
+    :return: (header_row, field_row_map, data_start_col, series_col)
+             series_col 为「系列」列号；旧模板无系列列时为 None
+    """
+    header_row = None
+    for row in range(1, min(worksheet.max_row, 80) + 1):
+        for col in range(1, min(worksheet.max_column, 8) + 1):
+            cell_val = _get_cell_value(worksheet, row, col)
+            if "输出至管口定义界面" in cell_val:
+                header_row = row
+                break
+        if header_row is not None:
+            break
+
+    if header_row is None:
+        raise ValueError("未找到「输出至管口定义界面」区块，请确认使用的是容器管口导入模板")
+
+    # 输出块通常紧随标题，在随后约 30 行内匹配 D 列参数名
+    scan_end = min(worksheet.max_row, header_row + 30)
+    field_row_map = {}
+    for field_name, keywords in _CONTAINER_OUTPUT_FIELD_KEYWORDS.items():
+        for row in range(header_row + 1, scan_end + 1):
+            # 优先看 D 列，兼看 B/C（部分模板参数名位置略有偏移）
+            label = ""
+            for col in (4, 3, 2):
+                label = _get_cell_value(worksheet, row, col)
+                if label:
+                    break
+            if not label:
+                continue
+            for kw in keywords:
+                if kw in label:
+                    # 「用途」勿误匹配「管口用途」之外的其它行；按关键词顺序已优先长词
+                    if field_name == "管口用途" and "管口用途" not in label and kw == "用途":
+                        if "用途" not in label:
+                            continue
+                    if field_name == "法兰型式" and kw == "型式":
+                        if "密封" in label or "焊端" in label:
+                            continue
+                    if field_name not in field_row_map:
+                        field_row_map[field_name] = row
+                    break
+            if field_name in field_row_map:
+                break
+
+    required = ["管口代号", "公称尺寸", "法兰标准", "管口所属元件"]
+    missing = [f for f in required if f not in field_row_map]
+    if missing:
+        raise ValueError(f"输出区块缺少必要参数行：{', '.join(missing)}")
+
+    # 表头「系列」列（新模板在「管口参数项」后）；旧模板可能没有
+    series_col = None
+    for col in range(1, min(worksheet.max_column, 10) + 1):
+        if "系列" in _get_cell_value(worksheet, 1, col):
+            series_col = col
+            break
+
+    # 数据起始列：跳过「系列」「条件」，找首个有管口代号的列
+    data_start_col = _detect_container_data_start_col(worksheet, field_row_map, series_col)
+    return header_row, field_row_map, data_start_col, series_col
+
+
+def _detect_container_data_start_col(worksheet, field_row_map, series_col=None):
+    """
+    检测管口参数值起始列。
+    新模板：D参数 / E系列 / F条件 / G起为各管口；旧模板：常自 F 起。
+    """
+    code_row = field_row_map.get("管口代号")
+    skip_headers = {"系列", "条件", "管口参数项", "预定义配置", "信息内容", "序号"}
+    start_guess = (series_col + 1) if series_col else 5
+    for col in range(start_guess, worksheet.max_column + 1):
+        header = _get_cell_value(worksheet, 1, col)
+        if header in skip_headers or "系列" in header or header == "条件":
+            continue
+        if code_row:
+            val = _normalize_container_placeholder(_get_cell_value(worksheet, code_row, col))
+            if val:
+                return col
+        elif "管口参数值" in header:
+            return col
+    # 回退：有系列列则 G(=series+2，中间常夹「条件」)，否则 F
+    if series_col:
+        return series_col + 2
+    return 6
+
+
+def _normalize_container_series_unit(raw_value, kind):
+    """
+    规范化系列列单位。
+    :param kind: 'nominal' | 'pressure' | 'weld'
+    :return: DN/NPS、Class/PN、Sch/mm；无法识别时返回对应默认值
+    """
+    text = _normalize_container_placeholder(raw_value)
+    upper = text.upper()
+    if kind == "nominal":
+        if "NPS" in upper:
+            return "NPS"
+        if "DN" in upper:
+            return "DN"
+        return "DN"
+    if kind == "pressure":
+        if "PN" in upper:
+            return "PN"
+        if "CLASS" in upper or "LB" in upper:
+            return "Class"
+        # 模板可能写 Class / class
+        if text in ("Class", "class"):
+            return "Class"
+        return "Class"
+    if kind == "weld":
+        if "SCH" in upper:
+            return "Sch"
+        if "MM" in upper:
+            return "mm"
+        return "mm"
+    return ""
+
+
+def _get_container_series_units(worksheet, field_row_map, series_col=None):
+    """
+    从系列列读取公称尺寸 / 压力等级 / 焊端规格单位。
+    无系列列时默认 DN / Class / mm。
+    """
+    defaults = {"公称尺寸": "DN", "压力等级": "Class", "焊端规格": "mm"}
+    if not series_col:
+        return defaults
+
+    def unit_at(field, kind):
+        row = field_row_map.get(field)
+        if not row:
+            return defaults[{"公称尺寸": "公称尺寸", "压力等级": "压力等级", "焊端规格": "焊端规格"}[field]]
+        return _normalize_container_series_unit(_get_cell_value(worksheet, row, series_col), kind)
+
+    return {
+        "公称尺寸": unit_at("公称尺寸", "nominal"),
+        "压力等级": unit_at("压力等级", "pressure"),
+        "焊端规格": unit_at("焊端规格", "weld"),
+    }
+
+
+"""容器竖表导入模板格式校验"""
+def validate_container_excel_template_format(worksheet):
+    """
+    校验容器管口竖表导入模板：须含「输出至管口定义界面」块及关键参数行。
+    :return: (is_valid: bool, error_messages: list)
+    """
+    error_messages = []
+    try:
+        header_row, field_row_map, data_start_col, series_col = _locate_container_output_block(worksheet)
+        if worksheet.max_column < data_start_col:
+            error_messages.append(
+                f"模板列数不足，容器竖表期望至少从第{data_start_col}列开始有管口数据，"
+                f"实际最大列 {worksheet.max_column}"
+            )
+        # 新模板建议含系列列；旧模板兼容，不强制报错，仅在有公称尺寸行时提示可用单位
+        if series_col:
+            units = _get_container_series_units(worksheet, field_row_map, series_col)
+            for field, allowed in (
+                ("公称尺寸", ("DN", "NPS")),
+                ("压力等级", ("Class", "PN")),
+                ("焊端规格", ("Sch", "mm")),
+            ):
+                if units.get(field) not in allowed:
+                    error_messages.append(f"系列列「{field}」单位不识别：期望 { '/'.join(allowed)}")
+    except ValueError as e:
+        error_messages.append(str(e))
+    except Exception as e:
+        error_messages.append(f"容器模板格式校验过程中发生错误：{str(e)}")
+    return len(error_messages) == 0, error_messages
+
+
+def _normalize_container_placeholder(value):
+    """模板中 '/'、'—'、'None' 等视为空。"""
+    text = "" if value is None else str(value).strip()
+    if text in ("", "/", "／", "-", "—", "–", "None", "none", "NULL"):
+        return ""
+    return text
+
+
+def _normalize_container_pressure_level(raw_value):
+    """如 150LB / Class150 / PN16 → 纯数值字符串。"""
+    text = _normalize_container_placeholder(raw_value)
+    if not text:
+        return ""
+    import re
+    m = re.search(r"(\d+(?:\.\d+)?)", text)
+    return m.group(1) if m else text
+
+
+def _is_container_nozzle_selected(worksheet, col, header_row):
+    """
+    是否选用此接管：优先看输出块上方附近含「是否选用」的行；无标记则默认选用。
+    """
+    scan_start = max(1, header_row - 25)
+    for row in range(scan_start, header_row):
+        for c in range(1, min(6, worksheet.max_column) + 1):
+            label = _get_cell_value(worksheet, row, c)
+            if "是否选用" in label:
+                val = _normalize_container_placeholder(_get_cell_value(worksheet, row, col)).lower()
+                if val in ("否", "n", "no", "0", "false", "不用", "不选用"):
+                    return False
+                return True
+    return True
+
+
+def _pressure_unit_for_flange_standard(flange_standard):
+    """按法兰标准推断压力单位类型。"""
+    if not flange_standard:
+        return None
+    if flange_standard in [
+        "HG/T 20615-2009", "HG/T 20623-2009(A)", "HG/T 20623-2009(B)",
+        "SH/T 3406-2022", "SH/T 3406-2022(A)", "SH/T 3406-2022(B)",
+    ]:
+        return "Class"
+    if "20592" in flange_standard:
+        return "PN"
+    return "Class"
+
+
+def _validate_container_internal_height_for_import(raw_value, product_id, pipe_belong, col_index):
+    """
+    导入侧内伸高度校验：空→程序推荐；须满足 0 ≤ h < 壳体公称直径。
+    :return: (validated_value, error_messages)
+    """
+    errors = []
+    text = _normalize_container_placeholder(raw_value)
+    if not text:
+        return "程序推荐", errors
+    if text == "程序推荐":
+        return "程序推荐", errors
+
+    ok, result = validate_internal_extension_height(text, product_id, pipe_belong, emit_error=False)
+    if not ok:
+        errors.append(f"内伸高度列，第{col_index}列数据不合法")
+        return "", errors
+
+    # 补强：严格要求 h < 公称直径（与产品规则一致；库内函数目前允许等于）
+    if result not in ("程序推荐",) and isinstance(result, (int, float)):
+        success, dn_or_err = get_nominal_diameter(product_id, pipe_belong)
+        if success:
+            try:
+                if float(result) >= float(dn_or_err):
+                    errors.append(f"内伸高度列，第{col_index}列数据不合法")
+                    return "", errors
+            except (TypeError, ValueError):
+                pass
+        return str(result).rstrip("0").rstrip(".") if isinstance(result, float) else str(result), errors
+
+    return str(result) if result is not None else text, errors
+
+
 """从错误信息中提取行号数字，用于排序"""
 def _extract_row_number_for_sort(error_msg):
     """
-    从错误信息字符串中提取行号数字，用于按数字大小排序
-    :param error_msg: 错误信息字符串，格式如 "第1行数据不合法" 或 "第10行，请先在条件输入界面填写公称直径"
-    :return: 行号数字，如果无法提取则返回0
+    从错误信息字符串中提取行号/序号数字，用于按数字大小排序
+    :param error_msg: 错误信息字符串，格式如 "第1行数据不合法" 或 "第3个管口数据不合法"
+    :return: 序号数字，如果无法提取则返回0
     """
     import re
-    match = re.search(r'第(\d+)行', error_msg)
+    match = re.search(r'第(\d+)(?:行|列|个管口)', error_msg)
     if match:
         return int(match.group(1))
     return 0  # 如果无法提取，返回0作为默认值
@@ -753,31 +1260,18 @@ def validate_pipe_attachment(attachment_value, row):
     return ";".join(unique_attachments), errors
 
 
-"""从Excel模板导入管口数据（管壳式热交换器）"""
+"""从Excel模板导入管口数据"""
 def import_nozzle_from_excel(stats_widget):
     """
     从 Excel 模板导入管口数据。
-    当前仅支持管壳式热交换器产品；容器产品将使用独立导入模板。
+    容器产品走竖表「输出至管口定义界面」块；换热器走横表 19 列模板。
     """
     try:
         is_container = getattr(stats_widget, 'is_container_product', False)
         if is_container:
-            QMessageBox.information(
-                stats_widget,
-                "暂不支持",
-                "当前导入功能仅适用于管壳式热交换器。\n容器产品将提供专用导入模板，请稍后再试。",
-            )
-            return False
+            return import_container_nozzle_from_excel(stats_widget)
 
-        # 1. 获取模板文件路径
-        proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        template_path = os.path.join(proj_root, "guankoudingyi", "table_template", "导入模板.xlsx")
-
-        # if not os.path.exists(template_path):
-        #     QMessageBox.warning(stats_widget, "模板文件不存在", f"未找到导入模板文件：\n{template_path}")
-        #     return False
-
-        # 2. 弹出文件选择对话框
+        # 1. 弹出文件选择对话框
         file_path, _ = QFileDialog.getOpenFileName(
             stats_widget,
             "选择要导入的Excel文件",
@@ -788,7 +1282,7 @@ def import_nozzle_from_excel(stats_widget):
         if not file_path:
             return False
 
-        # 3. 读取Excel文件
+        # 2. 读取Excel文件
         try:
             wb = load_workbook(file_path, data_only=True)
             ws = wb.active
@@ -796,14 +1290,14 @@ def import_nozzle_from_excel(stats_widget):
             QMessageBox.critical(stats_widget, "文件读取失败", f"无法读取Excel文件：\n{str(e)}")
             return False
 
-        # 4. 校验导入文件格式（换热器模板）
+        # 3. 校验导入文件格式（换热器模板）
         is_valid_format, format_errors = validate_excel_template_format(ws, is_container=False)
         if not is_valid_format:
             detail = "\n".join(format_errors[:8]) if format_errors else "导入模板格式不正确"
             QMessageBox.warning(stats_widget, "导入失败", detail)
             return False
 
-        # 5. 先解析Excel数据，检查是否有有效的管口数据
+        # 4. 先解析Excel数据，检查是否有有效的管口数据
         try:
             product_id = getattr(stats_widget, 'product_id', None)
             imported_data, template_duplicates, validation_errors = _parse_excel_data(ws, product_id)
@@ -811,25 +1305,25 @@ def import_nozzle_from_excel(stats_widget):
             QMessageBox.critical(stats_widget, "数据解析失败", f"解析Excel数据时发生错误：\n{str(e)}")
             return False
 
-        # 6. 如果没有有效的管口数据，直接返回
+        # 5. 如果没有有效的管口数据，直接返回
         if not imported_data:
             QMessageBox.warning(stats_widget, "导入失败", "Excel文件中没有找到有效的管口数据")
             return False
 
-        # 7. 检查并切换单位类型（如果需要）
+        # 6. 检查并切换单位类型（如果需要）
         try:
             _check_and_switch_unit_types(stats_widget, ws)
         except Exception as e:
             print(f"单位类型检查失败: {e}")
 
-        # 8. 显示验证错误和重复信息（合并显示）
+        # 7. 显示验证错误和重复信息（合并显示）
         if validation_errors or template_duplicates:
             message_parts = []
 
             # 添加重复信息
             if template_duplicates:
                 duplicate_text = "\n".join(template_duplicates)
-                message_parts.append(f"管口代号列：发现以下重复的管口代号，已跳过重复项：\n{duplicate_text}")
+                message_parts.append(f"模板表管口代号列：发现以下重复的管口代号，已跳过重复项：\n{duplicate_text}")
 
             # 添加验证错误信息
             if validation_errors:
@@ -911,52 +1405,52 @@ def import_nozzle_from_excel(stats_widget):
 
                 # 添加公称尺寸错误信息
                 if nominal_size_errors:
-                    message_parts.append(f"公称尺寸列：{', '.join(sorted(nominal_size_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表公称尺寸列：{', '.join(sorted(nominal_size_errors, key=_extract_row_number_for_sort))}")
 
                 if flange_standard_errors:
-                    message_parts.append(f"法兰标准列：{', '.join(sorted(flange_standard_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表法兰标准列：{', '.join(sorted(flange_standard_errors, key=_extract_row_number_for_sort))}")
 
                     # 添加压力等级错误信息
                 if pressure_level_errors:
-                    message_parts.append(f"压力等级列：{', '.join(sorted(pressure_level_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表压力等级列：{', '.join(sorted(pressure_level_errors, key=_extract_row_number_for_sort))}")
 
                     # 添加法兰型式错误信息
                 if flange_form_errors:
-                    message_parts.append(f"法兰型式列：{', '.join(sorted(flange_form_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表法兰型式列：{', '.join(sorted(flange_form_errors, key=_extract_row_number_for_sort))}")
 
                     # 添加密封面型式错误信息
                 if sealing_face_form_errors:
-                    message_parts.append(f"密封面型式列：{', '.join(sorted(sealing_face_form_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表密封面型式列：{', '.join(sorted(sealing_face_form_errors, key=_extract_row_number_for_sort))}")
 
                 # 添加焊端规格错误信息
                 if weld_end_spec_errors:
-                    message_parts.append(f"焊端规格列：{', '.join(sorted(weld_end_spec_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表焊端规格列：{', '.join(sorted(weld_end_spec_errors, key=_extract_row_number_for_sort))}")
 
                 # 添加管口所属元件和轴向定位基准错误信息（合并显示）
                 if pipe_belong_axial_errors:
-                    message_parts.append(f"管口所属元件和轴向定位基准列：{', '.join(sorted(pipe_belong_axial_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表管口所属元件和轴向定位基准列：{', '.join(sorted(pipe_belong_axial_errors, key=_extract_row_number_for_sort))}")
 
                 # 添加轴向定位距离错误信息
                 if axial_distance_errors:
-                    message_parts.append(f"轴向定位距离列：{', '.join(sorted(axial_distance_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表轴向定位距离列：{', '.join(sorted(axial_distance_errors, key=_extract_row_number_for_sort))}")
 
 
                 # 添加轴向夹角错误信息
                 if axial_angle_errors:
-                    message_parts.append(f"轴向夹角列：{', '.join(sorted(axial_angle_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表轴向夹角列：{', '.join(sorted(axial_angle_errors, key=_extract_row_number_for_sort))}")
 
                 # 添加周向方位错误信息
                 if circumferential_position_errors:
-                    message_parts.append(f"周向方位列：{', '.join(sorted(circumferential_position_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表周向方位列：{', '.join(sorted(circumferential_position_errors, key=_extract_row_number_for_sort))}")
 
                 # 添加偏心距错误信息
                 if eccentricity_errors:
                     print(f"调试：偏心距错误集合内容: {eccentricity_errors}")
-                    message_parts.append(f"偏心距列：{', '.join(sorted(eccentricity_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表偏心距列：{', '.join(sorted(eccentricity_errors, key=_extract_row_number_for_sort))}")
 
                 # 添加外伸高度错误信息
                 if extension_height_errors:
-                    message_parts.append(f"外伸高度列：{', '.join(sorted(extension_height_errors, key=_extract_row_number_for_sort))}")
+                    message_parts.append(f"模板表外伸高度列：{', '.join(sorted(extension_height_errors, key=_extract_row_number_for_sort))}")
 
             # 合并显示
             if message_parts and hasattr(stats_widget, 'line_tip'):
@@ -1000,12 +1494,582 @@ def import_nozzle_from_excel(stats_widget):
             stats_widget.cannot_be_deleted = True
 
         # 12. 显示导入成功信息
-        QMessageBox.information(stats_widget, "导入成功", f"成功导入 {len(imported_data)} 条管口数据")
+        show_styled_message(
+            stats_widget,
+            "导入成功",
+            f"成功导入 {len(imported_data)} 条管口数据",
+            icon=QMessageBox.Information,
+        )
         return True
 
     except Exception as e:
         QMessageBox.critical(stats_widget, "导入失败", f"导入过程中发生错误：\n{str(e)}")
         return False
+
+
+"""容器产品：从竖表模板导入管口数据"""
+def _find_container_param_value_col(worksheet):
+    """表头「管口参数值」列号；找不到时默认 G 列（7）。"""
+    for col in range(1, min(worksheet.max_column, 12) + 1):
+        if "管口参数值" in _get_cell_value(worksheet, 1, col):
+            return col
+    return 7
+
+
+def _read_container_template_actual_shell_params(worksheet):
+    """
+    读取模板中「实际圆筒长度」「实际公称直径」（D 列参数名，管口参数值列取值）。
+    :return: (actual_cylinder_length, actual_nominal_diameter)，缺省为 None
+    """
+    value_col = _find_container_param_value_col(worksheet)
+    cylinder_len = None
+    nominal_dn = None
+    scan_end = min(worksheet.max_row, 80)
+    for row in range(1, scan_end + 1):
+        label = ""
+        for col in (4, 3, 2):
+            label = _get_cell_value(worksheet, row, col)
+            if label:
+                break
+        if not label:
+            continue
+        raw = _get_cell_value(worksheet, row, value_col)
+        if not raw:
+            continue
+        try:
+            num = float(raw)
+        except (ValueError, TypeError):
+            continue
+        # 精确匹配参数项名，避免误命中「接管实际外伸高度」等
+        if label.strip() == "实际圆筒长度" and cylinder_len is None:
+            cylinder_len = num
+        elif label.strip() == "实际公称直径" and nominal_dn is None:
+            nominal_dn = num
+        if cylinder_len is not None and nominal_dn is not None:
+            break
+    return cylinder_len, nominal_dn
+
+
+def _floats_nearly_equal(a, b, tol=1e-3):
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def _check_container_template_shell_params_match(stats_widget, worksheet, product_id):
+    """
+    模板「实际圆筒长度/实际公称直径」须与条件输入中的容器壳体长度、公称直径一致。
+    任一不等（或任一侧缺失）则弹窗并返回 False。
+    """
+    tpl_len, tpl_dn = _read_container_template_actual_shell_params(worksheet)
+    db_len = get_container_shell_length(product_id) if product_id else None
+    ok_dn, db_dn = get_nominal_diameter(product_id, "壳体") if product_id else (False, None)
+    if not ok_dn:
+        db_dn = None
+
+    length_ok = (
+        tpl_len is not None
+        and db_len is not None
+        and _floats_nearly_equal(tpl_len, db_len)
+    )
+    dn_ok = (
+        tpl_dn is not None
+        and db_dn is not None
+        and _floats_nearly_equal(tpl_dn, db_dn)
+    )
+    if length_ok and dn_ok:
+        return True
+
+    show_styled_warning(
+        stats_widget,
+        "导入失败",
+        "表中实际圆筒长度、实际公称直径与条件输入中数据不一致，请修改统一后进行导入。",
+    )
+    return False
+
+
+def import_container_nozzle_from_excel(stats_widget):
+    """
+    容器竖表导入：只读取「输出至管口定义界面」块，
+    每个管口一列（新模板自 G 列起）。单位取自「系列」列（公称尺寸/压力等级/焊端规格）。
+    """
+    try:
+        file_path, _ = QFileDialog.getOpenFileName(
+            stats_widget,
+            "选择要导入的容器管口Excel文件",
+            "",
+            "Excel文件 (*.xlsx *.xls);;所有文件 (*)"
+        )
+        if not file_path:
+            return False
+
+        try:
+            wb = load_workbook(file_path, data_only=True)
+            ws = wb.active
+        except Exception as e:
+            QMessageBox.critical(stats_widget, "文件读取失败", f"无法读取Excel文件：\n{str(e)}")
+            return False
+
+        is_valid_format, format_errors = validate_container_excel_template_format(ws)
+        if not is_valid_format:
+            detail = "\n".join(format_errors[:8]) if format_errors else "容器导入模板格式不正确"
+            QMessageBox.warning(stats_widget, "导入失败", detail)
+            return False
+
+        product_id = getattr(stats_widget, 'product_id', None)
+        if not _check_container_template_shell_params_match(stats_widget, ws, product_id):
+            return False
+
+        try:
+            imported_data, template_duplicates, validation_errors, series_units = _parse_container_excel_data(
+                ws, product_id
+            )
+        except Exception as e:
+            QMessageBox.critical(stats_widget, "数据解析失败", f"解析容器Excel数据时发生错误：\n{str(e)}")
+            return False
+
+        if not imported_data:
+            QMessageBox.warning(stats_widget, "导入失败", "Excel文件中没有找到有效的管口数据")
+            return False
+
+        # 按系列列单位切换界面单位类型（对齐换热器导入行为）
+        try:
+            _switch_combo_unit_type(
+                stats_widget, 'combo_nominal_size_type',
+                series_units.get("公称尺寸", "DN"), "公称尺寸"
+            )
+            _switch_combo_unit_type(
+                stats_widget, 'combo_pressure_level_type',
+                series_units.get("压力等级", "Class"), "压力等级"
+            )
+            _switch_combo_unit_type(
+                stats_widget, 'combo_weld_end_spec_type',
+                series_units.get("焊端规格", "mm"), "焊端规格"
+            )
+        except Exception as e:
+            print(f"容器单位类型切换失败: {e}")
+
+        _show_import_validation_tips(
+            stats_widget, validation_errors, template_duplicates, row_offset=0, use_column_index=True
+        )
+
+        try:
+            stats_widget.cannot_be_deleted = False
+            _clear_pipe_table_except_last_row(stats_widget)
+        except Exception as e:
+            QMessageBox.critical(stats_widget, "界面清除失败", f"清除界面数据时发生错误：\n{str(e)}")
+            stats_widget.cannot_be_deleted = True
+            return False
+
+        try:
+            _fill_data_to_ui(stats_widget, imported_data)
+        except Exception as e:
+            QMessageBox.critical(stats_widget, "数据填充失败", f"填充数据到界面时发生错误：\n{str(e)}")
+            return False
+
+        try:
+            from modules.guankoudingyi.funcs.funcs_pipe_table import set_default_pipe_cannot_be_deleted
+            set_default_pipe_cannot_be_deleted(stats_widget)
+        except Exception as e:
+            print(f"[WARNING] 设置默认管口不可删除状态失败: {str(e)}")
+            stats_widget.cannot_be_deleted = True
+
+        show_styled_message(
+            stats_widget,
+            "导入成功",
+            f"成功导入 {len(imported_data)} 条管口数据",
+            icon=QMessageBox.Information,
+        )
+        return True
+
+    except Exception as e:
+        QMessageBox.critical(stats_widget, "导入失败", f"导入过程中发生错误：\n{str(e)}")
+        return False
+
+
+def _show_import_validation_tips(stats_widget, validation_errors, template_duplicates,
+                                  row_offset=2, use_column_index=False):
+    """
+    将导入校验错误/重复信息汇总到 tip 条。
+    :param row_offset: 从 Excel 行号换算界面行时减去的偏移（换热器=2）
+    :param use_column_index: True 时错误信息中的「第N列」直接作为序号展示
+    """
+    if not (validation_errors or template_duplicates):
+        return
+    if not hasattr(stats_widget, 'line_tip'):
+        return
+
+    message_parts = []
+    if template_duplicates:
+        duplicate_text = "\n".join(template_duplicates)
+        message_parts.append(f"模板表管口代号列：发现以下重复的管口代号，已跳过重复项：\n{duplicate_text}")
+
+    if validation_errors:
+        buckets = {
+            "公称尺寸": set(),
+            "法兰标准": set(),
+            "压力等级": set(),
+            "法兰型式": set(),
+            "密封面型式": set(),
+            "焊端规格": set(),
+            "管口所属元件和轴向定位基准": set(),
+            "轴向定位距离": set(),
+            "轴向夹角": set(),
+            "周向方位": set(),
+            "偏心距": set(),
+            "外伸高度": set(),
+            "内伸高度": set(),
+        }
+
+        def _idx_label(error):
+            import re
+            if use_column_index:
+                m = re.search(r'第(\d+)列', error)
+                if m:
+                    return f"第{m.group(1)}列管口数据不合法"
+            m = re.search(r'第(\d+)行', error)
+            if m:
+                n = int(m.group(1)) - row_offset
+                return f"第{n}行数据不合法"
+            return "数据不合法"
+
+        for error in validation_errors:
+            label = _idx_label(error)
+            if "公称尺寸" in error:
+                buckets["公称尺寸"].add(label)
+            elif "法兰标准" in error:
+                buckets["法兰标准"].add(label)
+            elif "压力等级" in error:
+                buckets["压力等级"].add(label)
+            elif "法兰型式" in error:
+                buckets["法兰型式"].add(label)
+            elif "密封面型式" in error:
+                buckets["密封面型式"].add(label)
+            elif "焊端规格" in error:
+                buckets["焊端规格"].add(label)
+            elif "管口所属元件" in error or "轴向定位基准" in error:
+                buckets["管口所属元件和轴向定位基准"].add(label)
+            elif "轴向定位距离" in error:
+                # 勿用裸「壳体长度」：超限文案含「小于容器壳体长度」，会误判
+                if (
+                    "请先在条件输入" in error
+                    or "未获取到容器壳体长度" in error
+                    or "须先至条件输入" in error
+                ):
+                    buckets["轴向定位距离"].add(label.replace("数据不合法", "请先在条件输入界面填写容器壳体长度"))
+                else:
+                    buckets["轴向定位距离"].add(label)
+            elif "轴向夹角" in error:
+                buckets["轴向夹角"].add(label)
+            elif "周向方位" in error:
+                buckets["周向方位"].add(label)
+            elif "偏心距" in error:
+                if "公称直径" in error:
+                    buckets["偏心距"].add(label.replace("数据不合法", "请先在条件输入界面填写公称直径"))
+                elif "夹角" in error:
+                    buckets["偏心距"].add(label.replace("数据不合法", "轴向夹角和偏心距不能同时赋值"))
+                else:
+                    buckets["偏心距"].add(label)
+            elif "外伸高度" in error:
+                if "公称直径" in error:
+                    buckets["外伸高度"].add(label.replace("数据不合法", "请先在条件输入界面填写公称直径"))
+                else:
+                    buckets["外伸高度"].add(label)
+            elif "内伸高度" in error:
+                if "公称直径" in error:
+                    buckets["内伸高度"].add(label.replace("数据不合法", "请先在条件输入界面填写公称直径"))
+                else:
+                    buckets["内伸高度"].add(label)
+
+        display_order = [
+            ("公称尺寸", "模板表公称尺寸列"),
+            ("法兰标准", "模板表法兰标准列"),
+            ("压力等级", "模板表压力等级列"),
+            ("法兰型式", "模板表法兰型式列"),
+            ("密封面型式", "模板表密封面型式列"),
+            ("焊端规格", "模板表焊端规格列"),
+            ("管口所属元件和轴向定位基准", "模板表管口所属元件和轴向定位基准列"),
+            ("轴向定位距离", "模板表轴向定位距离列"),
+            ("轴向夹角", "模板表轴向夹角列"),
+            ("周向方位", "模板表周向方位列"),
+            ("偏心距", "模板表偏心距列"),
+            ("外伸高度", "模板表外伸高度列"),
+            ("内伸高度", "模板表内伸高度列"),
+        ]
+        for key, title in display_order:
+            items = buckets.get(key) or set()
+            if items:
+                message_parts.append(f"{title}：{', '.join(sorted(items, key=_extract_row_number_for_sort))}")
+
+    if message_parts:
+        combined_message = "\n".join(message_parts)
+        stats_widget.line_tip.setText(combined_message)
+        stats_widget.line_tip.setStyleSheet("color: orange;")
+        stats_widget.line_tip.setToolTip(combined_message)
+
+
+"""解析容器竖表 Excel：输出块按列取管口"""
+def _parse_container_excel_data(worksheet, product_id=None):
+    """
+    解析容器模板「输出至管口定义界面」块。
+    每列一个管口；单位取自「系列」列（无系列列时默认 DN/Class/mm）。
+    返回 (imported_data, duplicate_info, validation_errors, series_units)。
+    """
+    imported_data = []
+    pipe_codes = set()
+    duplicate_info = []
+    validation_errors = []
+
+    header_row, field_row_map, data_start_col, series_col = _locate_container_output_block(worksheet)
+    series_units = _get_container_series_units(worksheet, field_row_map, series_col)
+    nominal_unit = series_units.get("公称尺寸", "DN")
+    pressure_unit_from_series = series_units.get("压力等级", "Class")
+    weld_unit = series_units.get("焊端规格", "mm")
+
+    max_col = worksheet.max_column
+    pipe_index = 0  # 成功解析的管口计数，用于 tip「第N个管口」
+
+    def row_of(field):
+        return field_row_map.get(field)
+
+    def cell(field, col):
+        r = row_of(field)
+        if not r:
+            return ""
+        return _normalize_container_placeholder(_get_cell_value(worksheet, r, col))
+
+    for col in range(data_start_col, max_col + 1):
+        if not _is_container_nozzle_selected(worksheet, col, header_row):
+            continue
+
+        pipe_code = cell("管口代号", col)
+        if not pipe_code:
+            continue
+
+        pipe_index += 1
+        err_idx = pipe_index
+
+        if pipe_code in pipe_codes:
+            duplicate_info.append(f"第{err_idx}个管口：'{pipe_code}'")
+            continue
+        pipe_codes.add(pipe_code)
+
+        # —— 法兰标准 / 压力等级 / 型式 / 密封面（按系列列压力单位校验，对齐换热器）——
+        flange_standard_raw = cell("法兰标准", col)
+        pressure_unit_type = pressure_unit_from_series
+        flange_standard_validated, fs_errs = validate_flange_standard_with_error_info(
+            flange_standard_raw, err_idx, pressure_unit_type
+        )
+        for e in fs_errs:
+            validation_errors.append(e.replace(f"第{err_idx}行", f"第{err_idx}列"))
+        flange_standard_valid = bool(flange_standard_validated and flange_standard_validated.strip())
+
+        pressure_level_raw = _normalize_container_pressure_level(cell("压力等级", col))
+        pressure_level_validated = ""
+        required_unit_type = _pressure_unit_for_flange_standard(flange_standard_validated) if flange_standard_valid else None
+
+        if flange_standard_valid and pressure_level_raw and required_unit_type:
+            if pressure_unit_type == required_unit_type:
+                pressure_level_validated, pl_errs = validate_pressure_level_with_error_info(
+                    pressure_level_raw, required_unit_type, err_idx, flange_standard_validated
+                )
+                for e in pl_errs:
+                    validation_errors.append(e.replace(f"第{err_idx}行", f"第{err_idx}列"))
+            else:
+                pressure_level_validated = ""
+                validation_errors.append(f"压力等级列，第{err_idx}列类型不合法")
+        elif pressure_level_raw and not flange_standard_valid:
+            pressure_level_validated = ""
+
+        flange_form_raw = cell("法兰型式", col)
+        flange_form_validated = ""
+        if flange_standard_valid and pressure_level_validated and flange_form_raw:
+            if pressure_unit_type in ("Class", "PN"):
+                flange_form_validated, ff_errs = validate_flange_form_by_database(
+                    flange_form_raw, flange_standard_validated, pressure_level_validated,
+                    pressure_unit_type, err_idx
+                )
+                for e in ff_errs:
+                    validation_errors.append(e.replace(f"第{err_idx}行", f"第{err_idx}列"))
+
+        sealing_face_form_raw = cell("密封面型式", col)
+        sealing_face_form_validated = ""
+        if (flange_standard_valid and pressure_level_validated and flange_form_validated
+                and sealing_face_form_raw):
+            if pressure_unit_type in ("Class", "PN"):
+                sealing_face_form_validated, sf_errs = validate_sealing_face_form_by_database(
+                    sealing_face_form_raw, flange_standard_validated, pressure_level_validated,
+                    pressure_unit_type, flange_form_validated, err_idx
+                )
+                for e in sf_errs:
+                    validation_errors.append(e.replace(f"第{err_idx}行", f"第{err_idx}列"))
+
+        # —— 公称尺寸（按系列列 DN/NPS）——
+        nominal_size_raw = cell("公称尺寸", col)
+        nominal_size_validated = ""
+        if nominal_size_raw and product_id:
+            if nominal_unit in ("DN", "NPS"):
+                nominal_size_validated = validate_nominal_size_by_unit(
+                    nominal_size_raw, nominal_unit, product_id, flange_standard_validated
+                )
+                if not nominal_size_validated and nominal_size_raw:
+                    validation_errors.append(f"公称尺寸第{err_idx}列数据不合法")
+            else:
+                nominal_size_validated = ""
+                validation_errors.append(f"公称尺寸第{err_idx}列类型不合法")
+        else:
+            nominal_size_validated = nominal_size_raw
+
+        # —— 焊端规格（按系列列 Sch/mm）——
+        weld_end_spec_raw = cell("焊端规格", col)
+        weld_end_spec_validated = ""
+        if weld_end_spec_raw and product_id:
+            if weld_unit in ("Sch", "mm"):
+                weld_end_spec_validated = validate_weld_end_spec_by_unit(
+                    weld_end_spec_raw, weld_unit, product_id
+                )
+                if not weld_end_spec_validated and weld_end_spec_raw:
+                    validation_errors.append(f"焊端规格列，第{err_idx}列数据不合法")
+            else:
+                weld_end_spec_validated = ""
+                validation_errors.append(f"焊端规格列，第{err_idx}列类型不合法")
+        else:
+            weld_end_spec_validated = weld_end_spec_raw
+
+        pipe_function_raw = cell("管口功能", col)
+        pipe_belong_raw = cell("管口所属元件", col)
+        pipe_belong_validated = ""
+        if pipe_belong_raw and product_id:
+            pipe_belong_validated = validate_pipe_belong_by_product_type(
+                pipe_belong_raw, product_id, pipe_function_raw
+            )
+            if not pipe_belong_validated and pipe_belong_raw:
+                validation_errors.append(f"管口所属元件列，第{err_idx}列数据不合法")
+        else:
+            pipe_belong_validated = pipe_belong_raw
+
+        axial_position_base_raw = cell("轴向定位基准", col)
+        axial_position_base_validated = ""
+        if not pipe_belong_validated:
+            axial_position_base_validated = ""
+        elif axial_position_base_raw and pipe_belong_validated:
+            axial_position_base_validated = validate_axial_position_base(
+                axial_position_base_raw,
+                pipe_belong_validated,
+                pipe_function_raw,
+                len(imported_data),
+                imported_data,
+                product_id,
+            )
+            if not axial_position_base_validated and axial_position_base_raw:
+                validation_errors.append(f"轴向定位基准列，第{err_idx}列数据不合法")
+        else:
+            axial_position_base_validated = axial_position_base_raw
+
+        axial_distance_raw = cell("轴向定位距离", col)
+        axial_distance_validated = ""
+        if axial_distance_raw:
+            ok_ax, ax_result = validate_container_axial_position_distance(
+                axial_distance_raw,
+                nominal_size_text=nominal_size_validated,
+                stats_widget=None,
+                emit_error=False,
+                pipe_belong=pipe_belong_validated,
+                product_id=product_id,
+                pipe_code=pipe_code,
+            )
+            if ok_ax:
+                # 文本项原样；数值先按原值校验，写入时统一四舍五入到一位小数
+                if isinstance(ax_result, str):
+                    axial_distance_validated = ax_result
+                else:
+                    axial_distance_validated = f"{round(float(ax_result), 1):.1f}"
+            else:
+                axial_distance_validated = ""
+                msg = ax_result if isinstance(ax_result, str) else ""
+                # 勿用裸「壳体长度」：超限提示含「小于容器壳体长度」，会误判为未填壳体长度
+                if "未获取到容器壳体长度" in msg or "须先至条件输入" in msg:
+                    validation_errors.append(
+                        f"轴向定位距离列，第{err_idx}列，请先在条件输入界面填写容器壳体长度"
+                    )
+                else:
+                    validation_errors.append(f"轴向定位距离列，第{err_idx}列数据不合法")
+        else:
+            axial_distance_validated = "程序推荐"
+
+        axial_angle_raw = cell("轴向夹角（°）", col)
+        circumferential_position_raw = cell("周向方位（°）", col)
+        eccentricity_raw = cell("偏心距", col)
+
+        axial_angle_validated = ""
+        circumferential_position_validated = ""
+        eccentricity_validated = ""
+
+        if pipe_belong_validated in ["固定管板", "前端管板", "后端管板"]:
+            axial_angle_validated = "-"
+            circumferential_position_validated = "-"
+            eccentricity_validated = "-"
+        else:
+            if axial_angle_raw:
+                axial_angle_validated = validate_axial_angle(axial_angle_raw)
+                if not axial_angle_validated and axial_angle_raw:
+                    validation_errors.append(f"轴向夹角列，第{err_idx}列数据不合法")
+            else:
+                axial_angle_validated = axial_angle_raw
+
+            if circumferential_position_raw:
+                circumferential_position_validated = validate_circumferential_position(
+                    circumferential_position_raw
+                )
+                if not circumferential_position_validated and circumferential_position_raw:
+                    validation_errors.append(f"周向方位列，第{err_idx}列数据不合法")
+            else:
+                circumferential_position_validated = circumferential_position_raw
+
+            eccentricity_validated, ecc_errs = validate_eccentricity_with_error_info(
+                eccentricity_raw, pipe_belong_validated, product_id, err_idx, axial_angle_raw
+            )
+            for e in ecc_errs:
+                validation_errors.append(e.replace(f"第{err_idx}行", f"第{err_idx}列"))
+
+        extension_height_raw = cell("外伸高度", col)
+        extension_height_validated, ext_errs = validate_extension_height_with_error_info(
+            extension_height_raw, pipe_belong_validated, product_id, err_idx
+        )
+        for e in ext_errs:
+            validation_errors.append(e.replace(f"第{err_idx}行", f"第{err_idx}列"))
+
+        internal_height_raw = cell("内伸高度", col)
+        internal_height_validated, ih_errs = _validate_container_internal_height_for_import(
+            internal_height_raw, product_id, pipe_belong_validated, err_idx
+        )
+        validation_errors.extend(ih_errs)
+
+        pipe_data = {
+            "管口代号": pipe_code,
+            "管口功能": pipe_function_raw,
+            "管口用途": cell("管口用途", col),
+            "公称尺寸": nominal_size_validated,
+            "法兰标准": flange_standard_validated,
+            "压力等级": pressure_level_validated,
+            "法兰型式": flange_form_validated,
+            "密封面型式": sealing_face_form_validated,
+            "焊端规格": weld_end_spec_validated,
+            "管口所属元件": pipe_belong_validated,
+            "轴向定位基准": axial_position_base_validated,
+            "轴向定位距离": axial_distance_validated,
+            "轴向夹角（°）": axial_angle_validated,
+            "周向方位（°）": circumferential_position_validated,
+            "偏心距": eccentricity_validated,
+            "外伸高度": extension_height_validated,
+            "内伸高度": internal_height_validated,
+            "管口附件": "",
+            "管口载荷": "",
+        }
+        imported_data.append(pipe_data)
+
+    return imported_data, duplicate_info, validation_errors, series_units
 
 
 """解析Excel工作表数据，提取管口信息"""
@@ -1400,6 +2464,13 @@ def _fill_data_to_ui(stats_widget, imported_data):
         if not table:
             raise Exception("无法获取表格控件")
 
+        is_container = getattr(stats_widget, "is_container_product", False)
+        if is_container:
+            # get_pipe_column_map 为 col→field，填充需要 field→col
+            col_index_map = {field: col for col, field in get_pipe_column_map(True).items()}
+        else:
+            col_index_map = UI_COL_INDEX
+
         # 确保有足够的行数
         current_rows = table.rowCount()
         needed_rows = len(imported_data)
@@ -1421,10 +2492,10 @@ def _fill_data_to_ui(stats_widget, imported_data):
                 seq_item.setFlags(seq_item.flags() & ~Qt.ItemIsEditable)  # 序号列不可编辑
                 table.setItem(i, 0, seq_item)
 
-                # 填充各列数据
-                for field_name, col_index in UI_COL_INDEX.items():
+                # 填充各列数据（容器含「内伸高度」）
+                for field_name, col_index in col_index_map.items():
                     value = pipe_data.get(field_name, "")
-                    item = QTableWidgetItem(str(value))
+                    item = QTableWidgetItem("" if value is None else str(value))
                     item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(i, col_index, item)
 
@@ -1459,8 +2530,12 @@ def _fill_data_to_ui(stats_widget, imported_data):
                 table.setItem(last_row, col, empty_item)
 
             # 确保最后一行空白行的其他列不可编辑（因为管口代号为空）
-            from modules.guankoudingyi.funcs.funcs_pipe_table import control_last_row_editable_state
+            from modules.guankoudingyi.funcs.funcs_pipe_table import (
+                control_last_row_editable_state,
+                set_pipe_load_column_readonly,
+            )
             control_last_row_editable_state(stats_widget, enable_editing=False)
+            set_pipe_load_column_readonly(stats_widget)
 
         except Exception as e:
             pass

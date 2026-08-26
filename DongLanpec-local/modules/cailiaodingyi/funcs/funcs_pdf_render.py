@@ -573,13 +573,14 @@ def install_guankou_forging_level_toggle(
     """
     管口元件：接管/接管法兰材料类型 → 锻件级别显隐与按列可编辑控制。
     - 三列中只要有一列材料类型为「钢锻件」，整行显示；
-    - 非钢锻件列：不可编辑且 UI 清空；
+    - 非钢锻件列：不可编辑，显示「/」；
     - 钢锻件列：可编辑，显示值来自数据库/用户输入，不在 UI 层写死默认值。
     """
     if not table or table.rowCount() == 0:
         return
 
     forging_opts = [str(x).strip() for x in (forging_opts or []) if str(x).strip()]
+    NA_MARK = "/"
 
     def _find_row(name: str) -> int:
         for r in range(table.rowCount()):
@@ -606,17 +607,17 @@ def install_guankou_forging_level_toggle(
         else:
             it.setText(txt or "")
 
-    def _clear_cell(r: int, c: int):
+    def _set_na_cell(r: int, c: int):
+        """非钢锻件列：显示 /（不适用）。"""
         w = table.cellWidget(r, c)
         if isinstance(w, QComboBox):
-            if w.findText("") >= 0:
-                w.setCurrentText("")
-            elif w.count():
-                w.setCurrentIndex(0)
+            if w.findText(NA_MARK) < 0:
+                w.addItem(NA_MARK)
+            w.setCurrentText(NA_MARK)
         elif isinstance(w, QLineEdit):
-            w.clear()
+            w.setText(NA_MARK)
         else:
-            _set_text(r, c, "")
+            _set_text(r, c, NA_MARK)
 
     def _set_cell_enabled(r: int, c: int, enabled: bool):
         w = table.cellWidget(r, c)
@@ -670,9 +671,12 @@ def install_guankou_forging_level_toggle(
                     tv = type_vals[idx] if idx < len(type_vals) else ""
                     if show and tv == "钢锻件":
                         _set_cell_enabled(_forging_row, cc, True)
+                        # 从「/」占位切回钢锻件时，去掉不适用标记，留给用户/库值
+                        if _get_text(_forging_row, cc) == NA_MARK:
+                            _set_text(_forging_row, cc, "")
                     else:
                         _set_cell_enabled(_forging_row, cc, False)
-                        _clear_cell(_forging_row, cc)
+                        _set_na_cell(_forging_row, cc)
 
                 table.viewport().update()
 
@@ -1771,7 +1775,7 @@ def render_guankou_param_to_ui(viewer_instance, guankou_para_info: list):
     except Exception:
         pass
 
-    # 接管/接管法兰：材料类型=钢锻件时显示锻件级别（三列任一列满足则整行显示，非钢锻件列禁用并清空）
+    # 接管/接管法兰：材料类型=钢锻件时显示锻件级别（三列任一列满足则整行显示，非钢锻件列禁用并显示 /）
     install_guankou_forging_level_toggle(
         table=table,
         param_col=0,
