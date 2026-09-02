@@ -16,7 +16,7 @@ from modules.cailiaodingyi.controllers.table import (
     install_param_detail_selection_highlight,
 )
 from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
-from modules.cailiaodingyi.controllers.combo import ComboDelegate, MaterialInstantDelegate, StructuralSteelMaterialDelegate
+from modules.cailiaodingyi.controllers.combo import ComboDelegate, MaterialInstantDelegate
 from modules.cailiaodingyi.controllers.style import (
     exec_message_box,
     show_information,
@@ -43,6 +43,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     load_guankou_para_data_leibie, is_all_guankou_parts_defined, get_filtered_material_options,
     get_allowed_material_types, parse_component_names_cell,
     get_structural_steel_material_options, uses_structural_steel_material, save_image,
+    get_flange_linkage_dependent_options,
     query_image_from_database, get_dependency_mapping_from_db,
     query_param_by_component_id, get_gasket_param_from_db,
     get_design_params_from_db, get_gasket_contact_dims_from_db, query_template_id, query_guankou_image_from_database,
@@ -1428,6 +1429,12 @@ def _teardown_structural_steel_material_linkage(table):
     table._structural_steel_on_pick = None
     table.setProperty("structural_steel_material_rows", {})
     table.setProperty("structural_steel_linkage_epoch", None)
+    try:
+        table._structural_steel_type_filter_name = None
+        table._structural_steel_bound_element = None
+    except Exception:
+        pass
+
 
 def _ensure_editable_item(table, row, col):
     it = table.item(row, col)
@@ -1454,289 +1461,78 @@ def _set_row_delegate(table, row, options, keep_current=False, current_text="", 
         table.setItemDelegateForRow(row, ComboDelegate(options, table))
 
 
-
-
-def install_structural_steel_material_linkage(table, param_col, value_col, viewer_instance=None):
+def _apply_quality_grade_visibility(table, param_col, value_col, viewer_instance,
+                                    material_std, write_db=True, element_name=None):
     """
-    结构钢材料四字段联动（白名单元件专用，如加强圈）：
-      - 材料类型 / 材料标准 / 供货状态：独立下拉，数据来自结构钢材料表 DISTINCT
-      - 供货状态 → 材料牌号：选供货状态后过滤牌号；未选供货状态时牌号为全表 DISTINCT
-      - 不处理垫板材料四字段，不触发锻件级别显隐
+    按《法兰参数联动表》控制「质量等级」行显隐与下拉：
+      主参数=材料标准、被联动参数=质量等级；有映射则显示并填充选项，无映射则隐藏。
+    缺省值取下拉第一项。
     """
-    from PyQt5.QtWidgets import QAbstractItemView, QTableWidgetItem
-    from PyQt5.QtCore import Qt
+    std = (material_std or "").strip()
+    options = get_flange_linkage_dependent_options("材料标准", std, "质量等级") if std else []
+    show = bool(options)
 
-    try:
-        import modules.chanpinguanli.bianl as _bianl_ro_lm
-        _readonly_lm = bool(getattr(_bianl_ro_lm, "product_local_files_missing_readonly", False))
-    except Exception:
-        _readonly_lm = False
-    table.setEditTriggers(
-        QAbstractItemView.NoEditTriggers if _readonly_lm else QAbstractItemView.SelectedClicked
-    )
-
-    names_set = set(STRUCTURAL_STEEL_MATERIAL_FIELDS)
-
-    def _row(name: str) -> int:
-        r = _find_row_by_param(table, param_col, name)
-        return r if r >= 0 else -1
-
-    def _ensure_editable(r: int):
-        if r < 0:
-            return
-        if table.cellWidget(r, value_col):
-            table.setCellWidget(r, value_col, None)
-        _ensure_editable_item(table, r, value_col)
-
-    def _get(r: int):
-        it = table.item(r, value_col)
-        return (it.text().strip() if it else "")
-
-    def _set(r: int, txt: str):
-        if r < 0:
-            return
-        it = table.item(r, value_col)
-        if it is None:
-            it = QTableWidgetItem()
-            it.setTextAlignment(Qt.AlignCenter)
-            table.setItem(r, value_col, it)
-        it.setText(txt or "")
-
-    def _brand_options_for(cur_status: str):
-        basis = {"供货状态": cur_status} if cur_status else {}
-        return (get_structural_steel_material_options(basis) or {}).get("材料牌号", []) or []
-
-    def _install_row_delegate(field_name, row_idx, options, on_pick):
-        if row_idx < 0 or field_name not in names_set:
-            return
-        seen, opts = set(), []
-        for o in list(options or []):
-            s = (o or "").strip()
-            if s and s not in seen:
-                seen.add(s)
-                opts.append(s)
-        table.setItemDelegateForRow(row_idx, StructuralSteelMaterialDelegate(opts, table, field_name, on_pick))
-
-    r_type = _row("材料类型")
-    r_brand = _row("材料牌号")
-    r_std = _row("材料标准")
-    r_status = _row("供货状态")
-    rows = [r for r in (r_type, r_brand, r_std, r_status) if r >= 0]
-    if not rows:
+    r_grade = _find_row_by_param(table, param_col, "质量等级")
+    if r_grade < 0:
         return
 
-    for r in rows:
-        _ensure_editable(r)
+    table.setRowHidden(r_grade, not show)
+    if show:
+        default_val = options[0] if options else ""
 
-    linkage_epoch = _bump_material_linkage_epoch(table)
-    table.setProperty("structural_steel_linkage_epoch", linkage_epoch)
-
-    table.setProperty("structural_steel_material_rows", {
-        "材料类型": r_type,
-        "材料牌号": r_brand,
-        "材料标准": r_std,
-        "供货状态": r_status,
-    })
-    table.setProperty("material_rows", {})
-
-    base_opts = get_structural_steel_material_options({}) or {}
-    cur_status = _get(r_status)
-    cur_brand = _get(r_brand)
-    part_filter = _part_names_for_material_type_filter(viewer_instance, table, param_col, value_col)
-    type_opts = list(base_opts.get("材料类型", []) or [])
-    allowed_types = get_allowed_material_types(part_filter) if part_filter else None
-    if allowed_types is not None:
-        have = set(type_opts)
-        type_opts = [t for t in allowed_types if t in have]
-
-    # 供货状态为空时不应保留材料牌号（与原材料四字段“清空上游→清空下游”一致）
-    if not cur_status and cur_brand:
-        _set(r_brand, "")
-        cur_brand = ""
-
-    def _apply_status_brand_link(status_val: str):
-        """供货状态 → 材料牌号：有状态取首项，无状态清空且候选为全表牌号。"""
-        brand_opts = _brand_options_for(status_val)
-        _install_row_delegate("材料牌号", r_brand, brand_opts, on_pick)
-        table.blockSignals(True)
-        try:
-            if status_val:
-                _set(r_brand, brand_opts[0] if brand_opts else "")
-            else:
-                _set(r_brand, "")
-        finally:
-            table.blockSignals(False)
-
-    def on_pick(field_name: str, new_text: str, row: int, col: int):
-        """联动回调：当前格由 delegate.setModelData 写回，此处只处理下游字段。"""
-        if getattr(table, "_material_linkage_epoch", None) != linkage_epoch:
-            return
-        en = _element_name_for_material_linkage(viewer_instance, table, param_col, value_col)
-        if not uses_structural_steel_material(en):
-            return
-        if field_name not in names_set:
-            return
-
-        if field_name == "供货状态":
-            _apply_status_brand_link((new_text or "").strip())
-        elif field_name == "材料牌号":
-            brand_opts = _brand_options_for(_get(r_status))
-            cur = (new_text or "").strip()
-            if cur and cur not in brand_opts:
-                table.blockSignals(True)
-                try:
-                    _set(r_brand, brand_opts[0] if brand_opts else "")
-                finally:
-                    table.blockSignals(False)
-
-        table.viewport().update()
-
-    table._structural_steel_on_pick = on_pick
-
-    _install_row_delegate("材料类型", r_type, type_opts, on_pick)
-    _install_row_delegate("材料标准", r_std, base_opts.get("材料标准", []), on_pick)
-    _install_row_delegate("供货状态", r_status, base_opts.get("供货状态", []), on_pick)
-    _install_row_delegate("材料牌号", r_brand, _brand_options_for(cur_status), on_pick)
-
-    if not _get(r_brand) and cur_status:
-        brand_opts = _brand_options_for(cur_status)
-        if brand_opts:
-            _set(r_brand, brand_opts[0])
-
-    target_rows = set(rows)
-    if not getattr(table, "_material_dynamic_hook_installed", False):
-        def _on_cell_pressed(r, c):
-            if c != value_col or r not in target_rows:
-                return
-            pname_item = table.item(r, param_col)
-            pname = pname_item.text().strip() if pname_item else ""
-            if pname not in names_set:
-                return
-            install_material_delegate_linkage(table, param_col, value_col, viewer_instance)
-
-        table.cellPressed.connect(_on_cell_pressed)
-        table._material_dynamic_hook_installed = True
-
-    def _on_item_changed_structural(item):
-        try:
-            on_structural_steel_material_changed(table, item, param_col, value_col, viewer_instance)
-        except Exception:
-            pass
-
-    _prev_ss = getattr(table, "_on_structural_steel_material_changed", None)
-    table._on_structural_steel_material_changed = _on_item_changed_structural
-
-    def _on_item_changed_material(item):
-        try:
-            on_material_delegate_changed(table, item, param_col, value_col, viewer_instance)
-        except Exception:
-            pass
-
-    try:
-        table.itemChanged.disconnect(_on_item_changed_material)
-    except Exception:
-        pass
-    if callable(_prev_ss):
-        try:
-            table.itemChanged.disconnect(_prev_ss)
-        except Exception:
-            pass
-    table.itemChanged.connect(_on_item_changed_structural)
-
-
-def on_structural_steel_material_changed(table, item, param_col, value_col, viewer_instance=None):
-    """结构钢材料字段：供货状态变更时同步校验/刷新材料牌号候选（参考标准四字段 itemChanged 逻辑）。"""
-    if item.column() != value_col:
-        return
-    if getattr(table, "_structural_steel_material_refreshing", False):
-        return
-
-    en = _element_name_for_material_linkage(viewer_instance, table, param_col, value_col)
-    if not uses_structural_steel_material(en):
-        return
-
-    rows_map = table.property("structural_steel_material_rows") or {}
-    if not rows_map:
-        return
-
-    stored_epoch = table.property("structural_steel_linkage_epoch")
-    if stored_epoch is not None and getattr(table, "_material_linkage_epoch", None) != stored_epoch:
-        return
-
-    r_type = rows_map.get("材料类型", -1)
-    r_brand = rows_map.get("材料牌号", -1)
-    r_std = rows_map.get("材料标准", -1)
-    r_status = rows_map.get("供货状态", -1)
-    if item.row() not in {r_type, r_brand, r_std, r_status}:
-        return
-
-    # 材料类型 / 材料标准：独立字段，写回由下拉代理完成，不在此干预
-    if item.row() in {r_type, r_std}:
-        return
-
-    getv = lambda rr: (table.item(rr, value_col).text().strip() if rr >= 0 and table.item(rr, value_col) else "")
-    on_pick = getattr(table, "_structural_steel_on_pick", None)
-
-    def _reinstall(field_name, row_idx, options):
-        if row_idx < 0 or not callable(on_pick):
-            return
-        seen, opts = set(), []
-        for o in list(options or []):
-            s = (o or "").strip()
-            if s and s not in seen:
-                seen.add(s)
-                opts.append(s)
-        table.setItemDelegateForRow(row_idx, StructuralSteelMaterialDelegate(opts, table, field_name, on_pick))
-
-    table._structural_steel_material_refreshing = True
-    try:
-        if item.row() == r_status:
-            cur_status = (item.text() or "").strip()
-        else:
-            cur_status = getv(r_status)
-        brand_opts = (get_structural_steel_material_options({"供货状态": cur_status} if cur_status else {}) or {}).get("材料牌号", [])
-
-        if item.row() == r_status:
-            _reinstall("材料牌号", r_brand, brand_opts)
+        _ensure_editable_item(table, r_grade, value_col)
+        table.setItemDelegateForRow(r_grade, ComboDelegate(options, table))
+        it = table.item(r_grade, value_col)
+        cur = (it.text() or "").strip() if it else ""
+        if options and (not cur or cur not in options):
             table.blockSignals(True)
             try:
-                if cur_status:
-                    pick = brand_opts[0] if brand_opts else ""
-                    if table.item(r_brand, value_col):
-                        table.item(r_brand, value_col).setText(pick)
+                if it is None:
+                    it = QTableWidgetItem(default_val)
+                    it.setTextAlignment(Qt.AlignCenter)
+                    table.setItem(r_grade, value_col, it)
                 else:
-                    if table.item(r_brand, value_col):
-                        table.item(r_brand, value_col).setText("")
+                    it.setText(default_val)
             finally:
                 table.blockSignals(False)
-        elif item.row() == r_brand:
-            # 材料牌号：写回由下拉代理完成；不在 itemChanged 里重装 delegate（否则编辑器未关，下拉会残留）
-            cur_brand = (item.text() or "").strip()
-            if cur_brand and cur_brand not in brand_opts:
-                table.blockSignals(True)
+            if write_db and default_val:
                 try:
-                    if table.item(r_brand, value_col):
-                        table.item(r_brand, value_col).setText(brand_opts[0] if brand_opts else "")
-                finally:
-                    table.blockSignals(False)
-    finally:
-        table._structural_steel_material_refreshing = False
+                    product_id = getattr(viewer_instance, "product_id", "")
+                    element_id = getattr(viewer_instance, "clicked_element_data", {}).get("元件ID", "")
+                    update_element_para_data(product_id, element_id, "质量等级", default_val)
+                except Exception as e:
+                    print(f"[质量等级默认值写入失败] {e}")
+    else:
+        try:
+            table.blockSignals(True)
+            iv = table.item(r_grade, value_col)
+            if iv:
+                iv.setText("")
+        finally:
+            table.blockSignals(False)
+        if write_db:
+            try:
+                product_id = getattr(viewer_instance, "product_id", "")
+                element_id = getattr(viewer_instance, "clicked_element_data", {}).get("元件ID", "")
+                update_element_para_data(product_id, element_id, "质量等级", "")
+            except Exception as e:
+                print(f"[清空质量等级失败] {e}")
 
 
 def install_material_delegate_linkage(table, param_col, value_col, viewer_instance=None):
     """
     渲染完成后调用：
       - 只处理 【材料类型/牌号/标准/供货状态】 和 【垫板材料类型/牌号/标准/供货状态】
-      - 给这 8 行安装 MaterialInstantDelegate
-      - A 组触发锻件级别显隐，B 组不触发
-      - ✅ 新增：进入单元格前动态刷新，但仅限这 8 行
-      - 结构钢白名单元件（如加强圈）走 install_structural_steel_material_linkage，不进入下方逻辑
+      - 给这 8 行安装 MaterialInstantDelegate，四字段级联逻辑统一
+      - 结构钢白名单元件（如加强圈）：同逻辑，数据来自结构钢材料表；额外联动质量等级
+      - A 组触发锻件级别显隐（结构钢元件跳过）；B 组不触发
     """
     element_name = _element_name_for_material_linkage(viewer_instance, table, param_col, value_col)
-    if element_name and uses_structural_steel_material(element_name):
-        return install_structural_steel_material_linkage(table, param_col, value_col, viewer_instance)
-
-    _teardown_structural_steel_material_linkage(table)
+    is_structural = bool(element_name and uses_structural_steel_material(element_name))
+    if is_structural:
+        _bump_material_linkage_epoch(table)
+    else:
+        _teardown_structural_steel_material_linkage(table)
 
     from PyQt5.QtWidgets import QAbstractItemView, QTableWidgetItem
     from PyQt5.QtCore import Qt
@@ -1750,21 +1546,18 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
         QAbstractItemView.NoEditTriggers if _readonly_lm else QAbstractItemView.SelectedClicked
     )
 
-    # ---------- 白名单参数名 ----------
     NAMES_ALL = [
-        "材料类型","材料牌号","材料标准","供货状态",
-        "垫板材料类型","垫板材料牌号","垫板材料标准","垫板材料供货状态"
+        "材料类型", "材料牌号", "材料标准", "供货状态",
+        "垫板材料类型", "垫板材料牌号", "垫板材料标准", "垫板材料供货状态",
     ]
-    NAMES_SET = set(NAMES_ALL)  # 用于快速判断
+    NAMES_SET = set(NAMES_ALL)
     part_filter = _part_names_for_material_type_filter(viewer_instance, table, param_col, value_col)
     try:
         table._material_type_filter_name = part_filter
     except Exception:
         pass
 
-    # ---------- 工具函数 ----------
     def _row(name: str) -> int:
-        """查找指定参数名对应的行号"""
         r = _find_row_by_param(table, param_col, name)
         return r if (r is not None and r >= 0) else -1
 
@@ -1790,13 +1583,14 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
         it.setText(txt or "")
 
     def _mat_opts(selected: dict):
+        if is_structural:
+            return get_structural_steel_material_options(selected, element_name=part_filter) or {}
         return get_filtered_material_options(selected, element_name=part_filter) or {}
 
     def _install_row_delegate(field_name, row_idx, options, on_pick):
-        """为指定行安装下拉 delegate"""
         if row_idx < 0:
             return
-        if field_name not in NAMES_SET:  # ✅ 白名单过滤，非 8 行跳过
+        if field_name not in NAMES_SET:
             return
         seen, opts = set(), []
         for o in list(options or []):
@@ -1806,11 +1600,11 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
                 opts.append(s)
         table.setItemDelegateForRow(row_idx, MaterialInstantDelegate(opts, table, field_name, on_pick))
 
-    # ---------- 公共组装 ----------
-    def _install_group(name_type, name_brand, name_std, name_status, forge_flag: bool):
-        r_type   = _row(name_type)
-        r_brand  = _row(name_brand)
-        r_std    = _row(name_std)
+    def _install_group(name_type, name_brand, name_std, name_status, forge_flag: bool,
+                       quality_grade_hook=None):
+        r_type = _row(name_type)
+        r_brand = _row(name_brand)
+        r_std = _row(name_std)
         r_status = _row(name_status)
         rows = [r for r in (r_type, r_brand, r_std, r_status) if r >= 0]
         if not rows:
@@ -1821,15 +1615,15 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
 
         cur_type, cur_brand, cur_std = _get(r_type), _get(r_brand), _get(r_std)
 
-        opts_type  = _mat_opts({}).get("材料类型", []) or []
+        opts_type = _mat_opts({}).get("材料类型", []) or []
         opts_brand = _mat_opts({"材料类型": cur_type} if cur_type else {}).get("材料牌号", []) or []
-        basis_std  = {k: v for k, v in {"材料类型": cur_type, "材料牌号": cur_brand}.items() if v}
-        opts_std   = _mat_opts(basis_std).get("材料标准", []) or []
+        basis_std = {k: v for k, v in {"材料类型": cur_type, "材料牌号": cur_brand}.items() if v}
+        opts_std = _mat_opts(basis_std).get("材料标准", []) or []
         basis_stat = {k: v for k, v in {"材料类型": cur_type, "材料牌号": cur_brand, "材料标准": cur_std}.items() if v}
-        opts_stat  = _mat_opts(basis_stat).get("供货状态", []) or []
+        opts_stat = _mat_opts(basis_stat).get("供货状态", []) or []
 
         def on_pick(field_name: str, new_text: str, row: int, col: int):
-            if field_name not in NAMES_SET:  # ✅ 白名单过滤
+            if field_name not in NAMES_SET:
                 return
 
             cur_t = _get(r_type)
@@ -1838,69 +1632,98 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
                 for rr in (r_brand, r_std, r_status):
                     _set(rr, "")
                 b = _mat_opts({"材料类型": new_text})
-                _install_row_delegate(name_brand,  r_brand,  b.get("材料牌号", []), on_pick)
-                _install_row_delegate(name_std,    r_std,    [], on_pick)
+                _install_row_delegate(name_brand, r_brand, b.get("材料牌号", []), on_pick)
+                _install_row_delegate(name_std, r_std, [], on_pick)
                 _install_row_delegate(name_status, r_status, [], on_pick)
+                if quality_grade_hook:
+                    quality_grade_hook("", True)
             elif field_name == name_brand:
-                # 牌号变更后，标准与供货状态需使用新候选，且应先清空旧值避免残留旧候选
                 _set(r_std, "")
                 _set(r_status, "")
                 f = _mat_opts({"材料类型": cur_t, "材料牌号": new_text})
-                std_opts  = f.get("材料标准", []) or []
+                std_opts = f.get("材料标准", []) or []
                 stat_opts = f.get("供货状态", []) or []
-                _install_row_delegate(name_std,    r_std,    std_opts,  on_pick)
+                _install_row_delegate(name_std, r_std, std_opts, on_pick)
                 _install_row_delegate(name_status, r_status, stat_opts, on_pick)
-                if (not _get(r_std))    and len(std_opts)  == 1: _set(r_std, std_opts[0])
-                if (not _get(r_status)) and len(stat_opts) == 1: _set(r_status, stat_opts[0])
+                if (not _get(r_std)) and len(std_opts) == 1:
+                    _set(r_std, std_opts[0])
+                if (not _get(r_status)) and len(stat_opts) == 1:
+                    _set(r_status, stat_opts[0])
+                if quality_grade_hook:
+                    quality_grade_hook(_get(r_std), True)
             elif field_name == name_std:
                 f = _mat_opts({"材料类型": cur_t, "材料牌号": cur_b, "材料标准": new_text})
                 stat_opts = f.get("供货状态", []) or []
                 _install_row_delegate(name_status, r_status, stat_opts, on_pick)
                 if (not _get(r_status)) and len(stat_opts) == 1:
                     _set(r_status, stat_opts[0])
+                if quality_grade_hook:
+                    quality_grade_hook(new_text, True)
 
             if forge_flag and field_name == name_type:
                 _apply_forging_visibility(table, param_col, value_col, viewer_instance, new_text, write_db=True)
 
             table.viewport().update()
 
-        # 初次安装
-        _install_row_delegate(name_type,   r_type,   opts_type,  on_pick)
-        _install_row_delegate(name_brand,  r_brand,  opts_brand, on_pick)
-        _install_row_delegate(name_std,    r_std,    opts_std,   on_pick)
-        _install_row_delegate(name_status, r_status, opts_stat,  on_pick)
+        _install_row_delegate(name_type, r_type, opts_type, on_pick)
+        _install_row_delegate(name_brand, r_brand, opts_brand, on_pick)
+        _install_row_delegate(name_std, r_std, opts_std, on_pick)
+        _install_row_delegate(name_status, r_status, opts_stat, on_pick)
 
-        # 锻件级别显隐
         if forge_flag:
             _apply_forging_visibility(table, param_col, value_col, viewer_instance, cur_type, write_db=False)
 
+        if quality_grade_hook:
+            quality_grade_hook(cur_std, False)
+
         return set(rows)
 
-    # ---------- 执行两组 ----------
-    rows_a = _install_group("材料类型","材料牌号","材料标准","供货状态", forge_flag=True)
-    rows_b = _install_group("垫板材料类型","垫板材料牌号","垫板材料标准","垫板材料供货状态", forge_flag=False)
+    if is_structural:
+        def _quality_grade_hook(std_val, write_db):
+            _apply_quality_grade_visibility(
+                table, param_col, value_col, viewer_instance, std_val,
+                write_db=write_db, element_name=element_name,
+            )
 
-    # ✅ 只对这 8 行绑定动态刷新
+        rows_a = _install_group(
+            "材料类型", "材料牌号", "材料标准", "供货状态",
+            forge_flag=False, quality_grade_hook=_quality_grade_hook,
+        )
+        rows_b = set()
+    else:
+        rows_a = _install_group("材料类型", "材料牌号", "材料标准", "供货状态", forge_flag=True)
+        rows_b = _install_group(
+            "垫板材料类型", "垫板材料牌号", "垫板材料标准", "垫板材料供货状态", forge_flag=False,
+        )
+
     target_rows = rows_a.union(rows_b)
     if not getattr(table, "_material_dynamic_hook_installed", False):
         def _on_cell_pressed(r, c):
-            if c != value_col or r not in target_rows:  # ✅ 限定只作用于 8 行
+            if c != value_col or r not in target_rows:
                 return
             pname_item = table.item(r, param_col)
             pname = pname_item.text().strip() if pname_item else ""
             if pname not in NAMES_SET:
                 return
-            # 简单策略：重新执行安装逻辑
             install_material_delegate_linkage(table, param_col, value_col, viewer_instance)
+
         table.cellPressed.connect(_on_cell_pressed)
         table._material_dynamic_hook_installed = True
 
-    # ✅ 绑定 itemChanged → 使用统一刷新逻辑，覆盖非代理变更场景，避免旧候选残留
     def _on_item_changed_material(item):
         try:
             on_material_delegate_changed(table, item, param_col, value_col, viewer_instance)
         except Exception:
             pass
+
+    _prev_ss = getattr(table, "_on_structural_steel_material_changed", None)
+    if callable(_prev_ss):
+        try:
+            table.itemChanged.disconnect(_prev_ss)
+        except Exception:
+            pass
+    table._on_structural_steel_material_changed = None
+
     try:
         table.itemChanged.disconnect(_on_item_changed_material)
     except Exception:

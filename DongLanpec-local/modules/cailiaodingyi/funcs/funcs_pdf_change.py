@@ -1986,74 +1986,89 @@ def uses_structural_steel_material(element_name: str) -> bool:
     name = (element_name or "").strip()
     if not name:
         return False
+    whitelist = _load_structural_steel_element_whitelist()
+    return name in whitelist
+
+
+# 结构钢材料元件表白名单缓存
+_STRUCTURAL_STEEL_ELEMENT_WHITELIST: Optional[set] = None
+
+
+def invalidate_structural_steel_element_whitelist():
+    global _STRUCTURAL_STEEL_ELEMENT_WHITELIST
+    _STRUCTURAL_STEEL_ELEMENT_WHITELIST = None
+
+
+def _load_structural_steel_element_whitelist(force_reload: bool = False) -> set:
+    """加载 材料库.结构钢材料元件表 → {元件名称}。"""
+    global _STRUCTURAL_STEEL_ELEMENT_WHITELIST
+    if _STRUCTURAL_STEEL_ELEMENT_WHITELIST is not None and not force_reload:
+        return _STRUCTURAL_STEEL_ELEMENT_WHITELIST
+    names = set()
     conn = get_connection(**db_config_2)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM `结构钢材料元件表` WHERE `元件名称` = %s LIMIT 1",
-                (name,),
-            )
-            return cur.fetchone() is not None
+            cur.execute("SELECT `元件名称` FROM `结构钢材料元件表`")
+            for row in cur.fetchall() or []:
+                if isinstance(row, dict):
+                    n = str(row.get("元件名称") or "").strip()
+                else:
+                    n = str(row[0] or "").strip() if row else ""
+                if n:
+                    names.add(n)
+        _STRUCTURAL_STEEL_ELEMENT_WHITELIST = names
     except Exception as e:
-        print(f"[结构钢材料] 白名单查询失败: element={name}, err={e}")
-        return False
+        print(f"[结构钢材料] 白名单加载失败: {e}")
+        return set()
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return names
 
 
-def get_structural_steel_material_options(selected: dict = None) -> dict:
+def get_structural_steel_material_options(selected: dict = None, element_name=None) -> dict:
     """
-    结构钢材料表候选：
-      - 材料类型 / 材料标准 / 供货状态：独立 DISTINCT（暂不互相级联）
-      - 材料牌号：已选供货状态时按供货状态过滤；未选时返回全部牌号
+    根据当前已选字段，查询结构钢材料表，返回四字段可选项（级联逻辑同材料表）。
+    element_name：可选，传入时仅对「材料类型」按元件允许材料类型表过滤。
     """
     selected = selected or {}
     material_fields = ['材料类型', '材料牌号', '材料标准', '供货状态']
+    where_parts = []
+    values = []
+    for col in material_fields:
+        val = str(selected.get(col) or '').strip()
+        if val:
+            where_parts.append(f"`{col}` = %s")
+            values.append(val)
+
+    sql = f"SELECT DISTINCT {', '.join(f'`{f}`' for f in material_fields)} FROM `结构钢材料表`"
+    if where_parts:
+        sql += " WHERE " + " AND ".join(where_parts)
+
     conn = get_connection(**db_config_2)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            result = {col: set() for col in material_fields}
-            for field in ('材料类型', '材料标准', '供货状态'):
-                cursor.execute(
-                    f"""
-                    SELECT DISTINCT `{field}` AS val
-                    FROM `结构钢材料表`
-                    WHERE `{field}` IS NOT NULL AND `{field}` <> ''
-                    ORDER BY `{field}`
-                    """
-                )
-                for row in cursor.fetchall() or []:
-                    val = str(row.get('val') or '').strip()
-                    if val:
-                        result[field].add(val)
+            cursor.execute(sql, values)
+            rows = cursor.fetchall() or []
 
-            status = str(selected.get('供货状态') or '').strip()
-            if status:
-                cursor.execute(
-                    """
-                    SELECT DISTINCT `材料牌号` AS val
-                    FROM `结构钢材料表`
-                    WHERE `供货状态` = %s
-                      AND `材料牌号` IS NOT NULL AND `材料牌号` <> ''
-                    ORDER BY `材料牌号`
-                    """,
-                    (status,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT DISTINCT `材料牌号` AS val
-                    FROM `结构钢材料表`
-                    WHERE `材料牌号` IS NOT NULL AND `材料牌号` <> ''
-                    ORDER BY `材料牌号`
-                    """
-                )
-            for row in cursor.fetchall() or []:
-                val = str(row.get('val') or '').strip()
+        result = {col: set() for col in material_fields}
+        for row in rows:
+            for col in material_fields:
+                val = row.get(col)
+                if isinstance(val, str):
+                    val = val.strip()
                 if val:
-                    result['材料牌号'].add(val)
+                    result[col].add(val)
 
-            return {col: sorted(result[col]) for col in material_fields}
+        out = {col: sorted(result[col]) for col in material_fields}
+        if element_name:
+            allowed = get_allowed_material_types(element_name)
+            if allowed is not None:
+                have = set(out.get("材料类型") or [])
+                out["材料类型"] = [t for t in allowed if t in have]
+        return out
     except Exception as e:
         print(f"[结构钢材料] 候选查询失败: selected={selected}, err={e}")
         return {col: [] for col in material_fields}
@@ -2283,8 +2298,32 @@ def get_dependency_mapping_from_db():
         conn.close()
 
 
-
-
+def get_flange_linkage_dependent_options(
+    master_param: str,
+    master_value: str,
+    dependent_param: str,
+    mapping=None,
+) -> List[str]:
+    """
+    从《法兰参数联动表》读取被联动参数的可选项。
+    有映射则返回选项列表；无映射返回空列表（调用方据此隐藏行）。
+    """
+    master_param = (master_param or "").strip()
+    master_value = (master_value or "").strip()
+    dependent_param = (dependent_param or "").strip()
+    if not (master_param and master_value and dependent_param):
+        return []
+    if mapping is None:
+        mapping = get_dependency_mapping_from_db()
+    submap = (mapping.get(master_param) or {}).get(master_value) or {}
+    opts = submap.get(dependent_param) or []
+    seen, out = set(), []
+    for o in opts:
+        s = str(o).strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 def toggle_dependent_fields(table, trigger_combo, trigger_value: str, target_field_names: list, logic="=="):
