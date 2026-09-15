@@ -12,12 +12,12 @@ from modules.cailiaodingyi.controllers.datamanager import (
 from modules.cailiaodingyi.demo import NoWheelComboBoxFilter
 from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     update_guankou_define_data,
-    update_guankou_define_status,
-    load_element_data_by_product_id, is_all_guankou_parts_defined, get_filtered_material_options,
+    refresh_guankou_define_status,
+    get_filtered_material_options,
     query_template_name_by_product
 )
 from modules.cailiaodingyi.funcs.funcs_pdf_input import (
-    move_guankou_to_first, move_guankou_attachment_to_second, update_template_input_editable_state
+    update_template_input_editable_state
 )
 from modules.condition_input.funcs.funcs_cdt_input import clear_manual_flags_for_product
 
@@ -329,18 +329,10 @@ def on_combo_changed(guankou_define_info, table, row, col, product_id, viewer_in
     # 更新管口零件定义数据库
     update_guankou_define_data(product_id, new_value, field_name, guankou_id, category_label)
 
-    element_name = "管口"
-
-    # 执行元件表中管口的更新操作
-    if (is_all_guankou_parts_defined(viewer_instance.product_id)):
-        # update_guankou_define_status(product_id, element_name)
-        update_element_info = load_element_data_by_product_id(product_id)
-        updated_element_info = move_guankou_to_first(update_element_info)
-        updated_element_info = move_guankou_attachment_to_second(updated_element_info)
-        print(f"更新后的元件列表{updated_element_info}")
-        viewer_instance.render_data_to_table(updated_element_info)
-        # 存为模板
-        # update_template_input_editable_state(viewer_instance)
+    # 按附加参数表重算管口「是否定义」并刷新左侧
+    refresh_guankou_define_status(viewer_instance.product_id, viewer_instance)
+    # 存为模板
+    # update_template_input_editable_state(viewer_instance)
 
 
 def on_material_field_changed_row(table: QTableWidget, row: int):

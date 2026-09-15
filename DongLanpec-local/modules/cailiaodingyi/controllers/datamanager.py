@@ -37,10 +37,10 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     load_element_data_by_product_id,
     load_element_additional_data_by_product,
     update_guankou_define_data,
-    update_guankou_define_status,
     load_updated_guankou_define_data,
     update_guankou_param,
-    load_guankou_para_data_leibie, is_all_guankou_parts_defined, get_filtered_material_options,
+    load_guankou_para_data_leibie, refresh_guankou_define_status,
+    get_filtered_material_options,
     get_allowed_material_types, parse_component_names_cell,
     get_structural_steel_material_options, uses_structural_steel_material, save_image,
     get_flange_linkage_dependent_options,
@@ -452,7 +452,11 @@ def on_clear_guankou_param_update(viewer_instance):
     except Exception as e:
         print("[数据库错误] 当前材料清空管口分类失败：", e)
 
-
+    # 6) 清空后按附加参数表重算左侧「是否定义」
+    try:
+        refresh_guankou_define_status(viewer_instance.product_id, viewer_instance)
+    except Exception as e:
+        print(f"[管口定义] 清空后刷新定义状态失败: {e}")
 
 
 def _clear_other_params_for_tab_mapped(viewer_instance, table_param, product_id, tab_name,
@@ -540,18 +544,8 @@ def on_combo_changed(viewer_instance, table, col, category_label):
     # guankou_additional_info = load_guankou_para_data(guankou_id)
     update_guankou_define_data(viewer_instance.product_id, new_value, field_name, guankou_id, category_label)
 
-    element_name = "管口"
-
-    if (is_all_guankou_parts_defined(viewer_instance.product_id)):
-        define_status = "已定义"
-    else:
-        define_status = "未定义"
-
-    update_guankou_define_status(viewer_instance.product_id, element_name, define_status)
-    update_element_info = load_element_data_by_product_id(viewer_instance.product_id)
-    update_element_info = move_guankou_to_first(update_element_info)
-    update_element_info = move_guankou_attachment_to_second(update_element_info)
-    viewer_instance.render_data_to_table(update_element_info)
+    # 管口是否定义：按附加参数表重算（与当前材料分类 Tab 结构一致）
+    refresh_guankou_define_status(viewer_instance.product_id, viewer_instance)
     # 存为模板
     # update_template_input_editable_state(viewer_instance)
 
@@ -1325,6 +1319,10 @@ def make_on_fixed_tube_covering_changed_v2(component_info_copy, viewer_instance_
 
 MATERIAL_FIELDS = ("材料类型", "材料牌号", "材料标准", "供货状态")
 STRUCTURAL_STEEL_MATERIAL_FIELDS = ("材料类型", "材料牌号", "材料标准", "供货状态")
+# 膨胀节：材料四字段参数名非通用名（供货状态对应「波纹管管坯供货状态」；「波纹管供货状态」为其它参数）
+EXPANSION_JOINT_MATERIAL_FIELDS = (
+    "波纹管材料类型", "波纹管材料牌号", "波纹管材料标准", "波纹管管坯供货状态",
+)
 
 
 def _element_name_for_material_linkage(viewer_instance, table=None, param_col=0, value_col=1) -> str:
@@ -1523,8 +1521,9 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
     """
     渲染完成后调用：
       - 只处理 【材料类型/牌号/标准/供货状态】 和 【垫板材料类型/牌号/标准/供货状态】
-      - 给这 8 行安装 MaterialInstantDelegate，四字段级联逻辑统一
-      - 结构钢白名单元件（如加强圈）：同逻辑，数据来自结构钢材料表；额外联动质量等级
+      - 膨胀节：【波纹管材料类型/牌号/标准/管坯供货状态】
+      - 给上述行安装 MaterialInstantDelegate，四字段级联逻辑统一
+      - 结构钢白名单元件（加强圈/膨胀节等）：同逻辑，候选来自材料表并按元件名称列收窄；加强圈额外联动质量等级
       - A 组触发锻件级别显隐（结构钢元件跳过）；B 组不触发
     """
     element_name = _element_name_for_material_linkage(viewer_instance, table, param_col, value_col)
@@ -1549,6 +1548,7 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
     NAMES_ALL = [
         "材料类型", "材料牌号", "材料标准", "供货状态",
         "垫板材料类型", "垫板材料牌号", "垫板材料标准", "垫板材料供货状态",
+        "波纹管材料类型", "波纹管材料牌号", "波纹管材料标准", "波纹管管坯供货状态",
     ]
     NAMES_SET = set(NAMES_ALL)
     part_filter = _part_names_for_material_type_filter(viewer_instance, table, param_col, value_col)
@@ -1584,7 +1584,10 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
 
     def _mat_opts(selected: dict):
         if is_structural:
-            return get_structural_steel_material_options(selected, element_name=part_filter) or {}
+            # 白名单：材料表按元件名称列收窄；类型限制仍用 part_filter
+            return get_structural_steel_material_options(
+                selected, element_name=element_name or part_filter,
+            ) or {}
         return get_filtered_material_options(selected, element_name=part_filter) or {}
 
     def _install_row_delegate(field_name, row_idx, options, on_pick):
@@ -1685,10 +1688,18 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
                 write_db=write_db, element_name=element_name,
             )
 
-        rows_a = _install_group(
-            "材料类型", "材料牌号", "材料标准", "供货状态",
-            forge_flag=False, quality_grade_hook=_quality_grade_hook,
-        )
+        if element_name == "膨胀节":
+            # 波纹管材料四字段；不联动质量等级/锻件级别
+            rows_a = _install_group(
+                *EXPANSION_JOINT_MATERIAL_FIELDS,
+                forge_flag=False, quality_grade_hook=None,
+            )
+        else:
+            # 加强圈等：通用四字段名 + 质量等级
+            rows_a = _install_group(
+                *STRUCTURAL_STEEL_MATERIAL_FIELDS,
+                forge_flag=False, quality_grade_hook=_quality_grade_hook,
+            )
         rows_b = set()
     else:
         rows_a = _install_group("材料类型", "材料牌号", "材料标准", "供货状态", forge_flag=True)
@@ -2288,6 +2299,12 @@ def load_data_by_template(viewer_instance, template_name):
                     sync_corrosion_to_guankou_param(product_id, guankou_codes, lb)
             except Exception as e:
                 print(f"[警告] 模板切换后同步腐蚀裕量失败: {e}")
+
+            # 管口「是否定义」不照搬元件材料模板表：按附加参数表（含条件输入同步的开孔焊接接头系数）重算
+            try:
+                refresh_guankou_define_status(product_id, viewer_instance)
+            except Exception as e:
+                print(f"[管口定义] 切换模板后刷新定义状态失败: {e}")
 
             # 切换模板后按库中分类刷新 tab（不再写死管程/壳程）
             category_tab_map = query_all_guankou_categories_with_tab_id(product_id) or {}
@@ -4297,6 +4314,12 @@ def on_confirm_guankouparam(viewer_instance):  # 已修改
         except Exception as e:
             print(f"[警告] 关闭放大窗口失败: {e}")
 
+    # 保存后按附加参数表重算左侧「是否定义」（所有 Tab 必填项齐才算已定义）
+    try:
+        refresh_guankou_define_status(viewer_instance.product_id, viewer_instance)
+    except Exception as e:
+        print(f"[管口定义] 确定后刷新定义状态失败: {e}")
+
     box = QMessageBox(QMessageBox.Information, "提示", f"{tab_name} 已保存管口号：{selected_text or '无'}", QMessageBox.NoButton, viewer_instance)
     box.addButton("确认", QMessageBox.AcceptRole)
     exec_message_box(box)
@@ -5020,7 +5043,8 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
     # ===== 常量集合 =====
     MATERIAL_FIELDS = {
         "材料类型", "材料牌号", "材料标准", "供货状态",
-        "垫板材料类型", "垫板材料牌号", "垫板材料标准", "垫板材料供货状态"
+        "垫板材料类型", "垫板材料牌号", "垫板材料标准", "垫板材料供货状态",
+        "波纹管材料类型", "波纹管材料牌号", "波纹管材料标准", "波纹管管坯供货状态",
     }
     COVERING_SWITCH_GLOBAL = {"是否添加覆层"}
     COVERING_SWITCH_SIDED  = {"管程侧是否添加覆层", "壳程侧是否添加覆层"}
@@ -8045,13 +8069,15 @@ def sync_fastener_stud_root_series_template_value() -> Optional[str]:
             )
             updated_rows = cursor.rowcount or 0
         conn.commit()
-        if updated_rows <= 0:
-            print(f"[设备法兰紧固件] 螺柱根径系列同步未命中任何记录，目标值={default_series}")
-        else:
-            print(f"[设备法兰紧固件] 已同步螺柱根径系列记录数: {updated_rows}，目标值={default_series}")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            if updated_rows <= 0:
+                print(f"[设备法兰紧固件] 螺柱根径系列同步未命中任何记录，目标值={default_series}")
+            else:
+                print(f"[设备法兰紧固件] 已同步螺柱根径系列记录数: {updated_rows}，目标值={default_series}")
     except Exception as e:
         conn.rollback()
-        print(f"[设备法兰紧固件] 同步材料库螺柱根径系列失败: {e}")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[设备法兰紧固件] 同步材料库螺柱根径系列失败: {e}")
         return None
     finally:
         conn.close()
@@ -13061,13 +13087,15 @@ def update_insulation_support_material_status(product_id, element_id, is_complet
                 cursor.execute(sql, (define_status, product_id, element_id))
                 updated_count = cursor.rowcount
                 connection.commit()
-                print(f"[保温装置状态更新] 产品{product_id} 保温装置元件定义状态已更新为: {define_status} (更新了{updated_count}行)")
+                if DEBUG_VERBOSE_DEFINE_UI:
+                    print(f"[保温装置状态更新] 产品{product_id} 保温装置元件定义状态已更新为: {define_status} (更新了{updated_count}行)")
         finally:
             connection.close()
     except Exception as e:
-        print(f"[保温装置状态更新] 更新失败: {e}")
-        import traceback
-        traceback.print_exc()
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[保温装置状态更新] 更新失败: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def refresh_insulation_define_status(product_id, element_id=None) -> bool:
@@ -13093,7 +13121,8 @@ def refresh_insulation_define_status(product_id, element_id=None) -> bool:
         update_insulation_support_material_status(product_id, element_id, bool(is_complete))
         return bool(is_complete)
     except Exception as e:
-        print(f"[保温装置] 刷新定义状态失败: {e}")
+        if DEBUG_VERBOSE_DEFINE_UI:
+            print(f"[保温装置] 刷新定义状态失败: {e}")
         return False
 
 

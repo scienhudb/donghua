@@ -70,7 +70,9 @@ def invalidate_user_config_value_caches():
 # 多选共同编辑的详细日志 [多选模式]/[DBG][multi]/[多选] 批量ID 等；常驻简短提示 [multi] 进入模式/保存成功 在 datamanager 中始终打印。
 # 批量替换过程日志 [批量替换]/[批量替换-材料表同步]/[批量替换-跳过组] 等（界面 tip/弹窗始终保留）。
 # 另：参数表 [更新]、update_left_table_db_from_param_table 过程、[调试] DB必填、
-# check_dianpian 中 [垫片校验]/[设计压力校验]/[直径校验]/[温度校验]/[条件保存后] 等控制台输出亦受本开关控制
+# check_dianpian 中 [垫片校验]/[设计压力校验]/[直径校验]/[温度校验]/[条件保存后] 等控制台输出亦受本开关控制；
+# 结构树相关 [结构树]、[结构树][膨胀节]、[结构树][保温装置] 等控制台输出亦受本开关控制；
+# 预定义保存联动 [预定义→元件定义同步]、[保温装置状态更新]、[设备法兰紧固件] 螺柱根径系列同步等亦受本开关控制
 DEBUG_VERBOSE_DEFINE_UI = False
 
 # [性能优化] 以下缓存用于减少数据库重复查询，加快垫片相关联动与校核响应
@@ -829,6 +831,21 @@ def update_left_table_db_from_param_table(param_table: QTableWidget, product_id:
 
         return ""  # 如果没有找到对应项，返回空字符串
 
+    # 左侧元件材料表列名为通用四字段；膨胀节右侧为波纹管* 别名，按序取第一个非空
+    _MATERIAL_PARAM_ALIASES = {
+        "材料类型": ("材料类型", "波纹管材料类型"),
+        "材料牌号": ("材料牌号", "波纹管材料牌号"),
+        "材料标准": ("材料标准", "波纹管材料标准"),
+        "供货状态": ("供货状态", "波纹管管坯供货状态"),
+    }
+
+    def get_material_param(canonical: str) -> str:
+        for alias in _MATERIAL_PARAM_ALIASES.get(canonical, (canonical,)):
+            val = get_param(alias)
+            if val:
+                return val
+        return ""
+
     try:
         required = query_required_paramlist_csv(part_name)  # set[str]
     except Exception as e:
@@ -845,14 +862,16 @@ def update_left_table_db_from_param_table(param_table: QTableWidget, product_id:
 
     # === 以下保持你的原有写库逻辑 ===
     is_gasket = "垫片" in part_name
-    is_fixed_tube_sheet = (part_name == "固定管板")
+    # 管/壳双侧覆层开关：任一侧=是 => 左侧材料表写「有覆层」
+    SIDED_COVERING_PARTS = {"固定管板", "浮动管板", "浮头法兰", "球冠形封头"}
+    is_sided_covering_part = part_name in SIDED_COVERING_PARTS
     
     if DEBUG_VERBOSE_DEFINE_UI:
         tags = []
         if is_gasket:
             tags.append("垫片")
-        if is_fixed_tube_sheet:
-            tags.append("固定管板")
+        if is_sided_covering_part:
+            tags.append("双侧覆层")
         tag_s = f" ({'/'.join(tags)})" if tags else ""
         print(
             f"[update_left_table_db_from_param_table]{tag_s} {part_name} "
@@ -873,13 +892,13 @@ def update_left_table_db_from_param_table(param_table: QTableWidget, product_id:
                     print(f"[update_left_table_db_from_param_table] 垫片写库 rowcount={cursor.rowcount}")
 
             else:
-                material_type     = get_param("材料类型")
-                material_brand    = get_param("材料牌号")
-                supply_status     = get_param("供货状态")
-                material_standard = get_param("材料标准")
+                material_type     = get_material_param("材料类型")
+                material_brand    = get_material_param("材料牌号")
+                supply_status     = get_material_param("供货状态")
+                material_standard = get_material_param("材料标准")
 
-                # 固定管板：管/壳侧任一覆层=是 => 有覆层
-                if is_fixed_tube_sheet:
+                # 固定管板/浮动管板/浮头法兰/球冠形封头：管/壳侧任一覆层=是 => 有覆层
+                if is_sided_covering_part:
                     guancheng_covering = get_param("管程侧是否添加覆层")
                     kecheng_covering   = get_param("壳程侧是否添加覆层")
                     has_coating = "有覆层" if (guancheng_covering == "是" or kecheng_covering == "是") else "无覆层"
@@ -1460,68 +1479,110 @@ def load_guankou_define_leibie(category_label, product_id, select_template):
         connection.close()
 
 
+# 管口「是否定义」必填：单值参数（附加参数表按类别存）
+GUANKOU_DEFINE_SINGLE_PARAMS = (
+    "接管与壳体连接结构型式",
+    "所属元件开孔处焊接接头系数",
+    "管口连接型式",
+)
+
+# 材料组：每组四字段；多列时任一列四字段齐即可（不必三列都填）
+GUANKOU_DEFINE_MATERIAL_GROUPS = (
+    ("接管材料类型", "接管材料牌号", "接管材料标准", "接管供货状态"),
+    ("接管法兰材料类型", "接管法兰材料牌号", "接管法兰材料标准", "接管法兰供货状态"),
+)
+
+
+def _is_empty_guankou_param_val(val) -> bool:
+    return val is None or str(val).strip() == ""
+
+
+def _guankou_material_group_defined(param_dict: dict, field_bases: tuple) -> bool:
+    """
+    材料四字段是否已定义：
+    - 有 1/2/3 后缀：任一列的四字段都非空即可
+    - 无后缀旧数据：四个基础名都非空即可
+    """
+    has_indexed = any(
+        f"{base}{i}" in param_dict
+        for base in field_bases
+        for i in (1, 2, 3)
+    )
+    if has_indexed:
+        for i in (1, 2, 3):
+            if all(
+                not _is_empty_guankou_param_val(param_dict.get(f"{base}{i}"))
+                for base in field_bases
+            ):
+                return True
+        return False
+
+    return all(
+        not _is_empty_guankou_param_val(param_dict.get(base))
+        for base in field_bases
+    )
+
+
 def is_all_guankou_parts_defined(product_id: int) -> bool:
     """
-    最终版：综合管口定义表 + 管口参数表完整性校验
+    按【产品设计活动表_管口附加参数表】判定管口是否已定义。
+    规则：每个材料分类 Tab（类别）下，下列参数均满足才算已定义；任一 Tab 缺项 → 未定义。
+    - 单值：接管与壳体连接结构型式 / 所属元件开孔处焊接接头系数 / 管口连接型式
+    - 材料组（接管 / 接管法兰）：类型/牌号/标准/供货状态；多列时任一列四字段齐即可
     """
-    覆层相关字段 = [
-        "覆层材料类型", "覆层材料牌号", "覆层材料级别",
-        "覆层材料标准", "覆层成型工艺", "覆层使用状态", "覆层厚度"
-    ]
+    if not product_id:
+        return False
 
     connection = get_connection(**db_config_1)
     try:
         with connection.cursor() as cursor:
-            # 获取所有管口零件ID
             cursor.execute("""
-                SELECT 管口零件ID, 零件名称, 材料类型, 材料牌号, 材料标准, 供货状态 
-                FROM 产品设计活动表_管口零件材料表
-                WHERE 产品ID = %s
+                SELECT DISTINCT 类别
+                FROM 产品设计活动表_管口附加参数表
+                WHERE 产品ID = %s AND 类别 IS NOT NULL AND 类别 != ''
+                ORDER BY 类别
             """, (product_id,))
-            guankou_rows = cursor.fetchall()
+            categories = []
+            for row in cursor.fetchall() or []:
+                cat = (row.get("类别") if isinstance(row, dict) else row[0]) or ""
+                cat = str(cat).strip()
+                if cat:
+                    categories.append(cat)
 
-            guankou_ids = []
-            for row in guankou_rows:
-                guankou_id = row["管口零件ID"]
-                guankou_ids.append(guankou_id)
+            if not categories:
+                print("[管口定义] 无材料分类，判定为未定义")
+                return False
 
-                # 先检查零件定义表字段
-                for field in ["材料类型", "材料牌号", "材料标准", "供货状态"]:
-                    val = row[field]
-                    if val is None or str(val).strip() == "":
-                        print(f"[未定义] 零件ID {guankou_id} 的 {field} 为空")
-                        return False
-
-            print(f"管口零件ID: {guankou_ids}")
-
-            # 再检查参数表
-            for guankou_id in guankou_ids:
+            for category in categories:
                 cursor.execute("""
-                    SELECT 参数名称, 参数值 FROM 产品设计活动表_管口零件材料参数表
-                    WHERE 产品ID = %s AND 管口零件ID = %s
-                """, (product_id, guankou_id))
-                rows = cursor.fetchall()
+                    SELECT 参数名称, 参数值
+                    FROM 产品设计活动表_管口附加参数表
+                    WHERE 产品ID = %s AND 类别 = %s
+                """, (product_id, category))
+                param_dict = {}
+                for row in cursor.fetchall() or []:
+                    if isinstance(row, dict):
+                        pname = (row.get("参数名称") or "").strip()
+                        pval = row.get("参数值")
+                    else:
+                        pname = (row[0] or "").strip() if row else ""
+                        pval = row[1] if row and len(row) > 1 else None
+                    if pname:
+                        param_dict[pname] = pval
 
-                param_dict = {row["参数名称"]: row["参数值"] for row in rows}
-
-                has_covering = param_dict.get("是否添加覆层", "").strip()
-                if not has_covering:
-                    has_covering = "无覆层"
-
-                # 先检查通用参数（排除覆层字段）
-                for pname, pval in param_dict.items():
-                    if pname in 覆层相关字段:
-                        continue
-                    if pval is None or str(pval).strip() == "":
-                        print(f"[未定义] 零件ID {guankou_id} 的参数 {pname} 为空")
+                for pname in GUANKOU_DEFINE_SINGLE_PARAMS:
+                    if _is_empty_guankou_param_val(param_dict.get(pname)):
+                        print(f"[管口未定义] 类别={category} 参数={pname} 为空")
                         return False
 
-                if has_covering == "是":
-                    for field in 覆层相关字段:
-                        val = param_dict.get(field, "")
-                        if val is None or str(val).strip() == "":
-                            print(f"[未定义] 零件ID {guankou_id} 的覆层参数 {field} 为空")
-                            return False
+                for field_bases in GUANKOU_DEFINE_MATERIAL_GROUPS:
+                    if not _guankou_material_group_defined(param_dict, field_bases):
+                        group_label = "/".join(field_bases)
+                        print(
+                            f"[管口未定义] 类别={category} 材料组未定义"
+                            f"（需任一列四字段齐）: {group_label}"
+                        )
+                        return False
 
             return True
 
@@ -1530,6 +1591,32 @@ def is_all_guankou_parts_defined(product_id: int) -> bool:
         return False
     finally:
         connection.close()
+
+
+def refresh_guankou_define_status(product_id, viewer_instance=None) -> bool:
+    """
+    按附加参数表重算管口「是否定义」，写回元件材料表；若传入 viewer 则刷新左侧材料表。
+    """
+    if not product_id:
+        return False
+    is_defined = is_all_guankou_parts_defined(product_id)
+    define_status = "已定义" if is_defined else "未定义"
+    update_guankou_define_status(product_id, "管口", define_status)
+    print(f"[管口定义] 产品{product_id} 定义状态={define_status}")
+
+    if viewer_instance is not None and hasattr(viewer_instance, "render_data_to_table"):
+        try:
+            from modules.cailiaodingyi.funcs.funcs_pdf_input import (
+                move_guankou_to_first,
+                move_guankou_attachment_to_second,
+            )
+            updated = load_element_data_by_product_id(product_id)
+            updated = move_guankou_to_first(updated)
+            updated = move_guankou_attachment_to_second(updated)
+            viewer_instance.render_data_to_table(updated)
+        except Exception as e:
+            print(f"[管口定义] 刷新左侧材料表失败: {e}")
+    return is_defined
 
 
 #6.12覆层新增
@@ -1939,30 +2026,73 @@ def parse_component_names_cell(raw: str) -> List[str]:
     return [s]
 
 
-def get_filtered_material_options(selected: dict = None, element_name=None) -> dict:
+def _normalize_material_scope_names(element_name) -> List[str]:
+    """元件名 → 非空名称列表（支持 str / list / tuple / set）。"""
+    if isinstance(element_name, (list, tuple, set)):
+        return [str(x).strip() for x in element_name if str(x).strip()]
+    n = (element_name or "").strip()
+    return [n] if n else []
+
+
+def _parse_material_element_name_tags(raw) -> List[str]:
+    """
+    解析材料表.元件名称单元格：
+      - 空 / all → 通用（返回空列表，由调用方解释）
+      - 「加强圈、膨胀节」→ ['加强圈', '膨胀节']
+    """
+    s = ("" if raw is None else str(raw)).strip()
+    if not s or s.upper() == "ALL":
+        return []
+    return [p.strip() for p in re.split(r"[、,，]", s) if p.strip()]
+
+
+def _material_row_matches_scope(element_cell, scope_names: List[str]) -> bool:
+    """白名单过滤：元件名称列点名到 scope 中任一名称即命中（不含空/all 通用行）。"""
+    if not scope_names:
+        return False
+    tags = _parse_material_element_name_tags(element_cell)
+    if not tags:
+        return False
+    scope_set = set(scope_names)
+    return any(t in scope_set for t in tags)
+
+
+def get_filtered_material_options(selected: dict = None, element_name=None,
+                                  scope_element_name=None) -> dict:
     """
     根据当前已选字段，查询材料表，返回所有材料字段的可选项。
-    element_name：可选，传入时仅对「材料类型」按下拉限制表过滤；牌号/标准/供货状态仍按级联条件查询。
+    element_name：可选，传入时仅对「材料类型」按元件允许材料类型表过滤；牌号/标准/供货状态仍按级联条件查询。
+    scope_element_name：可选，结构钢白名单元件专用——只保留「元件名称」列点名到该元件的行；
+      不传则读材料表全部行（含已填元件名称的行；空/all 为通用行，也在全量结果中）。
     """
     selected = selected or {}
     material_fields = ['材料类型', '材料牌号', '材料标准', '供货状态']
-    where_clause = " AND ".join(f"{col} = %s" for col in selected if selected[col])
-    values = [selected[col] for col in selected if selected[col]]
+    scope_names = _normalize_material_scope_names(scope_element_name)
+    where_parts = []
+    values = []
+    for col in material_fields:
+        val = selected.get(col)
+        if val:
+            where_parts.append(f"`{col}` = %s")
+            values.append(val)
 
-    sql = f"SELECT DISTINCT {', '.join(material_fields)} FROM 材料表"
-    if where_clause:
-        sql += " WHERE " + where_clause
+    select_cols = material_fields + (["元件名称"] if scope_names else [])
+    sql = f"SELECT DISTINCT {', '.join(f'`{c}`' for c in select_cols)} FROM `材料表`"
+    if where_parts:
+        sql += " WHERE " + " AND ".join(where_parts)
 
     connection = pymysql.connect(**db_config_2)
     try:
         with connection.cursor(pymysql.cursors.DictCursor) as cursor:
             cursor.execute(sql, values)
-            rows = cursor.fetchall()
+            rows = cursor.fetchall() or []
 
         result = {col: set() for col in material_fields}
         for row in rows:
+            if scope_names and not _material_row_matches_scope(row.get("元件名称"), scope_names):
+                continue
             for col in material_fields:
-                val = row[col]
+                val = row.get(col)
                 if isinstance(val, str):
                     val = val.strip()
                 # 跳过空/NULL，避免 sorted 混入 None 报错
@@ -1982,7 +2112,7 @@ def get_filtered_material_options(selected: dict = None, element_name=None) -> d
 
 
 def uses_structural_steel_material(element_name: str) -> bool:
-    """查结构钢材料元件表白名单：命中则走结构钢材料表逻辑，否则走原材料表。"""
+    """查结构钢材料元件表白名单：命中则按材料表.元件名称收窄候选，否则读材料表全量。"""
     name = (element_name or "").strip()
     if not name:
         return False
@@ -2030,50 +2160,18 @@ def _load_structural_steel_element_whitelist(force_reload: bool = False) -> set:
 
 def get_structural_steel_material_options(selected: dict = None, element_name=None) -> dict:
     """
-    根据当前已选字段，查询结构钢材料表，返回四字段可选项（级联逻辑同材料表）。
-    element_name：可选，传入时仅对「材料类型」按元件允许材料类型表过滤。
+    结构钢白名单元件（加强圈/膨胀节等）四字段候选：
+      查材料表，仅保留「元件名称」列点名到该元件的行；级联逻辑同普通材料表。
+    element_name：用于范围过滤，并可选再按元件允许材料类型表收窄「材料类型」。
     """
-    selected = selected or {}
     material_fields = ['材料类型', '材料牌号', '材料标准', '供货状态']
-    where_parts = []
-    values = []
-    for col in material_fields:
-        val = str(selected.get(col) or '').strip()
-        if val:
-            where_parts.append(f"`{col}` = %s")
-            values.append(val)
-
-    sql = f"SELECT DISTINCT {', '.join(f'`{f}`' for f in material_fields)} FROM `结构钢材料表`"
-    if where_parts:
-        sql += " WHERE " + " AND ".join(where_parts)
-
-    conn = get_connection(**db_config_2)
     try:
-        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            cursor.execute(sql, values)
-            rows = cursor.fetchall() or []
-
-        result = {col: set() for col in material_fields}
-        for row in rows:
-            for col in material_fields:
-                val = row.get(col)
-                if isinstance(val, str):
-                    val = val.strip()
-                if val:
-                    result[col].add(val)
-
-        out = {col: sorted(result[col]) for col in material_fields}
-        if element_name:
-            allowed = get_allowed_material_types(element_name)
-            if allowed is not None:
-                have = set(out.get("材料类型") or [])
-                out["材料类型"] = [t for t in allowed if t in have]
-        return out
+        return get_filtered_material_options(
+            selected, element_name=element_name, scope_element_name=element_name,
+        )
     except Exception as e:
-        print(f"[结构钢材料] 候选查询失败: selected={selected}, err={e}")
+        print(f"[结构钢材料] 候选查询失败: selected={selected}, element={element_name}, err={e}")
         return {col: [] for col in material_fields}
-    finally:
-        conn.close()
 
 
 def save_image(component_id, image_path, product_id):

@@ -38,12 +38,14 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import load_guankou_para_data_
     load_updated_guankou_define_data, load_update_element_data, load_update_guankou_define_data, \
     load_update_guankou_para_data, load_update_element_merged_para_data, load_update_guankou_attachment_para_data, \
     get_design_params_by_product_id, query_template_id, query_guankou_codes, \
-    DEBUG_VERBOSE_DEFINE_UI
+    refresh_guankou_define_status, DEBUG_VERBOSE_DEFINE_UI
 from modules.cailiaodingyi.controllers.structure_tree import (
     apply_structure_tree_selection,
+    augment_structure_tree_for_expansion_joint,
     build_initial_visible_and_mandatory,
     mandatory_ids_for_elements,
     show_structure_tree_dialog,
+    sync_expansion_joint_visibility_for_product,
     visible_ids_from_rows,
 )
 from modules.cailiaodingyi.controllers.style import (
@@ -639,6 +641,8 @@ class DesignParameterDefineInputerViewer(QWidget):
             return
 
         value_map = {}
+        covering_seen = False
+        covering_any_yes = False
 
         try:
             rows = load_element_additional_data_by_product(self.product_id, element_id) or []
@@ -662,12 +666,13 @@ class DesignParameterDefineInputerViewer(QWidget):
                 elif norm_name == "供货状态":
                     value_map["供货状态"] = pval
                 elif norm_name == "是否添加覆层":
+                    # 管/壳双侧：任一侧=是 => 有覆层（避免后遍历的“否”盖掉前侧的“是”）
+                    covering_seen = True
                     if pval == "是":
-                        value_map["有无覆层"] = "有覆层"
-                    elif pval == "否":
-                        value_map["有无覆层"] = "无覆层"
-                    else:
-                        value_map["有无覆层"] = pval
+                        covering_any_yes = True
+
+            if covering_seen:
+                value_map["有无覆层"] = "有覆层" if covering_any_yes else "无覆层"
 
             if not value_map:
                 if DEBUG_VERBOSE_DEFINE_UI:
@@ -1072,6 +1077,8 @@ class DesignParameterDefineInputerViewer(QWidget):
             return
 
         value_map = {}
+        covering_seen = False
+        covering_any_yes = False
 
         for row in rows:
             pname = str(row.get("参数名称", "")).strip()
@@ -1098,10 +1105,13 @@ class DesignParameterDefineInputerViewer(QWidget):
             elif norm_name == "供货状态":
                 value_map["供货状态"] = pval
             elif norm_name == "是否添加覆层":
+                # 管/壳双侧：任一侧=是 => 有覆层（避免后遍历的“否”盖掉前侧的“是”）
+                covering_seen = True
                 if pval == "是":
-                    value_map["有无覆层"] = "有覆层"
-                elif pval == "否":
-                    value_map["有无覆层"] = "无覆层"
+                    covering_any_yes = True
+
+        if covering_seen:
+            value_map["有无覆层"] = "有覆层" if covering_any_yes else "无覆层"
 
         if not value_map:
             return
@@ -2738,7 +2748,7 @@ class DesignParameterDefineInputerViewer(QWidget):
     def can_replace_guankou_row(self, all_rows, current_row):
         """
         管口附加参数表中，判断当前行是否允许参与材料批量替换
-        补强圈：只有“是否使用补强圈”为 是 / 程序推荐 时才允许替换
+        补强圈：只有“是否使用补强圈”为 程序推荐 时才允许替换
         """
         pname = str(current_row.get("参数名称", "")).strip()
 
@@ -2751,7 +2761,7 @@ class DesignParameterDefineInputerViewer(QWidget):
                 use_val = str(row.get("参数值", "")).strip()
                 break
 
-        return use_val in {"是", "程序推荐"}
+        return use_val == "程序推荐"
 
     def _normalize_material_display_value(self, raw):
         if raw is None:
@@ -3063,6 +3073,12 @@ class DesignParameterDefineInputerViewer(QWidget):
         insert_guankou_param_leibie(self.product_id, tab_label, select_template, guankou_para_info,
                                     keep_values=True, tab_id=new_tab_id)
         print(f"[调试] 已将 {len(guankou_para_info)} 条参数数据插入到数据库（类别: {tab_label}, Tab_ID: {new_tab_id}）")
+
+        # 新建 Tab 参数为空 → 管口整体应为未定义，重算左侧状态
+        try:
+            refresh_guankou_define_status(self.product_id, self)
+        except Exception as e:
+            print(f"[管口定义] 新建Tab后刷新定义状态失败: {e}")
 
         old_ref = getattr(self, "tableWidget_guankou", None)
         self.tableWidget_guankou = table_guankou
@@ -3412,6 +3428,13 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         # 延迟结束删除态并强制刷新当前页（删后面 tab 时前面页不会自动 currentChanged）
         QTimer.singleShot(0, _finish_remove)
+
+        # 删 Tab 后按剩余分类重算左侧「是否定义」
+        try:
+            if getattr(self, "product_id", None):
+                refresh_guankou_define_status(self.product_id, self)
+        except Exception as e:
+            print(f"[管口定义] 删除Tab后刷新定义状态失败: {e}")
 
     def on_tab_double_clicked(self, index):
         """更改tab页标题"""
@@ -4253,7 +4276,8 @@ class DesignParameterDefineInputerViewer(QWidget):
             )
             reconcile_insulation_merged_para_with_attachment(self.product_id)
         except Exception as e:
-            print(f"[结构树][保温装置] 合并表对齐失败: {e}")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[结构树][保温装置] 合并表对齐失败: {e}")
 
     def _finish_initial_structure_tree_ui(self):
         """结构树首次确认后，刷新界面并恢复工具栏。"""
@@ -4291,7 +4315,8 @@ class DesignParameterDefineInputerViewer(QWidget):
             )
             schedule_readonly_for_element_define_viewer(self)
         except Exception as _e_ro:
-            print(f"[结构树] schedule readonly: {_e_ro}")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[结构树] schedule readonly: {_e_ro}")
 
         self._schedule_part_image_refresh()
 
@@ -4318,6 +4343,30 @@ class DesignParameterDefineInputerViewer(QWidget):
         rows = load_element_info(self.product_id, only_visible=True)
         self._sync_element_maps_and_render_parts(rows)
 
+    def _prepare_structure_tree_lists(self, all_elements, visible_ids, mandatory_ids):
+        """保温装置默认侧 + 膨胀节按预定义 2.9.5.2 必选/左侧锁定。"""
+        visible_ids = list(visible_ids or [])
+        mandatory_ids = set(mandatory_ids or set())
+        locked_hidden_ids = set()
+        try:
+            from modules.cailiaodingyi.controllers.datamanager import (
+                augment_structure_tree_for_insulation,
+            )
+            visible_ids, mandatory_ids = augment_structure_tree_for_insulation(
+                self.product_id, all_elements, visible_ids, mandatory_ids,
+            )
+        except Exception as e:
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[结构树][保温装置] 默认放入右侧失败: {e}")
+        try:
+            visible_ids, mandatory_ids, locked_hidden_ids = augment_structure_tree_for_expansion_joint(
+                self.product_type, self.product_form, all_elements, visible_ids, mandatory_ids, locked_hidden_ids,
+            )
+        except Exception as e:
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[结构树][膨胀节] 预定义联动失败: {e}")
+        return visible_ids, mandatory_ids, locked_hidden_ids
+
     def on_structure_tree_button_clicked(self):
         if getattr(self, "_structure_tree_pending", False):
             element_original_info = getattr(self, "_pending_element_original_info", None)
@@ -4332,20 +4381,15 @@ class DesignParameterDefineInputerViewer(QWidget):
             visible_init, mandatory_ids = build_initial_visible_and_mandatory(
                 element_original_info, self.product_type, self.product_form,
             )
-            try:
-                from modules.cailiaodingyi.controllers.datamanager import (
-                    augment_structure_tree_for_insulation,
-                )
-                visible_init, mandatory_ids = augment_structure_tree_for_insulation(
-                    self.product_id, element_original_info, visible_init, mandatory_ids,
-                )
-            except Exception as e:
-                print(f"[结构树][保温装置] 默认放入右侧失败: {e}")
+            visible_init, mandatory_ids, locked_hidden = self._prepare_structure_tree_lists(
+                element_original_info, visible_init, mandatory_ids,
+            )
             result = show_structure_tree_dialog(
                 self,
                 element_original_info,
                 visible_init,
                 mandatory_ids,
+                locked_hidden_element_ids=locked_hidden,
                 title="结构树 - 请选择要显示的元件",
             )
             if result is None:
@@ -4365,20 +4409,15 @@ class DesignParameterDefineInputerViewer(QWidget):
         mandatory = mandatory_ids_for_elements(
             all_elements, self.product_type, self.product_form
         )
-        try:
-            from modules.cailiaodingyi.controllers.datamanager import (
-                augment_structure_tree_for_insulation,
-            )
-            visible_ids, mandatory = augment_structure_tree_for_insulation(
-                self.product_id, all_elements, visible_ids, mandatory,
-            )
-        except Exception as e:
-            print(f"[结构树][保温装置] 默认放入右侧失败: {e}")
+        visible_ids, mandatory, locked_hidden = self._prepare_structure_tree_lists(
+            all_elements, visible_ids, mandatory,
+        )
         result = show_structure_tree_dialog(
             self,
             all_elements,
             visible_ids,
             mandatory,
+            locked_hidden_element_ids=locked_hidden,
             title="结构树",
         )
         if result is None:
@@ -4390,14 +4429,16 @@ class DesignParameterDefineInputerViewer(QWidget):
             )
             reconcile_insulation_merged_para_with_attachment(self.product_id)
         except Exception as e:
-            print(f"[结构树][保温装置] 合并表对齐失败: {e}")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[结构树][保温装置] 合并表对齐失败: {e}")
         self._refresh_parts_table_visible_only()
         try:
             keyword = self.lineEdit_filter.text().strip() if hasattr(self, "lineEdit_filter") else ""
             if keyword:
                 self.filter_table_globally(keyword)
         except Exception as e:
-            print(f"[结构树] 刷新筛选失败: {e}")
+            if DEBUG_VERBOSE_DEFINE_UI:
+                print(f"[结构树] 刷新筛选失败: {e}")
 
     def load_original_data(self):
 
@@ -4464,6 +4505,14 @@ class DesignParameterDefineInputerViewer(QWidget):
                 ensure_insulation_device_visible_from_attachment(product_id, force=False)
             except Exception as e:
                 print(f"[保温装置] 回元件定义时同步显示失败: {e}")
+
+            # 预定义 2.9.5.2：同步膨胀节显示（勾选则加入，取消则隐藏）
+            try:
+                sync_expansion_joint_visibility_for_product(
+                    product_id, self.product_type, self.product_form,
+                )
+            except Exception as e:
+                print(f"[膨胀节] 回元件定义时同步显示失败: {e}")
 
             # 获取零件列表信息（仅显示 是否显示=是 的元件）
             element_original_info = load_element_info(product_id, only_visible=True)
@@ -4602,20 +4651,15 @@ class DesignParameterDefineInputerViewer(QWidget):
         visible_init, mandatory_ids = build_initial_visible_and_mandatory(
             element_original_info, self.product_type, self.product_form,
         )
-        try:
-            from modules.cailiaodingyi.controllers.datamanager import (
-                augment_structure_tree_for_insulation,
-            )
-            visible_init, mandatory_ids = augment_structure_tree_for_insulation(
-                self.product_id, element_original_info, visible_init, mandatory_ids,
-            )
-        except Exception as e:
-            print(f"[结构树][保温装置] 默认放入右侧失败: {e}")
+        visible_init, mandatory_ids, locked_hidden = self._prepare_structure_tree_lists(
+            element_original_info, visible_init, mandatory_ids,
+        )
         dlg_visible = show_structure_tree_dialog(
             self,
             element_original_info,
             visible_init,
             mandatory_ids,
+            locked_hidden_element_ids=locked_hidden,
             title="结构树 - 请选择要显示的元件",
         )
         if dlg_visible is None:
@@ -4661,8 +4705,19 @@ class DesignParameterDefineInputerViewer(QWidget):
                 if pid and has_product(pid):
                     reconcile_insulation_merged_para_with_attachment(pid)
                     ensure_insulation_device_visible_from_attachment(pid, force=False)
+                    expansion_changed = False
+                    try:
+                        expansion_changed = sync_expansion_joint_visibility_for_product(
+                            pid,
+                            getattr(self, "product_type", None),
+                            getattr(self, "product_form", None),
+                        )
+                    except Exception as e_exp:
+                        print(f"[膨胀节] showEvent 同步显示失败: {e_exp}")
                     # 只要活动库有保温装置行，就从库重载左表（定义状态/材料展示与库一致）
-                    need_refresh = bool(find_insulation_device_element_id(pid))
+                    need_refresh = bool(expansion_changed) or bool(
+                        find_insulation_device_element_id(pid)
+                    )
                     if not need_refresh and has_insulation_device_from_attachment(pid):
                         need_refresh = True
                     if not need_refresh:

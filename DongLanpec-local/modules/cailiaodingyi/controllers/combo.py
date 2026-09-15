@@ -423,8 +423,8 @@ class NonNegativeDoubleDelegate(QStyledItemDelegate):
 class MaterialInstantDelegate(ComboDelegate):
     """
     材料四字段（材料类型/牌号/标准/供货状态）统一代理：
-    - 普通元件与结构钢元件（如加强圈）均通过 datamanager.install_material_delegate_linkage 安装本类；
-    - 选项改变时立即写回并关闭编辑器，再回调 on_pick 做级联（结构钢额外联动质量等级）。
+    - 普通元件与结构钢白名单元件（加强圈/膨胀节等）均通过 datamanager.install_material_delegate_linkage 安装本类；
+    - 选项改变时立即写回并关闭编辑器，再回调 on_pick 做级联（加强圈额外联动质量等级）。
     - 材料牌号：与批量替换一致，可编辑文本 + 右侧下拉，手输快速筛选，不自动弹窗。
     """
     def __init__(self, options, table=None, field_name=None, on_pick=None):
