@@ -849,6 +849,8 @@ class ConfigLibraryWidget(QWidget):
             QMessageBox.critical(self, "保存失败", f"本地保存模板失败：{e}")
             return
 
+        self._update_selected_product_config()
+
         # ==========================
         # 3. 写入远程 user_config_beifen
         # ==========================
@@ -1713,6 +1715,8 @@ class ConfigLibraryWidget(QWidget):
             except Exception:
                 pass
 
+        if fallback_name:
+            self._update_selected_product_config()
         self.refresh_version_selector(select_name=fallback_name or None)
         self.reload_and_render()
 
@@ -1731,6 +1735,28 @@ class ConfigLibraryWidget(QWidget):
             f"删除前备份：\n{backup_path}\n\n"
             "可使用“恢复备份”进行不覆盖现有数据的增量恢复。"
         )
+
+    def _update_selected_product_config(self):
+        """仅在用户成功改动活动配置后更新当前产品；页面初始化不调用。"""
+        product_id = bianl.product_id
+        if not product_id:
+            return
+        try:
+            from modules.yudingyi.product_config import bind_product_to_current_config
+            from modules.chanpinguanli.predefined_column import refresh_predefined_row
+
+            bind_product_to_current_config(product_id)
+            table = bianl.product_table
+            if table is not None:
+                for row, status in bianl.product_table_row_status.items():
+                    if isinstance(status, dict) and status.get("product_id") == product_id:
+                        refresh_predefined_row(table, row, product_id)
+                        break
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "产品预定义关联更新失败",
+                f"预定义已更新，但产品 {product_id} 的预定义配置关联未能更新：\n{exc}",
+            )
 
     def ensure_initial_version_applied(self):
         """让下拉框指向 user_config 当前版本，正常情况下不复制数据。"""
@@ -1822,7 +1848,8 @@ class ConfigLibraryWidget(QWidget):
                 ORDER BY id
             """, (version_name,))
 
-        QMessageBox.information(self, "成功", f"已切换到版本：{version_name}。重启软件后生效")
+        self._update_selected_product_config()
+        QMessageBox.information(self, "成功", f"已切换到版本：{version_name}。后续强度计算将使用此配置。")
         self.reload_and_render()
         run_predefined_save_sync()
 
@@ -1930,6 +1957,8 @@ class ConfigLibraryWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "保存失败", f"本地保存版本失败：{e}")
             return
+
+        self._update_selected_product_config()
 
         # 6) 远程写入：用【本地 local_rows】生成远程 user_config_beifen（关键修正点）
         remote = self.get_remote_conn()
@@ -3230,6 +3259,10 @@ class ConfigLibraryWidget(QWidget):
             return False
         finally:
             self.conn.autocommit(True)
+
+        # 另存模板中的静默保存只是中间步骤，由外层切换到新名称后再更新产品。
+        if not silent:
+            self._update_selected_product_config()
 
         # 5. 普通保存默认不做远程同步；只有明确需要时才做
         if sync_remote:
