@@ -358,7 +358,7 @@ def check_dn(value, tip_widget, param_name, column_name, table_widget, col_index
 
         raw_product_form = _get_raw_product_form_from_product_db(table_widget)
         raw_form = raw_product_form.strip().upper() if raw_product_form else ""
-        gx_types = {"AEU", "BEU", "AES", "BES", "AKU", "BKU", "AEM", "BEM", "NEN", "NEN(HEAD)"}
+        gx_types = {"AEU", "BEU", "AES", "BES", "AKU", "BKU", "AEM", "BEM", "NEN", "NEN(H)"}
 
         if dp_val is not None:
             if raw_form in gx_types and dn_val * dp_val > 40500:
@@ -899,7 +899,7 @@ def check_design_pressure(value, tip_widget, param_name, column_name, table_widg
     - 范围 [-0.1, -0.02] U [0.1, 100]；
     - 联动：工作压力、公称直径、自定义耐压试验压力（卧/立）+ 耐压试验类型
     1）当P<-0.1MPa时，提醒：设计压力不能小于-0.1MPa！不合规。数据清空。
-    2）当-0.02MPa<P<0.1MPa时，提醒：建议按照常压容器设计。数据清空。
+    2）当-0.02MPa<P<0.1MPa时，提醒：建议按照常压容器设计。数据不清空。
     3）当P=0时，提醒：设计压力不能为0MPa！不合规。数据清空。
     4）当35MPa＜P≤100MPa时，提醒：设计压力超过规则设计标准界限！不合规。数据不清空。
     5）当P>100MPa时，提醒：设计压力超过分析设计标准界限！不合规。数据清空。
@@ -946,10 +946,12 @@ def check_design_pressure(value, tip_widget, param_name, column_name, table_widg
         return "error", "设计压力不能小于-0.1MPa！不合规。"
     if dp == 0:
         return "error", "设计压力不能为0MPa！不合规。"
-    if -0.02 < dp < 0.1:
-        return "error", "建议按照常压容器设计。"
     if dp > 100:
         return "error", "设计压力超过分析设计标准界限！不合规。"
+
+    # 常压区间 (Warn) — 不清空；优先于下方联动 error
+    if -0.02 < dp < 0.1:
+        return "warn", "建议按照常压容器设计。"
 
     if wp is not None and dp <= wp:
         return "error", "设计压力应大于工作压力。"
@@ -958,7 +960,7 @@ def check_design_pressure(value, tip_widget, param_name, column_name, table_widg
         raw_product_form = _get_raw_product_form_from_product_db(table_widget)
         if raw_product_form:
             raw_form = raw_product_form.strip().upper()
-            gx_types = {"AEU", "BEU", "AES", "BES", "AKU", "BKU", "AEM", "BEM", "NEN", "NEN(HEAD)"}
+            gx_types = {"AEU", "BEU", "AES", "BES", "AKU", "BKU", "AEM", "BEM", "NEN", "NEN(H)"}
             if raw_form in gx_types:
                 if dp * dn > 40500:
                     return "error", "设计压力（MPa）与公称直径（DN）的乘积＞4.05x10^4，不合规。"
@@ -1075,7 +1077,7 @@ def check_design_temp_max(value, tip_widget, param_name, column_name, table_widg
     except Exception:
         raw_form = ""
 
-    if raw_form in {"nen", "bem", "aem", "nen(head)"}:
+    if raw_form in {"nen", "bem", "aem", "nen(h)"}:
         avg_tube_metal_temp = None
         avg_shell_metal_temp = None
         for row in range(table_widget.rowCount()):
@@ -1178,7 +1180,7 @@ def check_design_temp_min(value, tip_widget, param_name, column_name, table_widg
     except Exception:
         raw_form = ""
 
-    if raw_form in {"nen", "bem", "aem", "nen(head)"}:
+    if raw_form in {"nen", "bem", "aem", "nen(h)"}:
         avg_tube_metal_temp = None
         avg_shell_metal_temp = None
 
