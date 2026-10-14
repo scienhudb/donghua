@@ -39,19 +39,28 @@ def collect_ordered_guankou_categories(guankou_para_info):
     return ordered
 
 
-def infer_guankou_base_tab_count(categories, product_type=None):
-    """
-    推断“初始 tab”最少保留数量：
-    - 管壳式热交换器 / 分类名含管程或壳程 → 至少 2
-    - 容器等单分类场景 → 至少 1
-    """
-    cats = [str(c).strip() for c in (categories or []) if str(c).strip()]
+def is_heat_exchanger_product_type(product_type=None) -> bool:
+    """产品类型是否为管壳式热交换器/换热器。"""
     pt = str(product_type or "").strip()
-    if any(c in ("管口材料分类-管程", "管口材料分类-壳程") for c in cats):
+    return "热交换器" in pt or "换热器" in pt
+
+
+def is_container_product_type(product_type=None) -> bool:
+    """产品类型是否为容器（含卧式/立式等）。"""
+    pt = str(product_type or "").strip()
+    return "容器" in pt
+
+
+def infer_guankou_base_tab_count(categories=None, product_type=None):
+    """
+    推断“初始 tab”最少保留数量（只按产品类型，不看当前 tab 名称）：
+    - 换热器 → 至少 2
+    - 容器及其他 → 至少 1
+    categories 参数保留以兼容旧调用，不再参与判断。
+    """
+    if is_heat_exchanger_product_type(product_type):
         return 2
-    if "热交换器" in pt or "换热器" in pt:
-        return 2
-    return 1 if cats else 1
+    return 1
 
 
 db_config_1 = {
@@ -541,21 +550,10 @@ def load_material_dropdown_values():
 
 def select_template_id(template_name, product_form, product_type):
     """
-    根据模板名称、产品类型和产品形式获取模板ID
+    根据模板名称、产品类型和产品形式获取模板ID。
+    参数顺序保持历史约定：(名称, 形式, 类型)。
     """
-    connection = pymysql.connect(**db_config_2)
-    try:
-        with connection.cursor() as cursor:
-            sql = """
-            SELECT 模板ID
-            FROM 元件材料模板表
-            WHERE 模板名称 = %s AND 所属类型 = %s AND 所属形式 = %s
-            """
-            cursor.execute(sql, (template_name, product_type, product_form))
-            result = cursor.fetchone()
-            return result[0] if result else None
-    finally:
-        connection.close()
+    return get_template_id_by_name(template_name, product_type, product_form)
 
 
 def insert_add_guankou_define(guankou_define_data, category_label, product_id, select_template, tab_id=None):
@@ -825,75 +823,161 @@ def update_template_input_editable_state(self):
 USER_SAVE_TEMPLATE_ID_START = 5000
 
 
+def _fetch_template_id_row(cursor, template_name, product_type=None, product_form=None):
+    """按名称（可选再加类型+形式）查模板ID。"""
+    if product_type is not None and product_form is not None:
+        cursor.execute(
+            """
+            SELECT 模板ID FROM 元件材料模板表
+            WHERE 模板名称 = %s AND 所属类型 = %s AND 所属形式 = %s
+            LIMIT 1
+            """,
+            (template_name, product_type, product_form),
+        )
+    else:
+        cursor.execute(
+            "SELECT 模板ID FROM 元件材料模板表 WHERE 模板名称 = %s LIMIT 1",
+            (template_name,),
+        )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return row["模板ID"] if isinstance(row, dict) else row[0]
+
+
+def _alloc_new_user_template_id(cursor) -> int:
+    """用户另存模板：从 5000 起递增。"""
+    cursor.execute(
+        "SELECT MAX(模板ID) AS max_id FROM 元件材料模板表 WHERE 模板ID >= %s",
+        (USER_SAVE_TEMPLATE_ID_START,),
+    )
+    max_row = cursor.fetchone()
+    max_id = None
+    if max_row:
+        max_id = max_row["max_id"] if isinstance(max_row, dict) else max_row[0]
+    return USER_SAVE_TEMPLATE_ID_START if max_id is None else int(max_id) + 1
+
+
 def save_to_template_library(template_name, product_data, product_type, product_form):
     """
-    将当前产品定义好的信息存入模板库中
+    将当前产品定义好的信息存入模板库。
+
+    模板身份 = 模板名称 + 所属类型 + 所属形式：
+    - 三者相同 → 同一模板：清空该模板ID附属数据后覆盖写入
+    - 仅名称相同但类型/形式不同 → 新模板ID，互不影响
     """
+    template_name = str(template_name or "").strip()
+    product_type = str(product_type or "").strip()
+    product_form = str(product_form or "").strip()
+    if not template_name:
+        print("模板插入失败：模板名称为空")
+        return None
+
+    # 1) 按名称+类型+形式解析模板ID；同键则覆盖前清空
+    conn = get_connection(**db_config_2)
+    template_id = None
+    is_overwrite = False
+    try:
+        with conn.cursor() as cursor:
+            existing_id = _fetch_template_id_row(
+                cursor, template_name, product_type, product_form
+            )
+            if existing_id is not None:
+                template_id = existing_id
+                is_overwrite = True
+                print(
+                    f"[另存模板] 覆盖同键模板: 名称={template_name}, "
+                    f"类型={product_type}, 形式={product_form}, ID={template_id}"
+                )
+            else:
+                template_id = _alloc_new_user_template_id(cursor)
+                print(
+                    f"[另存模板] 新建模板: 名称={template_name}, "
+                    f"类型={product_type}, 形式={product_form}, ID={template_id}"
+                )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print("模板ID解析失败：", e)
+        return None
+    finally:
+        conn.close()
+
+    if is_overwrite and template_id is not None:
+        try:
+            delete_material_template_data_by_template_id(int(template_id))
+        except Exception as e:
+            print(f"[另存模板] 覆盖前清空模板ID={template_id} 失败: {e}")
+            return None
+
+    # 2) 写入元件材料模板表
     conn = get_connection(**db_config_2)
     try:
         with conn.cursor() as cursor:
-            # 1. 查是否已有模板ID
-            cursor.execute("SELECT 模板ID FROM 元件材料模板表 WHERE 模板名称 = %s LIMIT 1", (template_name,))
-            row = cursor.fetchone()
-            if row:
-                template_id = row["模板ID"]
-            else:
-                # 2. 用户另存模板：从 5000 起递增，不与系统模板共用 MAX 全表逻辑
+            for item in product_data or []:
                 cursor.execute(
-                    "SELECT MAX(模板ID) AS max_id FROM 元件材料模板表 WHERE 模板ID >= %s",
-                    (USER_SAVE_TEMPLATE_ID_START,),
+                    """
+                    INSERT INTO 元件材料模板表 (
+                        模板ID, 元件ID, 模板名称,
+                        元件名称, 定义状态, 所处部件, 材料类型, 材料牌号,
+                        材料标准, 供货状态, 所属类型, 所属形式,
+                        元件示意图, 有无覆层
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        template_id,
+                        item.get("元件ID"),
+                        template_name,
+                        item.get("零件名称"),
+                        item.get("是否定义"),
+                        item.get("所属部件"),
+                        item.get("材料类型"),
+                        item.get("材料牌号"),
+                        item.get("材料标准"),
+                        item.get("供货状态"),
+                        product_type,
+                        product_form,
+                        item.get("零件示意图"),
+                        item.get("有无覆层"),
+                    ),
                 )
-                max_row = cursor.fetchone()
-                max_id = max_row["max_id"] if max_row else None
-                template_id = (
-                    USER_SAVE_TEMPLATE_ID_START
-                    if max_id is None
-                    else max_id + 1
-                )
-            # 3. 遍历插入每一条元件数据
-            for item in product_data:
-                cursor.execute("""
-                        INSERT INTO 元件材料模板表 (
-                            模板ID, 元件ID, 模板名称,
-                            元件名称, 定义状态, 所处部件, 材料类型, 材料牌号,
-                            材料标准, 供货状态, 所属类型, 所属形式,
-                            元件示意图, 有无覆层
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                    template_id,
-                    item.get("元件ID"),
-                    template_name,
-                    item.get("零件名称"),
-                    item.get("是否定义"),
-                    item.get("所属部件"),
-                    item.get("材料类型"),
-                    item.get("材料牌号"),
-                    item.get("材料标准"),
-                    item.get("供货状态"),
-                    product_type,
-                    product_form,
-                    item.get("零件示意图"),
-                    item.get("有无覆层")
-                ))
         conn.commit()
-        print(f"模板 '{template_name}' 数据保存成功，模板ID = {template_id}")
+        print(
+            f"模板 '{template_name}'({product_type}/{product_form}) "
+            f"数据保存成功，模板ID = {template_id}"
+        )
         return template_id
     except Exception as e:
         conn.rollback()
         print("模板插入失败：", e)
+        return None
     finally:
         conn.close()
 
-def get_template_id_by_name(template_name: str):
+
+def get_template_id_by_name(template_name: str, product_type=None, product_form=None):
     """
-    根据模板名称从模板表中查询模板ID
+    查询模板ID。
+    传入 product_type + product_form 时按「名称+类型+形式」精确匹配；
+    未传类型/形式时退化为仅按名称（兼容旧调用）。
     """
+    template_name = str(template_name or "").strip()
+    if not template_name:
+        return None
+    ptype = None if product_type is None else str(product_type).strip()
+    pform = None if product_form is None else str(product_form).strip()
+    # 仅当类型、形式都提供时做精确匹配（空串也视为已提供）
+    use_triad = product_type is not None and product_form is not None
+
     conn = get_connection(**db_config_2)
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT 模板ID FROM 元件材料模板表 WHERE 模板名称 = %s LIMIT 1", (template_name,))
-            row = cursor.fetchone()
-            return row["模板ID"] if row else None
+            return _fetch_template_id_row(
+                cursor,
+                template_name,
+                ptype if use_triad else None,
+                pform if use_triad else None,
+            )
     finally:
         conn.close()
 
@@ -1900,15 +1984,22 @@ def query_template_element_merged_para_data(template_id, element_id):
 
 
 
-def delete_material_template_data_by_template_name(template_name: str) -> None:
+def delete_material_template_data_by_template_name(
+    template_name: str, product_type=None, product_form=None
+) -> None:
     """
-    先通过模板名称查询模板ID，再删除材料库中该模板ID对应的全部数据（仅删除，不插入）。
+    先通过模板名称（建议加类型+形式）查询模板ID，再删除材料库中该模板ID对应的全部数据。
     """
     if not template_name or not str(template_name).strip():
         raise ValueError("template_name 不能为空")
-    template_id = get_template_id_by_name(str(template_name).strip())
+    template_id = get_template_id_by_name(
+        str(template_name).strip(), product_type, product_form
+    )
     if template_id is None:
-        raise ValueError(f"未在材料库中找到模板名称：{template_name}")
+        raise ValueError(
+            f"未在材料库中找到模板：名称={template_name}, "
+            f"类型={product_type}, 形式={product_form}"
+        )
     delete_material_template_data_by_template_id(int(template_id))
 
 

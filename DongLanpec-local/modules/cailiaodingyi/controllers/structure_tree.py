@@ -684,7 +684,9 @@ def _resolve_template_id_for_product(
                 if row:
                     return row.get("模板ID") if isinstance(row, dict) else row[0]
             from modules.cailiaodingyi.funcs.funcs_pdf_input import get_template_id_by_name
-            return get_template_id_by_name(tpl_name)
+            return get_template_id_by_name(
+                tpl_name, ptype or None, pform or None
+            )
     except Exception as e:
         _dbg_print(f"[结构树] 解析模板ID失败 template={tpl_name} type={ptype} form={pform}: {e}")
         return None
@@ -1189,8 +1191,11 @@ def apply_structure_tree_selection(
     template_name = _resolve_product_template_name(product_id, all_elements)
     template_id = None
     try:
-        from modules.cailiaodingyi.funcs.funcs_pdf_input import get_template_id_by_name
-        template_id = get_template_id_by_name(template_name)
+        from modules.cailiaodingyi.funcs.funcs_pdf_input import load_design_product_data
+        ptype, pform = load_design_product_data(product_id)
+        template_id = _resolve_template_id_for_product(
+            template_name, ptype, pform, all_elements
+        )
     except Exception as e:
         _dbg_print(f"[结构树] 解析模板ID失败 template={template_name}: {e}")
 

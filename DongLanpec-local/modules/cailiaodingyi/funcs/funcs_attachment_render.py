@@ -2664,13 +2664,18 @@ def on_confirm_attachment_param_update(viewer_instance):
                 records = cursor.fetchall()
                 
                 # 创建参数名称+标题分组 -> 参数ID的映射
+                # 标题分组需 strip：模板/历史数据里「管口号」常见存成单个空格，
+                # 界面上该行不在折叠分组内（分组为""），不 strip 会对不上导致不更新。
                 param_map = {}
+                pipe_code_param_id = None
                 for record in records:
                     param_id = record[0]
-                    param_name = record[1]
-                    title_group = record[2] if len(record) > 2 else ''
-                    key = (param_name, title_group or '')
+                    param_name = (record[1] or "").strip() if len(record) > 1 else ""
+                    title_group = (record[2] or "").strip() if len(record) > 2 else ""
+                    key = (param_name, title_group)
                     param_map[key] = param_id
+                    if param_name == "管口号" and pipe_code_param_id is None:
+                        pipe_code_param_id = param_id
                 
                 # 遍历表格，更新参数数值
                 update_count = 0
@@ -2702,20 +2707,24 @@ def on_confirm_attachment_param_update(viewer_instance):
                             elif hasattr(widget, 'text'):
                                 param_value = widget.text().strip()
                     
-                    # 获取标题分组（从当前行的上下文或数据中获取）
-                    # 需要向上查找分组标题行
-                    title_group = ''
-                    for i in range(r, -1, -1):
-                        check_item = table.item(i, 0)
-                        if check_item:
-                            check_group_info = check_item.data(Qt.UserRole)
-                            if check_group_info and check_group_info.get("is_group_title"):
-                                title_group = check_group_info.get("group_name", "")
-                                break
-                    
-                    # 查找对应的参数ID
-                    key = (param_name, title_group or '')
-                    param_id = param_map.get(key)
+                    # 管口号：界面固定在表顶、无折叠分组，直接按参数名匹配，避免标题分组空格干扰
+                    if param_name == "管口号":
+                        param_id = pipe_code_param_id
+                    else:
+                        # 获取标题分组（从当前行的上下文或数据中获取）
+                        # 需要向上查找分组标题行
+                        title_group = ''
+                        for i in range(r, -1, -1):
+                            check_item = table.item(i, 0)
+                            if check_item:
+                                check_group_info = check_item.data(Qt.UserRole)
+                                if check_group_info and check_group_info.get("is_group_title"):
+                                    title_group = (check_group_info.get("group_name") or "").strip()
+                                    break
+                        
+                        # 查找对应的参数ID
+                        key = (param_name, title_group)
+                        param_id = param_map.get(key)
                     
                     if param_id:
                         # 更新参数数值

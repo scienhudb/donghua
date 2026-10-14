@@ -59,6 +59,7 @@ from modules.cailiaodingyi.controllers.style import (
     show_critical,
     show_information,
     show_warning,
+    exec_message_box,
 )
 from modules.cailiaodingyi.funcs.funcs_pdf_input import (
     load_design_product_data,
@@ -3213,20 +3214,11 @@ class DesignParameterDefineInputerViewer(QWidget):
         return table
 
     def _get_guankou_min_keep(self) -> int:
-        """换热器至少 2；容器至少 1。"""
+        """最少保留数只按产品类型：换热器 2，容器及其它 1（不看 tab 是否叫管程/壳程）。"""
         pt = str(getattr(self, "product_type", "") or "").strip()
-        base = getattr(self, "_guankou_base_tab_count", None)
-        if base is None:
-            labels = []
-            tw = getattr(self, "guankou_tabWidget", None)
-            if tw:
-                for i in self._guankou_real_indices(tw, include_hidden=False):
-                    labels.append(tw.tabText(i).strip())
-            base = infer_guankou_base_tab_count(labels, pt)
-            self._guankou_base_tab_count = base
-        if "热交换器" in pt or "换热器" in pt:
-            return max(2, int(base or 2))
-        return max(1, int(base or 1))
+        base = infer_guankou_base_tab_count(None, pt)
+        self._guankou_base_tab_count = base
+        return int(base)
 
     def _keep_orphaned_guankou_page(self, page):
         """兼容旧路径：预置页脱离 tab 时仅隐藏保活，不挂到主窗口。"""
@@ -4171,8 +4163,9 @@ class DesignParameterDefineInputerViewer(QWidget):
             table.setHorizontalHeaderLabels(headers)
             table.setRowCount(0)
 
-        if getattr(self, "label_part_image", None):
-            self.label_part_image.clear()
+        label = getattr(self, "label_part_image", None)
+        if label is not None and not self._is_qt_deleted(label):
+            label.clear()
 
         self._clear_detail_definition_content()
 
@@ -4736,16 +4729,28 @@ class DesignParameterDefineInputerViewer(QWidget):
             paths = getattr(self, "image_paths", None) or []
             path = paths[0] if paths else None
         if path:
-            QTimer.singleShot(0, lambda p=path: self.display_image(p))
+            QTimer.singleShot(0, lambda p=path: self._safe_display_image(p))
 
     def _schedule_part_image_refresh(self):
         """在布局稳定后多次尝试刷新示意图（切换产品/重建 tab 后尤为重要）。"""
+        if self._is_qt_deleted(self):
+            return
         paths = getattr(self, "image_paths", None) or []
         if not paths or not paths[0]:
             return
         path = paths[0]
         for delay in (0, 80, 200, 400):
-            QTimer.singleShot(delay, lambda p=path: self.display_image(p))
+            # 切换产品会 deleteLater 旧页：延迟回调必须先判断控件是否仍存活
+            QTimer.singleShot(delay, lambda p=path: self._safe_display_image(p))
+
+    def _safe_display_image(self, image_path, _retry=0):
+        """产品切换关闭旧 tab 后，忽略仍在排队的示意图刷新。"""
+        if self._is_qt_deleted(self):
+            return
+        label = getattr(self, "label_part_image", None)
+        if self._is_qt_deleted(label):
+            return
+        self.display_image(image_path, _retry)
 
     def _apply_parts_list_weighted_widths(self):
         """
@@ -5640,21 +5645,26 @@ class DesignParameterDefineInputerViewer(QWidget):
 
     def _part_image_target_size(self):
         """布局未完成时用示意图容器尺寸，避免示意图缩成一小块。"""
-        label = self.label_part_image
-        if label is None:
+        label = getattr(self, "label_part_image", None)
+        if label is None or self._is_qt_deleted(label):
             return None
 
         def _ok(sz):
             return sz.width() > 120 and sz.height() > 120
 
-        candidates = [label.size(), label.geometry().size()]
-        w = label.parentWidget()
-        while w is not None:
-            if w.objectName() == "groupBox":
-                candidates.append(w.size())
-                candidates.append(w.contentsRect().size())
-                break
-            w = w.parentWidget()
+        try:
+            candidates = [label.size(), label.geometry().size()]
+            w = label.parentWidget()
+            while w is not None:
+                if self._is_qt_deleted(w):
+                    break
+                if w.objectName() == "groupBox":
+                    candidates.append(w.size())
+                    candidates.append(w.contentsRect().size())
+                    break
+                w = w.parentWidget()
+        except RuntimeError:
+            return None
         for sz in candidates:
             if _ok(sz):
                 return sz
@@ -5664,8 +5674,12 @@ class DesignParameterDefineInputerViewer(QWidget):
         return None
 
     def display_image(self, image_path, _retry=0):
+        label = getattr(self, "label_part_image", None)
+        if self._is_qt_deleted(self) or self._is_qt_deleted(label):
+            return
+
         if not image_path:
-            self.label_part_image.clear()
+            label.clear()
             return
 
         image_path = os.path.normpath(image_path.strip())
@@ -5678,21 +5692,24 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         if not os.path.exists(abs_path):
             print(f"[警告] 图片路径不存在: {abs_path}")
-            self.label_part_image.clear()
+            label.clear()
             return
 
         pixmap = QPixmap(abs_path)
         if pixmap.isNull():
             print(f"[警告] 图片无法加载: {abs_path}")
-            self.label_part_image.clear()
+            label.clear()
             return
 
         label_size = self._part_image_target_size()
         if label_size is None:
-            if _retry < 30:
-                QTimer.singleShot(80, lambda p=image_path, r=_retry + 1: self.display_image(p, r))
+            if _retry < 30 and not self._is_qt_deleted(self) and not self._is_qt_deleted(label):
+                QTimer.singleShot(80, lambda p=image_path, r=_retry + 1: self._safe_display_image(p, r))
             else:
                 print("[提示] QLabel 尺寸未准备好，跳过")
+            return
+
+        if self._is_qt_deleted(label):
             return
 
         scaled_pixmap = pixmap.scaled(
@@ -5701,8 +5718,8 @@ class DesignParameterDefineInputerViewer(QWidget):
             Qt.SmoothTransformation
         )
 
-        self.label_part_image.setPixmap(scaled_pixmap)
-        self.label_part_image.setAlignment(Qt.AlignCenter)
+        label.setPixmap(scaled_pixmap)
+        label.setAlignment(Qt.AlignCenter)
         self._last_part_image_path = image_path
 
     #
@@ -6151,13 +6168,36 @@ class DesignParameterDefineInputerViewer(QWidget):
             self.show_error_message("错误", "未找到产品材料数据。")
             return
 
-        # ✅ 写入模板库
-        save_to_template_library(template_name, product_data, self.product_type, self.product_form)
+        # 同产品类型+形式下重名：先确认是否覆盖；选否则回退，用户可改名后再另存
+        existing_id = get_template_id_by_name(
+            template_name, self.product_type, self.product_form
+        )
+        if existing_id is not None:
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("提示")
+            msg_box.setText(f"此模板已保存，是否覆盖{template_name}？")
+            btn_yes = msg_box.addButton("是", QMessageBox.AcceptRole)
+            msg_box.addButton("否", QMessageBox.RejectRole)
+            exec_message_box(msg_box)
+            if msg_box.clickedButton() != btn_yes:
+                print(
+                    f"[另存模板] 用户取消覆盖: 名称={template_name}, "
+                    f"类型={self.product_type}, 形式={self.product_form}"
+                )
+                return
 
-        # ✅ 更新模板关联数据
-        template_id = get_template_id_by_name(template_name)
+        # ✅ 写入模板库（身份=名称+类型+形式；同键覆盖前清空附属表）
+        template_id = save_to_template_library(
+            template_name, product_data, self.product_type, self.product_form
+        )
+
+        # ✅ 更新模板关联数据（管口附加参数等挂到同一隔离后的模板ID）
         if template_id is not None:
-            print(f"查询到模板ID：{template_id}")
+            print(
+                f"另存模板ID={template_id} "
+                f"(名称={template_name}, 类型={self.product_type}, 形式={self.product_form})"
+            )
             updated_element_para = load_update_element_data(self.product_id)
             insert_updated_element_para_data(template_id, updated_element_para)
             updated_guankou_define = load_updated_guankou_define_data(self.product_id)
@@ -6172,13 +6212,22 @@ class DesignParameterDefineInputerViewer(QWidget):
             updated_guankou_attachment_para = load_update_guankou_attachment_para_data(self.product_id)
             insert_guankou_attachment_para_data(template_id, updated_guankou_attachment_para)
         else:
-            print("未找到对应模板ID")
+            print("另存模板失败：未得到模板ID")
 
         # ✅ 合并提示信息（只弹一次）
-        if undefined_parts:
-            msg = f"模板 '{template_name}' 已保存到材料库。\n以下元件未定义：\n" + "、".join(undefined_parts)
+        if template_id is None:
+            msg = f"模板 '{template_name}' 保存失败。"
+        elif undefined_parts:
+            msg = (
+                f"模板 '{template_name}' 已保存到材料库"
+                f"（类型={self.product_type}, 形式={self.product_form}）。\n"
+                f"以下元件未定义：\n" + "、".join(undefined_parts)
+            )
         else:
-            msg = f"模板 '{template_name}' 已保存到材料库。"
+            msg = (
+                f"模板 '{template_name}' 已保存到材料库"
+                f"（类型={self.product_type}, 形式={self.product_form}）。"
+            )
 
         show_information(self, "模板保存结果", msg)
 

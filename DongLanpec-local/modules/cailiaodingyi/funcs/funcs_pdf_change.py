@@ -3596,13 +3596,26 @@ def query_required_paramlist_csv(part_name: str) -> set:
 
 
 def query_guankou_affiliation(product_id, guankou_code):
-    """安全查询管口归属"""
+    """安全查询管口归属。
+
+    换热器按所属元件关键字归为管程/壳程；
+    容器产品不区分管程/壳程，温压一律按壳程。
+    """
     affiliation = None
     try:
         # 每次都新开连接
         import pymysql
         conn = pymysql.connect(**db_config_1)
         with conn.cursor() as cursor:
+            # 先取产品类型，判断是否为容器
+            cursor.execute(
+                "SELECT 产品类型 FROM 产品设计活动表 WHERE 产品ID=%s",
+                (product_id,),
+            )
+            type_row = cursor.fetchone()
+            product_type = (type_row[0] if type_row else None) or ""
+            is_container = "容器" in str(product_type)
+
             sql = """
                 SELECT 管口所属元件
                 FROM 产品设计活动表_管口类别表
@@ -3613,11 +3626,14 @@ def query_guankou_affiliation(product_id, guankou_code):
             if result:
                 raw_elem = result[0]
                 elem_type = (raw_elem or "").strip().lower()
-                if "管" in elem_type:
+                if is_container:
+                    # 容器（如卧式容器）所属元件为圆筒/封头等，不区分管壳程，统一取壳程
+                    affiliation = "壳程"
+                elif "管" in elem_type:
                     affiliation = "管程"
                 elif "壳" in elem_type or "外头盖" in elem_type:      # 加上外头盖，取壳程数值，是AES和BES新加的
                     affiliation = "壳程"
-                print(f"[调试] 产品ID={product_id}, 管口={guankou_code}, 数据库值='{raw_elem}', 归类='{affiliation}'")
+                print(f"[调试] 产品ID={product_id}, 管口={guankou_code}, 产品类型='{product_type}', 数据库值='{raw_elem}', 归类='{affiliation}'")
             else:
                 print(f"[调试] 产品ID={product_id}, 管口={guankou_code}, 数据库查询无结果")
     except Exception as e:

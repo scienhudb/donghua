@@ -8280,11 +8280,15 @@ def ensure_insulation_merged_para_from_template(product_id, element_id=None, for
     finally:
         connection.close()
 
-    # 2) 按模板名称解析
+    # 2) 按模板名称 + 产品类型 + 产品形式解析
     if not template_id and template_name and template_name.lower() != "none":
         try:
-            from modules.cailiaodingyi.funcs.funcs_pdf_input import get_template_id_by_name
-            template_id = get_template_id_by_name(template_name)
+            from modules.cailiaodingyi.funcs.funcs_pdf_input import (
+                get_template_id_by_name,
+                load_design_product_data,
+            )
+            ptype, pform = load_design_product_data(product_id)
+            template_id = get_template_id_by_name(template_name, ptype, pform)
         except Exception as e:
             print(f"[保温装置] get_template_id_by_name 失败: {e}")
             template_id = None
