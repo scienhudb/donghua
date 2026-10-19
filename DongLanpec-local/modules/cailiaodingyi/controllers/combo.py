@@ -61,13 +61,17 @@ class MaterialBrandComboBox(QComboBox):
         items = [x for x in src if kw in x] if kw else src
         le = self.lineEdit()
         keep = le.text() if le is not None else (keyword or "")
+        # clear/addItems + setText 会把光标甩到末尾，需手动恢复点击/编辑位置
+        cursor_pos = le.cursorPosition() if le is not None else len(keep)
         self.blockSignals(True)
         try:
             self.clear()
             self.addItem("")
             self.addItems(items)
             if le is not None:
-                le.setText(keep)
+                if le.text() != keep:
+                    le.setText(keep)
+                le.setCursorPosition(min(max(0, cursor_pos), len(keep)))
             elif keep:
                 self.setEditText(keep)
             else:
@@ -176,12 +180,17 @@ def apply_material_brand_editable_combo(combo, options, *, current_text=""):
         items = [x for x in src if kw in x] if kw else src
         le = combo.lineEdit()
         keep = le.text() if le is not None else (keyword or "")
+        cursor_pos = le.cursorPosition() if le is not None else len(keep)
         combo.blockSignals(True)
         try:
             combo.clear()
             combo.addItem("")
             combo.addItems(items)
-            if keep:
+            if le is not None:
+                if le.text() != keep:
+                    le.setText(keep)
+                le.setCursorPosition(min(max(0, cursor_pos), len(keep)))
+            elif keep:
                 combo.setEditText(keep)
             else:
                 combo.setCurrentIndex(0)
@@ -470,7 +479,9 @@ class MaterialInstantDelegate(ComboDelegate):
     def setEditorData(self, editor, index):
         if isinstance(editor, QComboBox) and editor.isEditable() and is_material_brand_field(self.field_name):
             txt = (index.model().data(index, Qt.EditRole) or "").strip()
-            editor.setEditText(txt)
+            # 文本未变时不要 setEditText，否则会把用户点到中间的光标拽到末尾
+            if (editor.currentText() or "") != txt:
+                editor.setEditText(txt)
             return
         super().setEditorData(editor, index)
 
@@ -577,7 +588,10 @@ def on_material_field_changed_col(table, col: int, rows_map: dict, sender_field:
         cur_status = _get(r_status)
 
         # 完全模仿普通元件的 on_pick 逻辑
-        from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options
+        from modules.cailiaodingyi.funcs.funcs_pdf_change import (
+            get_filtered_material_options,
+            pick_autofill_supply_status,
+        )
 
         if sender_field == '材料类型':
             # 材料类型变化：清空后续字段，重新安装 delegate
@@ -599,7 +613,7 @@ def on_material_field_changed_col(table, col: int, rows_map: dict, sender_field:
             _reinstall_material_delegates(table, col, rows_map, cur_type, cur_brand, cur_std)
 
         elif sender_field == '材料牌号':
-            # 材料牌号变化：清空材料标准和供货状态，重新获取选项，自动选择唯一值
+            # 材料牌号变化：清空材料标准和供货状态，重新获取选项；标准唯一/供货状态默认值可自动带入
             table.blockSignals(True)
             try:
                 # 先清空材料标准和供货状态
@@ -615,13 +629,22 @@ def on_material_field_changed_col(table, col: int, rows_map: dict, sender_field:
             std_opts = f.get("材料标准", []) or []
             stat_opts = f.get("供货状态", []) or []
 
-            # 自动选择唯一选项
             table.blockSignals(True)
             try:
                 if len(std_opts) == 1:
                     _set(r_std, std_opts[0])
-                if len(stat_opts) == 1:
-                    _set(r_status, stat_opts[0])
+                cur_std2 = _get(r_std)
+                basis_stat = {
+                    k: v for k, v in {
+                        "材料类型": cur_type, "材料牌号": cur_brand, "材料标准": cur_std2,
+                    }.items() if v
+                }
+                if cur_std2:
+                    f2 = get_filtered_material_options(basis_stat) or {}
+                    stat_opts = f2.get("供货状态", []) or []
+                pick_stat = pick_autofill_supply_status(stat_opts, basis_stat)
+                if pick_stat:
+                    _set(r_status, pick_stat)
             finally:
                 table.blockSignals(False)
 
@@ -629,15 +652,18 @@ def on_material_field_changed_col(table, col: int, rows_map: dict, sender_field:
             _reinstall_material_delegates(table, col, rows_map, cur_type, cur_brand, cur_std)
 
         elif sender_field == '材料标准':
-            # 材料标准变化：更新供货状态选项，自动选择唯一选项
-            f = get_filtered_material_options({"材料类型": cur_type, "材料牌号": cur_brand, "材料标准": cur_std}) or {}
+            # 材料标准变化：更新供货状态选项；唯一或材料表默认值自动带入
+            basis_stat = {
+                "材料类型": cur_type, "材料牌号": cur_brand, "材料标准": cur_std,
+            }
+            f = get_filtered_material_options(basis_stat) or {}
             stat_opts = f.get("供货状态", []) or []
 
-            # 自动选择唯一选项
-            if (not cur_status) and len(stat_opts) == 1:
+            pick_stat = pick_autofill_supply_status(stat_opts, basis_stat)
+            if (not cur_status) and pick_stat:
                 table.blockSignals(True)
                 try:
-                    _set(r_status, stat_opts[0])
+                    _set(r_status, pick_stat)
                 finally:
                     table.blockSignals(False)
 
@@ -802,7 +828,8 @@ class DynamicOptionsDelegate(ComboDelegate):
         field = self._field_of_row(index.row())
         if isinstance(editor, QComboBox) and editor.isEditable() and field == '材料牌号':
             txt = (index.data() or "").strip()
-            editor.setEditText(txt)
+            if (editor.currentText() or "") != txt:
+                editor.setEditText(txt)
             return
         super().setEditorData(editor, index)
 
@@ -1073,7 +1100,8 @@ class MultiSelectDynamicOptionsDelegate(DynamicOptionsDelegate):
         if isinstance(editor, QComboBox) and field == '材料牌号':
             cur = (index.data() or "").strip()
             if editor.isEditable():
-                editor.setEditText(cur)
+                if (editor.currentText() or "") != cur:
+                    editor.setEditText(cur)
             elif cur:
                 pos = editor.findText(cur)
                 if pos >= 0:

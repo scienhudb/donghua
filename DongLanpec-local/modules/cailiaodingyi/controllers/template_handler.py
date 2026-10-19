@@ -14,6 +14,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     update_guankou_define_data,
     refresh_guankou_define_status,
     get_filtered_material_options,
+    pick_autofill_supply_status,
     query_template_name_by_product
 )
 from modules.cailiaodingyi.funcs.funcs_pdf_input import (
@@ -566,11 +567,17 @@ def on_material_combobox_changed_rowwise(table: QTableWidget, row: int,
 
         if current_val in valid_options:
             combo.setCurrentText(current_val)
-        elif len(valid_options) == 1:
-            combo.setCurrentText(valid_options[0])  # ✅ 自动填入唯一值
         else:
-            combo.setCurrentIndex(0)
-            table.setItem(row, field_to_col[field], QTableWidgetItem(""))
+            pick = ""
+            if field == "供货状态":
+                pick = pick_autofill_supply_status(valid_options, selected)
+            elif len(valid_options) == 1:
+                pick = valid_options[0]
+            if pick:
+                combo.setCurrentText(pick)
+            else:
+                combo.setCurrentIndex(0)
+                table.setItem(row, field_to_col[field], QTableWidgetItem(""))
         combo.blockSignals(False)
 
 

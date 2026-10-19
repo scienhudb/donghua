@@ -492,6 +492,8 @@ class DesignParameterDefineInputerViewer(QWidget):
             conn.close()
 
     def _set_combo_items_keep_text(self, combo, items, keep_text=""):
+        le = combo.lineEdit() if combo.isEditable() else None
+        cursor_pos = le.cursorPosition() if le is not None else None
         combo.blockSignals(True)
         try:
             combo.clear()
@@ -499,7 +501,10 @@ class DesignParameterDefineInputerViewer(QWidget):
             combo.addItems(items)
             if keep_text:
                 if combo.isEditable():
-                    combo.setEditText(keep_text)
+                    if (combo.currentText() or "") != keep_text:
+                        combo.setEditText(keep_text)
+                    if le is not None and cursor_pos is not None:
+                        le.setCursorPosition(min(max(0, cursor_pos), len(keep_text)))
                 else:
                     idx = combo.findText(keep_text)
                     combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1739,9 +1744,10 @@ class DesignParameterDefineInputerViewer(QWidget):
             )
 
             # 类型 + 完整牌号已选：按材料库联动取标准/供货状态。
-            # - 选完类型/牌号：标准、供货状态若唯一则带入
-            # - 选完标准：仅供货状态若唯一则带入（不清空标准后再强行填回）
+            # - 选完类型/牌号：标准若唯一则带入；供货状态唯一或材料表默认值则带入
+            # - 选完标准：仅供货状态按唯一/默认值带入
             # - 用户改供货状态本身：不再自动填
+            from modules.cailiaodingyi.funcs.funcs_pdf_change import pick_autofill_supply_status
             autofill_std = active_field in ("材料类型", "材料牌号")
             autofill_supply = active_field in ("材料类型", "材料牌号", "材料标准")
             if include_grade and txt_type and txt_grade:
@@ -1762,8 +1768,10 @@ class DesignParameterDefineInputerViewer(QWidget):
                 )
                 if txt_supply and txt_supply not in items_supply:
                     txt_supply = ""
-                if autofill_supply and (not txt_supply) and len(items_supply) == 1:
-                    txt_supply = items_supply[0]
+                if autofill_supply and (not txt_supply):
+                    pick_supply = pick_autofill_supply_status(items_supply, supply_filters)
+                    if pick_supply:
+                        txt_supply = pick_supply
             else:
                 items_supply = self.get_material_table_distinct_values(
                     "供货状态",
@@ -1857,7 +1865,7 @@ class DesignParameterDefineInputerViewer(QWidget):
             refill_old_combo(old_overlay, opt_overlay, keep_overlay)
 
         def clear_new_value_combos():
-            for cb in [combo_type, combo_grade, combo_supply, combo_std, combo_overlay]:
+            for cb in [combo_type, combo_grade, combo_supply, combo_std]:
                 cb.blockSignals(True)
                 try:
                     if cb.isEditable() and cb.lineEdit() is not None:
@@ -1868,6 +1876,16 @@ class DesignParameterDefineInputerViewer(QWidget):
                     cb.setCurrentIndex(0)
                 finally:
                     cb.blockSignals(False)
+            # 是否添加覆层：清空后仍默认「否」
+            combo_overlay.blockSignals(True)
+            try:
+                if combo_overlay.count() <= 0:
+                    combo_overlay.addItem("")
+                    combo_overlay.addItems(["是", "否"])
+                idx = combo_overlay.findText("否")
+                combo_overlay.setCurrentIndex(idx if idx >= 0 else 0)
+            finally:
+                combo_overlay.blockSignals(False)
 
         state["get_old_filters"] = get_old_filters
         state["ctx_match_old_filters"] = ctx_match_old_filters
@@ -1889,6 +1907,14 @@ class DesignParameterDefineInputerViewer(QWidget):
 
         refresh_old_value_combos()
         refresh_material_combos()
+        # 替换为：是否添加覆层默认选中「否」
+        combo_overlay.blockSignals(True)
+        try:
+            idx = combo_overlay.findText("否")
+            if idx >= 0:
+                combo_overlay.setCurrentIndex(idx)
+        finally:
+            combo_overlay.blockSignals(False)
 
         btn_ok.clicked.connect(self._execute_batch_replace_confirm)
         btn_cancel.clicked.connect(self.exit_batch_replace_mode)

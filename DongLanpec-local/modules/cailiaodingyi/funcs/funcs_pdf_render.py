@@ -13,7 +13,8 @@ from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
 from modules.cailiaodingyi.controllers.combo import ComboDelegate, ComboPopupEventFilter, DynamicOptionsDelegate, \
     on_material_field_changed_col, ProcessPerColumnDelegate, NonNegativeDoubleDelegate, RowFillComboDelegate, \
     BulkFillDynamicOptionsDelegate, MultiSelectRowComboDelegate, MultiSelectDynamicOptionsDelegate
-from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options, get_fastener_bolt_type_options, \
+from modules.cailiaodingyi.funcs.funcs_pdf_change import get_filtered_material_options, pick_autofill_supply_status, \
+    get_fastener_bolt_type_options, \
     get_fastener_component_options_by_template_id, load_updated_fastener_define_data, \
     get_fastener_root_series_options, default_cladding_thickness_by_material_type, default_cladding_groove_depth, \
     DEBUG_VERBOSE_DEFINE_UI
@@ -295,7 +296,7 @@ def _apply_material_paste_batch(table, col: int, rows_map: dict, new_vals: dict)
     finally:
         table.blockSignals(False)
 
-    # 4) 唯一候选自动带入（当 类型+牌号 已确定）
+    # 4) 唯一候选 / 供货状态默认值自动带入（当 类型+牌号 已确定）
     if cur.get('材料类型') and cur.get('材料牌号'):
         filtered2 = get_filtered_material_options({
             '材料类型': cur['材料类型'],
@@ -315,7 +316,31 @@ def _apply_material_paste_batch(table, col: int, rows_map: dict, new_vals: dict)
                 finally:
                     table.blockSignals(False)
         _autofill_one('材料标准')
-        _autofill_one('供货状态')
+        # 供货状态：标准若已有则按三字段收窄；唯一或「供货状态默认值」=是 时带入
+        r_stat = rows_map.get('供货状态')
+        if r_stat is not None and not cur.get('供货状态'):
+            basis_stat = {
+                k: v for k, v in {
+                    '材料类型': cur.get('材料类型'),
+                    '材料牌号': cur.get('材料牌号'),
+                    '材料标准': cur.get('材料标准'),
+                }.items() if v
+            }
+            if cur.get('材料标准'):
+                filtered3 = get_filtered_material_options(
+                    basis_stat, element_name=part_name or None,
+                ) or {}
+                stat_opts = [x for x in (filtered3.get('供货状态', []) or []) if x]
+            else:
+                stat_opts = [x for x in (filtered2.get('供货状态', []) or []) if x]
+            pick_stat = pick_autofill_supply_status(stat_opts, basis_stat)
+            if pick_stat:
+                table.blockSignals(True)
+                try:
+                    _set(r_stat, pick_stat)
+                    cur['供货状态'] = pick_stat
+                finally:
+                    table.blockSignals(False)
 
 
 

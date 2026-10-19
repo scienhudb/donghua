@@ -2057,6 +2057,105 @@ def _material_row_matches_scope(element_cell, scope_names: List[str]) -> bool:
     return any(t in scope_set for t in tags)
 
 
+def _is_truthy_supply_default_flag(val) -> bool:
+    """材料表「供货状态默认值」是否视为是。"""
+    s = ("" if val is None else str(val)).strip()
+    return s in {"是", "Y", "y", "1", "true", "True", "TRUE"}
+
+
+def _query_default_supply_statuses(
+    material_type: str,
+    material_brand: str,
+    material_std: str,
+    scope_element_name=None,
+) -> List[str]:
+    """
+    查材料表：类型+牌号+标准 下「供货状态默认值」为是的供货状态（去重保序）。
+    scope_element_name：可选，仅保留元件名称列点名到该范围的行（结构钢等）。
+    """
+    t = (material_type or "").strip()
+    b = (material_brand or "").strip()
+    std = (material_std or "").strip()
+    if not (t and b and std):
+        return []
+
+    scope_names = _normalize_material_scope_names(scope_element_name)
+    sql = (
+        "SELECT `供货状态`, `供货状态默认值`"
+        + (", `元件名称`" if scope_names else "")
+        + " FROM `材料表`"
+        " WHERE `材料类型` = %s AND `材料牌号` = %s AND `材料标准` = %s"
+        " AND `供货状态` IS NOT NULL AND TRIM(`供货状态`) <> ''"
+    )
+    out: List[str] = []
+    seen = set()
+    connection = pymysql.connect(**db_config_2)
+    try:
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(sql, (t, b, std))
+            rows = cursor.fetchall() or []
+        for row in rows:
+            if scope_names and not _material_row_matches_scope(row.get("元件名称"), scope_names):
+                continue
+            if not _is_truthy_supply_default_flag(row.get("供货状态默认值")):
+                continue
+            st = row.get("供货状态")
+            st = (st.strip() if isinstance(st, str) else str(st or "").strip())
+            if st and st not in seen:
+                seen.add(st)
+                out.append(st)
+        return out
+    except Exception as e:
+        # 列尚未部署等同库差异时不打断联动
+        print(f"[供货状态默认值] 查询失败: type={t}, brand={b}, std={std}, err={e}")
+        return []
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def pick_autofill_supply_status(
+    stat_opts,
+    selected: dict = None,
+    scope_element_name=None,
+) -> str:
+    """
+    供货状态自动带入：
+      - 候选唯一 → 直接返回该值
+      - 候选多个 → 按类型+牌号+标准查材料表「供货状态默认值」=是，
+        取其供货状态（须落在候选内）；结构钢可传 scope_element_name 收窄
+      - 否则返回空串（不自动带入）
+    """
+    opts: List[str] = []
+    seen = set()
+    for x in (stat_opts or []):
+        s = (x or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            opts.append(s)
+    if not opts:
+        return ""
+    if len(opts) == 1:
+        return opts[0]
+
+    selected = selected or {}
+    t = (selected.get("材料类型") or "").strip()
+    b = (selected.get("材料牌号") or "").strip()
+    std = (selected.get("材料标准") or "").strip()
+    if not (t and b and std):
+        return ""
+
+    defaults = _query_default_supply_statuses(t, b, std, scope_element_name)
+    if not defaults and scope_element_name:
+        defaults = _query_default_supply_statuses(t, b, std, None)
+    for d in defaults:
+        if d in seen:
+            return d
+    return ""
+
+
 def get_filtered_material_options(selected: dict = None, element_name=None,
                                   scope_element_name=None) -> dict:
     """

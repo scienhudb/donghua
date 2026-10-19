@@ -21,6 +21,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_input import db_config_1, db_config_2
 from modules.cailiaodingyi.funcs.funcs_pdf_render import _set_table_tooltips, _install_tooltip_updater
 from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     get_filtered_material_options,
+    pick_autofill_supply_status,
     default_cladding_thickness_by_material_type,
     cladding_thickness_default_if_needed,
     update_cladding_groove_depth_visibility,
@@ -1208,16 +1209,31 @@ def _install_attachment_material_delegate_linkage(table, param_col, value_col, v
                     _install_row_delegate("供货状态", st_row, stat_opts)
                     if (not _get(sr)) and len(std_opts) == 1:
                         _set(sr, std_opts[0])
-                    if (not _get(st_row)) and len(stat_opts) == 1:
-                        _set(st_row, stat_opts[0])
+                    cur_s = _get(sr)
+                    basis_stat = {
+                        k: v for k, v in {
+                            "材料类型": cur_t, "材料牌号": new_text, "材料标准": cur_s,
+                        }.items() if v
+                    }
+                    if cur_s:
+                        f2 = _opts(basis_stat)
+                        stat_opts = f2.get("供货状态", []) or []
+                        _install_row_delegate("供货状态", st_row, stat_opts)
+                    pick_stat = pick_autofill_supply_status(stat_opts, basis_stat)
+                    if (not _get(st_row)) and pick_stat:
+                        _set(st_row, pick_stat)
                 elif field_name == "材料标准":
                     # 材料标准改变，清空状态，更新选项
                     _set(st_row, "")
-                    f = _opts({"材料类型": cur_t, "材料牌号": cur_b, "材料标准": new_text})
+                    basis_stat = {
+                        "材料类型": cur_t, "材料牌号": cur_b, "材料标准": new_text,
+                    }
+                    f = _opts(basis_stat)
                     stat_opts = f.get("供货状态", []) or []
                     _install_row_delegate("供货状态", st_row, stat_opts)
-                    if (not _get(st_row)) and len(stat_opts) == 1:
-                        _set(st_row, stat_opts[0])
+                    pick_stat = pick_autofill_supply_status(stat_opts, basis_stat)
+                    if (not _get(st_row)) and pick_stat:
+                        _set(st_row, pick_stat)
                 
                 # 应用锻件级别显隐（仅对第一组）
                 if is_first_group and field_name == "材料类型":

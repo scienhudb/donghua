@@ -41,6 +41,7 @@ from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     update_guankou_param,
     load_guankou_para_data_leibie, refresh_guankou_define_status,
     get_filtered_material_options,
+    pick_autofill_supply_status,
     get_allowed_material_types, parse_component_names_cell,
     get_structural_steel_material_options, uses_structural_steel_material, save_image,
     get_flange_linkage_dependent_options,
@@ -251,24 +252,35 @@ def on_material_field_changed_row(table: QTableWidget, row: int):
 
         # ✅ 每次材料类型变更后，强制清空后三项；其余字段则根据选项数量决定是否自动填入
         if sender_field == "材料类型" and field in ["材料牌号", "材料标准", "供货状态"]:
-            if len(valid_options) == 1:
+            pick = ""
+            if field == "供货状态":
+                pick = pick_autofill_supply_status(valid_options, selected)
+            elif len(valid_options) == 1:
+                pick = valid_options[0]
+            if pick:
                 combo.blockSignals(True)
-                combo.setCurrentText(valid_options[0])
+                combo.setCurrentText(pick)
                 combo.blockSignals(False)
             else:
                 combo.setCurrentIndex(0)
                 combo.lineEdit().clear()
                 table.setItem(row, field_to_col[field], QTableWidgetItem(""))
         elif field not in cleared_fields:
-            # 非材料类型发起时：若旧值合法 → 保留；否则清空
+            # 非材料类型发起时：若旧值合法 → 保留；否则清空/按默认带入
             if current_val in valid_options:
                 combo.setCurrentText(current_val)
-            elif len(valid_options) == 1:
-                combo.setCurrentText(valid_options[0])
             else:
-                combo.setCurrentIndex(0)
-                combo.lineEdit().clear()
-                table.setItem(row, field_to_col[field], QTableWidgetItem(""))
+                pick = ""
+                if field == "供货状态":
+                    pick = pick_autofill_supply_status(valid_options, selected)
+                elif len(valid_options) == 1:
+                    pick = valid_options[0]
+                if pick:
+                    combo.setCurrentText(pick)
+                else:
+                    combo.setCurrentIndex(0)
+                    combo.lineEdit().clear()
+                    table.setItem(row, field_to_col[field], QTableWidgetItem(""))
 
         combo.blockSignals(False)
 
@@ -1650,16 +1662,38 @@ def install_material_delegate_linkage(table, param_col, value_col, viewer_instan
                 _install_row_delegate(name_status, r_status, stat_opts, on_pick)
                 if (not _get(r_std)) and len(std_opts) == 1:
                     _set(r_std, std_opts[0])
-                if (not _get(r_status)) and len(stat_opts) == 1:
-                    _set(r_status, stat_opts[0])
+                # 标准若已唯一带入，按 类型+牌号+标准 再收窄供货状态（含默认值）
+                cur_s = _get(r_std)
+                basis_stat = {
+                    k: v for k, v in {
+                        "材料类型": cur_t, "材料牌号": new_text, "材料标准": cur_s,
+                    }.items() if v
+                }
+                if cur_s:
+                    f2 = _mat_opts(basis_stat)
+                    stat_opts = f2.get("供货状态", []) or []
+                    _install_row_delegate(name_status, r_status, stat_opts, on_pick)
+                pick_stat = pick_autofill_supply_status(
+                    stat_opts, basis_stat,
+                    scope_element_name=(element_name if is_structural else None),
+                )
+                if (not _get(r_status)) and pick_stat:
+                    _set(r_status, pick_stat)
                 if quality_grade_hook:
                     quality_grade_hook(_get(r_std), True)
             elif field_name == name_std:
-                f = _mat_opts({"材料类型": cur_t, "材料牌号": cur_b, "材料标准": new_text})
+                basis_stat = {
+                    "材料类型": cur_t, "材料牌号": cur_b, "材料标准": new_text,
+                }
+                f = _mat_opts(basis_stat)
                 stat_opts = f.get("供货状态", []) or []
                 _install_row_delegate(name_status, r_status, stat_opts, on_pick)
-                if (not _get(r_status)) and len(stat_opts) == 1:
-                    _set(r_status, stat_opts[0])
+                pick_stat = pick_autofill_supply_status(
+                    stat_opts, basis_stat,
+                    scope_element_name=(element_name if is_structural else None),
+                )
+                if (not _get(r_status)) and pick_stat:
+                    _set(r_status, pick_stat)
                 if quality_grade_hook:
                     quality_grade_hook(new_text, True)
 
@@ -1837,12 +1871,22 @@ def on_material_delegate_changed(table, item, param_col, value_col, viewer_insta
     opts_std  = get_filtered_material_options(basis_std, element_name=part_filter).get("材料标准", [])
     _reinstall_and_fix(r_std, opts_std, cur_std)
 
-    # 4) 供货状态（受类型+牌号+标准）
+    # 4) 供货状态（受类型+牌号+标准；多候选时看材料表默认值）
     cur_std   = getv(r_std)
     basis_stat = {"材料类型": cur_type, "材料牌号": cur_brand, "材料标准": cur_std}
     basis_stat = {k: v for k, v in basis_stat.items() if v}
     opts_stat  = get_filtered_material_options(basis_stat, element_name=part_filter).get("供货状态", [])
     _reinstall_and_fix(r_status, opts_stat, cur_status)
+    if r_status >= 0 and not init_mode:
+        cur_status2 = getv(r_status)
+        if not cur_status2:
+            pick_stat = pick_autofill_supply_status(opts_stat, basis_stat)
+            if pick_stat:
+                table.blockSignals(True)
+                try:
+                    table.item(r_status, value_col).setText(pick_stat)
+                finally:
+                    table.blockSignals(False)
 
     # 材料类型变更时的“锻件级别”显隐/清空
     if item.row() == r_type:
@@ -9080,6 +9124,13 @@ def on_confirm_element_merged_para_param(viewer_instance):
                 sync_fixed_saddle_param_across_tabs(viewer_instance, product_id, tab_name)
             except Exception as e:
                 print(f"[支座确定] 关键参数同步失败：{e}")
+            try:
+                from modules.guankoudingyi.funcs.funcs_attachment_comboBox_value import (
+                    sync_merged_saddle_model_to_attachment,
+                )
+                sync_merged_saddle_model_to_attachment(product_id)
+            except Exception as e:
+                print(f"[支座确定] 回写附件鞍式支座类型失败：{e}")
 
         # 4) 刷新 UI
         try:
