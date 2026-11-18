@@ -921,8 +921,8 @@ def save_to_template_library(template_name, product_data, product_type, product_
                         模板ID, 元件ID, 模板名称,
                         元件名称, 定义状态, 所处部件, 材料类型, 材料牌号,
                         材料标准, 供货状态, 所属类型, 所属形式,
-                        元件示意图, 有无覆层
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        元件示意图, 有无覆层, 模板来源
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         template_id,
@@ -939,6 +939,7 @@ def save_to_template_library(template_name, product_data, product_type, product_
                         product_form,
                         item.get("零件示意图"),
                         item.get("有无覆层"),
+                        "另存",
                     ),
                 )
         conn.commit()

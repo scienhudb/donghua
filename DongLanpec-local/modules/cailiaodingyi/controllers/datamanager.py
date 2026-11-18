@@ -14,6 +14,13 @@ from modules.cailiaodingyi.controllers.add_tab import PlusTabManager
 from modules.cailiaodingyi.controllers.table import (
     setup_param_detail_table,
     install_param_detail_selection_highlight,
+    PARAM_DETAIL_HEADERS,
+    apply_param_detail_headers,
+    apply_param_detail_column_widths,
+    get_param_detail_value,
+    param_name_text_alignment,
+    install_param_detail_name_wrap,
+    refresh_param_detail_row_heights,
 )
 from modules.cailiaodingyi.controllers.checkcombo import CheckComboDelegate
 from modules.cailiaodingyi.controllers.combo import ComboDelegate, MaterialInstantDelegate
@@ -1125,18 +1132,12 @@ def _query_zhizuo_image(support_type_name, component_name):
                 pass
 
 
-_ATTACHMENT_BASE_TYPES = ("接管法兰配对法兰", "接管拉筋", "防冲挡板", "破涡器")
-
-
 def normalize_attachment_type_from_tab(tab_classification: str) -> str:
-    """Tab分类名 → 附件类型（如 接管法兰配对法兰2 → 接管法兰配对法兰）"""
+    """Tab分类名 → 附件类型（如 接管法兰配对法兰2 / 垂直吊盖人孔2 → 去掉末尾序号）"""
     name = (tab_classification or "").strip()
     if not name:
         return ""
-    for base in _ATTACHMENT_BASE_TYPES:
-        if name == base or name.startswith(base):
-            return base
-    return re.sub(r"\d+$", "", name)
+    return re.sub(r"\d+$", "", name).strip() or name
 
 
 def _query_attachment_image(attachment_type: str):
@@ -2995,9 +2996,9 @@ def render_common_material_editor(viewer_instance):
             pass
 
     param_table.clear()
-    param_table.setColumnCount(3)
+    apply_param_detail_headers(param_table)
     param_table.setRowCount(len(fields))
-    param_table.setHorizontalHeaderLabels(["参数名称", "参数值", "参数单位"])
+    apply_param_detail_column_widths(param_table)
 
     param_col = 0
     value_col = 1
@@ -3033,7 +3034,7 @@ def render_common_material_editor(viewer_instance):
     for i, field in enumerate(fields):
         name_item = QTableWidgetItem(field)
         name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        name_item.setTextAlignment(Qt.AlignCenter)
+        name_item.setTextAlignment(param_name_text_alignment())
         param_table.setItem(i, param_col, name_item)
 
         agg_vals = []
@@ -3088,6 +3089,8 @@ def render_common_material_editor(viewer_instance):
         mapping=mapping,
         viewer_instance=viewer_instance,
     )
+    install_param_detail_name_wrap(param_table)
+    refresh_param_detail_row_heights(param_table)
     set_table_tooltips(param_table)
 
     apply_common_params_aggregated_visibility(
@@ -3445,6 +3448,8 @@ def _handle_table_click_impl(viewer_instance, row, col):
         viewer_instance=viewer_instance,
     )
     set_table_tooltips(viewer_instance.tableWidget_para_define)
+    install_param_detail_name_wrap(viewer_instance.tableWidget_para_define)
+    refresh_param_detail_row_heights(viewer_instance.tableWidget_para_define)
 
 
 def handle_table_click(viewer_instance, row, col):
@@ -4604,17 +4609,22 @@ def render_additional_info_table(viewer_instance, additional_info):
     with FreezeUI(details_table):   # 🚩 批量操作前冻结
         details_table.setRowCount(0)
         details_table.clearContents()
-        headers = ["参数名称", "参数值", "参数单位"]
-        details_table.setColumnCount(len(headers))
-        details_table.setHorizontalHeaderLabels(headers)
+        headers = list(PARAM_DETAIL_HEADERS)
+        apply_param_detail_headers(details_table)
+        apply_param_detail_column_widths(details_table)
         details_table.setRowCount(len(additional_info))
         for row_idx, row_data in enumerate(additional_info):
             for col_idx, header_name in enumerate(headers):
-                item = QTableWidgetItem(str(row_data.get(header_name, "")))
-                item.setTextAlignment(Qt.AlignCenter)
+                item = QTableWidgetItem(get_param_detail_value(row_data, header_name))
+                if col_idx == 0:
+                    item.setTextAlignment(param_name_text_alignment())
+                else:
+                    item.setTextAlignment(Qt.AlignCenter)
                 if col_idx in [0, 2]:
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 details_table.setItem(row_idx, col_idx, item)
+        install_param_detail_name_wrap(details_table)
+        refresh_param_detail_row_heights(details_table)
 
 
 
@@ -4670,29 +4680,30 @@ def render_guankou_info_table(viewer_instance, additional_info):
     details_table.setRowCount(0)
     details_table.clearContents()
 
-    headers = ["参数名称", "参数值", "参数单位"]
+    headers = list(PARAM_DETAIL_HEADERS)
 
     # 隐藏列序号
     details_table.verticalHeader().setVisible(False)
 
-    details_table.setColumnCount(len(headers))
+    apply_param_detail_headers(details_table)
     details_table.setRowCount(len(additional_info))
-    details_table.setHorizontalHeaderLabels(headers)
     details_table.verticalHeader().setVisible(False)
-
-    header = details_table.horizontalHeader()
-    for i in range(details_table.columnCount()):
-        header.setSectionResizeMode(i, QtWidgets.QHeaderView.Stretch)
+    apply_param_detail_column_widths(details_table)
 
     for row_idx, row_data in enumerate(additional_info):
         for col_idx, header_name in enumerate(headers):
-            item = QTableWidgetItem(str(row_data.get(header_name, "")))
-            item.setTextAlignment(QtCore.Qt.AlignCenter)
-            # ✅ 设置只读（不可编辑）列：参数名称 和 参数单位
-            if col_idx in [0, 2]:  # 参数名称列 和 参数单位列
+            item = QTableWidgetItem(get_param_detail_value(row_data, header_name))
+            if col_idx == 0:
+                item.setTextAlignment(param_name_text_alignment())
+            else:
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+            # ✅ 设置只读（不可编辑）列：参数名称 和 单位
+            if col_idx in [0, 2]:  # 参数名称列 和 单位列
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             details_table.setItem(row_idx, col_idx, item)
         # print(f"[插入检查] 行 {row_idx} param: {row_data.get('参数名称')} → 值: {row_data.get('参数值')}")
+    install_param_detail_name_wrap(details_table)
+    refresh_param_detail_row_heights(details_table)
     details_table.viewport().update()
     details_table.repaint()
 
@@ -5023,6 +5034,7 @@ def _setup_gasket_combo_row(
     """为垫片下拉字段安装 ComboDelegate，并按需写入默认值。
 
     readonly_if_empty=True 时（金属/填充材料）：定义表无候选则显示「-」且不可编辑。
+    # 1110金属材料/填充材料加手改保护：force_write=False 时保留当前非空值（含库中手改值）
     """
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QTableWidgetItem
@@ -5036,11 +5048,17 @@ def _setup_gasket_combo_row(
         table.setItem(row, value_col, it)
     it.setTextAlignment(Qt.AlignCenter)
     table.setItemDelegateForRow(row, None)
+    cur = (it.text() or "").strip()
+    # 1110金属材料/填充材料加手改保护：保留库/手改值时，即使不在候选中也并入下拉，避免被刷成第一项
+    if cur and cur not in ("-",) and cur not in opts and not force_write:
+        opts = [cur] + opts
 
     if not opts:
         if readonly_if_empty:
             it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            it.setText("-")
+            # 1110金属材料/填充材料加手改保护：无候选时仅强制写入才改成「-」，否则保留已有值
+            if force_write or (not cur) or cur == "-":
+                it.setText("-")
         else:
             it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
             if force_write:
@@ -5051,9 +5069,11 @@ def _setup_gasket_combo_row(
     table.setItemDelegateForRow(row, ComboDelegate(opts, table))
     if force_write:
         it.setText(str(new_value if new_value is not None else opts[0]))
-    elif new_value is not None:
-        cur = (it.text() or "").strip()
-        if (not cur) or (cur not in opts):
+    else:
+        # 1110金属材料/填充材料加手改保护：非强制时只要当前非空就保留，绝不回退推荐第一项
+        if cur and cur != "-":
+            return
+        if new_value is not None:
             pick = new_value if new_value in opts else opts[0]
             it.setText(str(pick))
 
@@ -5103,6 +5123,18 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
     MANUAL_TAG = "manual"
     WEAK_VALS = {"", "程序推荐"}     # 可被自动覆盖的弱值
     DIM_PARAMS = {"垫片名义外径D2n","垫片名义内径D1n","环内径d1","垫片外径D","垫片内径d","外径D","内径d","d1"}
+    # 1110垫片材料/金属材料/填充材料/垫片比压力y/垫片系数m/压紧面形状/垫片结构型式代号/垫片厚度加手改保护
+    # （尺寸 D1n/D2n/d1 与公称压力PN 原已有保护；类型/标准为上游驱动，元件名称为只读）
+    GASKET_MANUAL_PROTECT_PARAMS = {
+        "垫片材料",
+        "金属材料", "金属材料名称",
+        "填充材料", "填充材料名称",
+        "垫片比压力y", "垫片比压y", "比压力y",
+        "垫片系数m", "垫片系数M", "系数m",
+        "压紧面形状",
+        "垫片结构型式代号", "垫片结构形式代号", "垫片结构式代号", "垫片结构型式",
+        "垫片厚度",
+    }
 
     # ---------- 工具：安全获取当前元件名称 ----------
     def _current_element_name() -> str:
@@ -5808,6 +5840,31 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
         table._gasket_type_changing = False
         table._gasket_standard_changing = False
         table._gasket_nominal_pressure_changing = False
+        # 1110垫片材料/金属材料/填充材料/垫片比压力y/垫片系数m加手改保护：
+        # 进页时把签名同步为当前库值，避免仅因装下拉/重写标准就误判 driver_changed 并刷掉手改值
+        _ele0 = getattr(table, "_element_name", "") or ""
+        _gname0 = _v("垫片名称") or _ele0
+        table._gasket_last_sig = (
+            f"{_gname0}|{table._last_gasket_standard}|"
+            f"{table._last_gasket_type}|{table._last_nominal_pressure}"
+        )
+        # 1110垫片材料加手改保护：记录进页材料，避免同值 setText 误触发材料→金属/填充强制刷新
+        table._last_gasket_material = _v("垫片材料")
+        # 1110金属材料/填充材料/垫片材料/垫片比压力y/垫片系数m/压紧面形状/垫片结构型式代号/垫片厚度加手改保护：
+        # 进页快照库值，联动安装结束后若驱动未变则强制还原（防止中间步骤误刷 UI）
+        table._gasket_db_snapshot = {
+            "垫片类型": table._last_gasket_type,
+            "垫片标准": table._last_gasket_standard,
+            "公称压力PN": table._last_nominal_pressure,
+            "垫片材料": _v("垫片材料"),
+            "金属材料": _v("金属材料") or _v("金属材料名称"),
+            "填充材料": _v("填充材料") or _v("填充材料名称"),
+            "垫片比压力y": _v("垫片比压力y") or _v("垫片比压y") or _v("比压力y"),
+            "垫片系数m": _v("垫片系数m") or _v("垫片系数M") or _v("系数m"),
+            "压紧面形状": _v("压紧面形状"),
+            "垫片结构型式代号": _v("垫片结构型式代号") or _v("垫片结构形式代号") or _v("垫片结构型式"),
+            "垫片厚度": _v("垫片厚度"),
+        }
         # 装配凸台高度→隔板槽深度：缓存初值，避免加载/装代理后误触发 itemChanged 用凸台高度覆盖库中槽深
         table._last_assembly_boss_height = _v("装配凸台高度")
     except Exception:
@@ -5991,6 +6048,22 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
             finally:
                 table.blockSignals(False)
 
+        # 1110垫片材料/金属材料/填充材料/垫片比压力y/垫片系数m/压紧面形状/垫片结构型式代号/垫片厚度加手改保护
+        if pname in GASKET_MANUAL_PROTECT_PARAMS:
+            cur_sig = _current_gasket_signature()
+            table.blockSignals(True)
+            try:
+                if val and (val not in WEAK_VALS) and val != "-":
+                    item.setData(ROLE_SRC, MANUAL_TAG)
+                    item.setData(ROLE_SIG, cur_sig)
+                    table._gasket_user_lock[pname] = cur_sig
+                else:
+                    item.setData(ROLE_SRC, AUTO_TAG)
+                    item.setData(ROLE_SIG, None)
+                    table._gasket_user_lock.pop(pname, None)
+            finally:
+                table.blockSignals(False)
+
             try:
                 param_col_local = param_col
                 value_col_local = value_col
@@ -6063,49 +6136,64 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                 pass
 
         # === 垫片材料变更：刷新 y/m、金属材料、填充材料，不动尺寸 ===
+        # 1110垫片比压力y/垫片系数m/金属材料/填充材料加手改保护：
+        # 这里是「垫片材料」上游变化触发的合法联动，仍强制刷新其下游；类型/标准/PN 未变时的进页误触发不走此分支
         if pname == "垫片材料":
             try:
-                gasket_type     = _val("垫片型式") or _val("垫片类型")
-                gasket_standard = _val("垫片标准")
-                gasket_material = val
-
-                # 查询当前材料对应的 y/m/金属/填充（类型+标准+材料优先）
-                props = query_gasket_material_options_by_type_std(
-                    gasket_type, gasket_standard, gasket_material
+                # 1110垫片材料加手改保护：同值重复写入不刷新下游（进页装联动时常误触发）
+                _last_mat = getattr(table, "_last_gasket_material", None)
+                _mat_really_changed = not (
+                    _last_mat is not None and (_last_mat or "").strip() == (val or "").strip()
                 )
-                if (not props.get("垫片比压力y")) and (not props.get("垫片系数m")) and gasket_material:
-                    # 兜底：仅按材料查
-                    try:
-                        from modules.cailiaodingyi.funcs.funcs_pdf_change import get_gasket_param_from_db
-                        ym_only = get_gasket_param_from_db(gasket_material) or {}
-                        if ym_only:
-                            props["垫片比压力y"] = props.get("垫片比压力y") or ym_only.get("垫片比压力y")
-                            props["垫片系数m"] = props.get("垫片系数m") or ym_only.get("垫片系数m")
-                    except Exception:
-                        pass
+                table._last_gasket_material = val
 
-                row_y = _find_any(["垫片比压力y", "垫片比压y", "比压力y"])
-                row_m = _find_any(["垫片系数m", "垫片系数M", "系数m"])
-                row_metal = _find_any(["金属材料", "金属材料名称"])
-                row_filler = _find_any(["填充材料", "填充材料名称"])
+                if _mat_really_changed:
+                    gasket_type     = _val("垫片型式") or _val("垫片类型")
+                    gasket_standard = _val("垫片标准")
+                    gasket_material = val
 
-                # 垫片材料变更时强制覆盖 y/m 与金属/填充（不动尺寸/锁）
-                _force_write(row_y, props.get("垫片比压力y"))
-                _force_write(row_m, props.get("垫片系数m"))
-                _setup_gasket_combo_row(
-                    table, row_metal, value_col,
-                    props.get("金属材料候选") or [],
-                    props.get("金属材料"),
-                    force_write=True,
-                    readonly_if_empty=True,
-                )
-                _setup_gasket_combo_row(
-                    table, row_filler, value_col,
-                    props.get("填充材料候选") or [],
-                    props.get("填充材料"),
-                    force_write=True,
-                    readonly_if_empty=True,
-                )
+                    # 查询当前材料对应的 y/m/金属/填充（类型+标准+材料优先）
+                    props = query_gasket_material_options_by_type_std(
+                        gasket_type, gasket_standard, gasket_material
+                    )
+                    if (not props.get("垫片比压力y")) and (not props.get("垫片系数m")) and gasket_material:
+                        # 兜底：仅按材料查
+                        try:
+                            from modules.cailiaodingyi.funcs.funcs_pdf_change import get_gasket_param_from_db
+                            ym_only = get_gasket_param_from_db(gasket_material) or {}
+                            if ym_only:
+                                props["垫片比压力y"] = props.get("垫片比压力y") or ym_only.get("垫片比压力y")
+                                props["垫片系数m"] = props.get("垫片系数m") or ym_only.get("垫片系数m")
+                        except Exception:
+                            pass
+
+                    row_y = _find_any(["垫片比压力y", "垫片比压y", "比压力y"])
+                    row_m = _find_any(["垫片系数m", "垫片系数M", "系数m"])
+                    row_metal = _find_any(["金属材料", "金属材料名称"])
+                    row_filler = _find_any(["填充材料", "填充材料名称"])
+
+                    # 垫片材料变更时强制覆盖 y/m 与金属/填充（不动尺寸/锁）
+                    for _nm in ("垫片比压力y", "垫片比压y", "比压力y",
+                                "垫片系数m", "垫片系数M", "系数m",
+                                "金属材料", "金属材料名称",
+                                "填充材料", "填充材料名称"):
+                        table._gasket_user_lock.pop(_nm, None)
+                    _force_write(row_y, props.get("垫片比压力y"))
+                    _force_write(row_m, props.get("垫片系数m"))
+                    _setup_gasket_combo_row(
+                        table, row_metal, value_col,
+                        props.get("金属材料候选") or [],
+                        props.get("金属材料"),
+                        force_write=True,
+                        readonly_if_empty=True,
+                    )
+                    _setup_gasket_combo_row(
+                        table, row_filler, value_col,
+                        props.get("填充材料候选") or [],
+                        props.get("填充材料"),
+                        force_write=True,
+                        readonly_if_empty=True,
+                    )
             except Exception as e:
                 print(f"[垫片材料联动] 刷新y/m/金属/填充失败: {e}")
 
@@ -6583,7 +6671,19 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                 nominal_pressure = _val("公称压力PN")
                 cur_sig         = f"{gasket_name}|{gasket_standard}|{gasket_type}|{nominal_pressure}"
 
-                driver_changed = (table._gasket_last_sig != cur_sig)
+                # 1110垫片材料/金属材料/填充材料/垫片比压力y/垫片系数m加手改保护：
+                # 仅当类型/标准/PN 相对进页缓存真正变化时才强制覆盖；签名误判不刷手改/库值
+                _prev_type = getattr(table, "_last_gasket_type", None)
+                _prev_std = getattr(table, "_last_gasket_standard", None)
+                _prev_pn = getattr(table, "_last_nominal_pressure", None)
+                real_upstream_changed = bool(
+                    (_prev_type and _prev_type != gasket_type)
+                    or (_prev_std and _prev_std != gasket_standard)
+                    or (_prev_pn is not None and _prev_pn != nominal_pressure)
+                    or getattr(table, "_gasket_type_changing", False)
+                    or getattr(table, "_gasket_standard_changing", False)
+                    or getattr(table, "_gasket_nominal_pressure_changing", False)
+                )
 
                 # —— 查尺寸与材料 —— #
                 spec  = resolve_gasket_dimensions(
@@ -6835,21 +6935,25 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                         if gasket_standard == "非标垫片":
                             pass
                         else:
-                            if driver_changed:
+                            if real_upstream_changed:
+                                # 1110垫片名义内径D1n/垫片名义外径D2n/环内径d1加手改保护：真驱动变化才清尺寸锁
                                 _clear_gasket_locks_for(DIM_PARAMS)
+                                # 1110垫片材料/金属材料/填充材料/垫片比压力y/垫片系数m/压紧面形状/垫片结构型式代号/垫片厚度加手改保护
+                                _clear_gasket_locks_for(GASKET_MANUAL_PROTECT_PARAMS)
 
                             if not spec.get("nonstd", True):
-                                _set_by_spec(row_D2n, spec.get("外直径D"), force=driver_changed)
-                                _set_by_spec(row_D1n, spec.get("内直径d"), force=driver_changed)
-                                _set_by_spec(row_d1,  spec.get("环内径d1"), force=driver_changed)
+                                _set_by_spec(row_D2n, spec.get("外直径D"), force=real_upstream_changed)
+                                _set_by_spec(row_D1n, spec.get("内直径d"), force=real_upstream_changed)
+                                _set_by_spec(row_d1,  spec.get("环内径d1"), force=real_upstream_changed)
                             else:
                                 for rr in (row_D2n, row_D1n, row_d1):
-                                    _set_by_spec(rr, None, force=driver_changed)  # “程序推荐”
+                                    _set_by_spec(rr, None, force=real_upstream_changed)  # “程序推荐”
 
                             # 2.2 材料 / y / m / 金属 / 填充 写回（按类型+标准+材料）
+                            # 1110垫片材料/金属材料/填充材料/垫片比压力y/垫片系数m加手改保护
                             if props:
                                 mats = (props.get("垫片材料候选") or [])
-                                if driver_changed:
+                                if real_upstream_changed:
                                     eff_gm = mats[0] if mats else ""
                                     props = query_gasket_material_options_by_type_std(
                                         gasket_type, gasket_standard, eff_gm
@@ -6859,47 +6963,31 @@ def apply_paramname_combobox(table: QTableWidget, param_col: int, value_col: int
                                 if row_mat is not None:
                                     _ensure_editable(row_mat)
                                     table.setItemDelegateForRow(row_mat, ComboDelegate(mats, table))
-                                    if driver_changed and mats:
+                                    if real_upstream_changed and mats:
                                         _set_by_spec(row_mat, mats[0], force=True)
-                                _set_by_spec(row_y, props.get("垫片比压力y"), force=driver_changed)
-                                _set_by_spec(row_m, props.get("垫片系数m"), force=driver_changed)
-                                if driver_changed:
-                                    _setup_gasket_combo_row(
-                                        table, row_metal, value_col,
-                                        props.get("金属材料候选") or [],
-                                        props.get("金属材料"),
-                                        force_write=True,
-                                        readonly_if_empty=True,
-                                    )
-                                    _setup_gasket_combo_row(
-                                        table, row_filler, value_col,
-                                        props.get("填充材料候选") or [],
-                                        props.get("填充材料"),
-                                        force_write=True,
-                                        readonly_if_empty=True,
-                                    )
-                                else:
-                                    _setup_gasket_combo_row(
-                                        table, row_metal, value_col,
-                                        props.get("金属材料候选") or [],
-                                        props.get("金属材料"),
-                                        force_write=False,
-                                        readonly_if_empty=True,
-                                    )
-                                    _setup_gasket_combo_row(
-                                        table, row_filler, value_col,
-                                        props.get("填充材料候选") or [],
-                                        props.get("填充材料"),
-                                        force_write=False,
-                                        readonly_if_empty=True,
-                                    )
+                                _set_by_spec(row_y, props.get("垫片比压力y"), force=real_upstream_changed)
+                                _set_by_spec(row_m, props.get("垫片系数m"), force=real_upstream_changed)
+                                _setup_gasket_combo_row(
+                                    table, row_metal, value_col,
+                                    props.get("金属材料候选") or [],
+                                    props.get("金属材料"),
+                                    force_write=real_upstream_changed,
+                                    readonly_if_empty=True,
+                                )
+                                _setup_gasket_combo_row(
+                                    table, row_filler, value_col,
+                                    props.get("填充材料候选") or [],
+                                    props.get("填充材料"),
+                                    force_write=real_upstream_changed,
+                                    readonly_if_empty=True,
+                                )
                             else:
                                 for rr in (row_mat, row_y, row_m):
-                                    _set_by_spec(rr, None, force=driver_changed)
+                                    _set_by_spec(rr, None, force=real_upstream_changed)
                                 for rr in (row_metal, row_filler):
                                     _setup_gasket_combo_row(
                                         table, rr, value_col, [],
-                                        force_write=True,
+                                        force_write=real_upstream_changed,
                                         readonly_if_empty=True,
                                     )
 
@@ -7204,7 +7292,12 @@ def apply_linked_param_combobox(table, param_col, value_col, mapping, viewer_ins
 
     def _set(r, txt):
         _ensure_editable_item(table, r, value_col)
-        table.item(r, value_col).setText("" if txt is None else str(txt))
+        # 1110垫片材料/金属材料/填充材料加手改保护：同值不 setText，避免误触发 itemChanged 刷下游
+        new_txt = "" if txt is None else str(txt)
+        it0 = table.item(r, value_col)
+        if it0 is not None and (it0.text() or "") == new_txt:
+            return
+        table.item(r, value_col).setText(new_txt)
 
     # —— 名称同义词（统一以“垫片类型”为规范名）——
     _CANON = {
@@ -7322,6 +7415,10 @@ def apply_linked_param_combobox(table, param_col, value_col, mapping, viewer_ins
                     if dep == "垫片标准" and (
                         cur_val == "非标垫片" or getattr(table, "_last_gasket_standard", "") == "非标垫片"
                     ):
+                        pass
+                    # 1110压紧面形状/垫片结构型式代号/垫片材料加手改保护：
+                    # 复合联动匹配时若当前值已在候选中则保留，避免每次进页被刷成第一项
+                    elif cur_val and cur_val in opts:
                         pass
                     else:
                         _set(r_dep, opts[0] if opts else "")
@@ -7544,6 +7641,64 @@ def apply_linked_param_combobox(table, param_col, value_col, mapping, viewer_ins
             table.setItem(_r, value_col, _it)
         _it.setTextAlignment(Qt.AlignCenter)
         _it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+
+    # 1110金属材料/填充材料/垫片材料/垫片比压力y/垫片系数m/压紧面形状/垫片结构型式代号/垫片厚度加手改保护：
+    # 联动安装全部结束后，若类型/标准/PN 相对进页快照未变，则把被误刷的字段还原为库值
+    try:
+        snap = getattr(table, "_gasket_db_snapshot", None) or {}
+        if snap and ("垫片" in (element_ctx or "")):
+            def _safe_get(field_name):
+                rr = _row_of(field_name)
+                return _get(rr) if rr >= 0 else ""
+            cur_type = _safe_get("垫片类型") or _safe_get("垫片型式")
+            cur_std = _safe_get("垫片标准")
+            cur_pn = _safe_get("公称压力PN")
+            snap_type = (snap.get("垫片类型") or "").strip()
+            snap_std = (snap.get("垫片标准") or "").strip()
+            snap_pn = (snap.get("公称压力PN") or "").strip()
+            if (
+                (cur_type or "").strip() == snap_type
+                and (cur_std or "").strip() == snap_std
+                and (cur_pn or "").strip() == snap_pn
+            ):
+                _restore_map = [
+                    ("垫片材料", snap.get("垫片材料")),
+                    ("金属材料", snap.get("金属材料")),
+                    ("金属材料名称", snap.get("金属材料")),
+                    ("填充材料", snap.get("填充材料")),
+                    ("填充材料名称", snap.get("填充材料")),
+                    ("垫片比压力y", snap.get("垫片比压力y")),
+                    ("垫片比压y", snap.get("垫片比压力y")),
+                    ("比压力y", snap.get("垫片比压力y")),
+                    ("垫片系数m", snap.get("垫片系数m")),
+                    ("垫片系数M", snap.get("垫片系数m")),
+                    ("系数m", snap.get("垫片系数m")),
+                    ("压紧面形状", snap.get("压紧面形状")),
+                    ("垫片结构型式代号", snap.get("垫片结构型式代号")),
+                    ("垫片结构形式代号", snap.get("垫片结构型式代号")),
+                    ("垫片结构型式", snap.get("垫片结构型式代号")),
+                    ("垫片厚度", snap.get("垫片厚度")),
+                ]
+                table.blockSignals(True)
+                try:
+                    for _pn, _pv in _restore_map:
+                        if _pv is None:
+                            continue
+                        _rr = _row_of(_pn)
+                        if _rr < 0:
+                            continue
+                        _it = table.item(_rr, value_col)
+                        _cur = (_it.text() if _it else "") or ""
+                        if _cur.strip() == str(_pv).strip():
+                            continue
+                        _ensure_editable_item(table, _rr, value_col)
+                        table.item(_rr, value_col).setText(str(_pv))
+                    # 同步材料缓存，避免随后同值事件再刷金属/填充
+                    table._last_gasket_material = (snap.get("垫片材料") or "").strip()
+                finally:
+                    table.blockSignals(False)
+    except Exception as _e_restore:
+        print(f"[垫片手改保护] 进页还原库值失败: {_e_restore}")
 
     if readonly_local_missing and viewer_instance is not None:
         try:
@@ -9749,8 +9904,7 @@ def create_element_merged_para_tab_ui(viewer_instance, tab_name, data):
     
     # 创建表格（与普通元件详细定义表同一套新 UI 样式）
     table = QTableWidget()
-    table.setColumnCount(3)
-    table.setHorizontalHeaderLabels(['参数名称', '参数值', '参数单位'])
+    apply_param_detail_headers(table)
     setup_param_detail_table(table)
     install_param_detail_selection_highlight(table)
     
@@ -9940,8 +10094,7 @@ def render_element_merged_para_data_to_ui(viewer_instance, merged_para_data, ele
 
             # 创建表格 - 与普通元件 / 设备法兰紧固件一致的新 UI 样式
             table = QTableWidget()
-            table.setColumnCount(3)  # 参数名称 | 参数值 | 参数单位
-            table.setHorizontalHeaderLabels(['参数名称', '参数值', '参数单位'])
+            apply_param_detail_headers(table)  # 参数名称 | 参数值 | 单位
             setup_param_detail_table(table)
             install_param_detail_selection_highlight(table)
 
@@ -10136,9 +10289,9 @@ def render_element_merged_para_table_data(table, data, element_name=None):
     with FreezeUI(table):   # 🚩 批量操作前冻结
         table.setRowCount(0)
         table.clearContents()
-        headers = ["参数名称", "参数值", "参数单位"]
-        table.setColumnCount(len(headers))
-        table.setHorizontalHeaderLabels(headers)
+        headers = list(PARAM_DETAIL_HEADERS)
+        apply_param_detail_headers(table)
+        apply_param_detail_column_widths(table)
         table.setRowCount(len(display_params))
         
         # 按照指定顺序渲染数据（全部来自库）
@@ -10147,8 +10300,8 @@ def render_element_merged_para_table_data(table, data, element_name=None):
             
             # 渲染三列数据
             for col_idx, header_name in enumerate(headers):
-                # 获取原始值
-                raw_value = row_data.get(header_name, "")
+                # 获取原始值（表头「单位」对应库字段「参数单位」）
+                raw_value = get_param_detail_value(row_data, header_name)
                 
                 # 初始化显示值
                 display_value = raw_value
@@ -10172,11 +10325,16 @@ def render_element_merged_para_table_data(table, data, element_name=None):
                         display_value = val
                 
                 item = QTableWidgetItem(str(display_value))
-                item.setTextAlignment(Qt.AlignCenter)
-                # ✅ 设置只读（不可编辑）列：参数名称 和 参数单位
-                if col_idx in [0, 2]:  # 参数名称列 和 参数单位列
+                if col_idx == 0:
+                    item.setTextAlignment(param_name_text_alignment())
+                else:
+                    item.setTextAlignment(Qt.AlignCenter)
+                # ✅ 设置只读（不可编辑）列：参数名称 和 单位
+                if col_idx in [0, 2]:  # 参数名称列 和 单位列
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 table.setItem(row_idx, col_idx, item)
+        install_param_detail_name_wrap(table)
+        refresh_param_detail_row_heights(table)
     
     # print(f"[附加参数合并表] 数据填充完成，表格行数: {table.rowCount()}")
 

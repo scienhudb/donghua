@@ -324,7 +324,7 @@ def filter_visible_elements(element_rows: List[dict]) -> List[dict]:
 
 
 class StructureTreeDialog(QDialog):
-    """双列表：左=不显示，右=显示；必选不可移除；锁定隐藏项左侧灰且不可添加。"""
+    """双列表：左=已选项(显示)，右=待选项(不显示)；必选不可移除；锁定项在待选项侧灰且不可添加。"""
 
     def __init__(
         self,
@@ -341,7 +341,7 @@ class StructureTreeDialog(QDialog):
         apply_dialog_style(self)
         self._mandatory: Set = set(mandatory_element_ids or [])
         self._locked_hidden: Set = set(locked_hidden_element_ids or [])
-        # 必选与锁定互斥：锁定优先留在左侧
+        # 必选与锁定互斥：锁定优先留在待选项（右侧）
         self._mandatory -= self._locked_hidden
         self._result_visible_ids: Optional[List] = None
 
@@ -350,33 +350,30 @@ class StructureTreeDialog(QDialog):
         all_ids = [item["元件ID"] for item in all_elements if item.get("元件ID") is not None]
 
         self.setLayout(QVBoxLayout())
-        hint = QLabel(
-            "左侧：不显示的元件；右侧：显示的元件。"
-            "右侧灰色带*为固定显示不可移除；左侧灰色为当前不可选。"
-        )
-        hint.setWordWrap(True)
-        self.layout().addWidget(hint)
 
         lists_row = QHBoxLayout()
+        # 左：已选项（显示）
         left_col = QVBoxLayout()
-        left_col.addWidget(QLabel("不显示"))
-        self.list_hidden = QListWidget()
-        self.list_hidden.setSelectionMode(QListWidget.ExtendedSelection)
-        left_col.addWidget(self.list_hidden)
+        left_col.addWidget(QLabel("已选项"))
+        self.list_visible = QListWidget()
+        self.list_visible.setSelectionMode(QListWidget.ExtendedSelection)
+        left_col.addWidget(self.list_visible)
 
         btn_col = QVBoxLayout()
         btn_col.addStretch()
-        self.btn_add = QPushButton("添加 >>")
-        self.btn_remove = QPushButton("<< 移除")
+        # 已选项在左、待选项在右：添加←、移除→
+        self.btn_add = QPushButton("<< 添加")
+        self.btn_remove = QPushButton("移除 >>")
         btn_col.addWidget(self.btn_add)
         btn_col.addWidget(self.btn_remove)
         btn_col.addStretch()
 
+        # 右：待选项（不显示）
         right_col = QVBoxLayout()
-        right_col.addWidget(QLabel("显示"))
-        self.list_visible = QListWidget()
-        self.list_visible.setSelectionMode(QListWidget.ExtendedSelection)
-        right_col.addWidget(self.list_visible)
+        right_col.addWidget(QLabel("待选项"))
+        self.list_hidden = QListWidget()
+        self.list_hidden.setSelectionMode(QListWidget.ExtendedSelection)
+        right_col.addWidget(self.list_hidden)
 
         lists_row.addLayout(left_col, 1)
         lists_row.addLayout(btn_col)
@@ -392,7 +389,14 @@ class StructureTreeDialog(QDialog):
             cancel_btn.setText("取消")
         bbox.accepted.connect(self._on_accept)
         bbox.rejected.connect(self.reject)
-        self.layout().addWidget(bbox)
+
+        footer = QHBoxLayout()
+        note = QLabel("注：带*号项目为必选项。")
+        note.setStyleSheet("color: red;")
+        footer.addWidget(note)
+        footer.addStretch()
+        footer.addWidget(bbox)
+        self.layout().addLayout(footer)
 
         for eid in all_ids:
             row = id_to_row.get(eid, {})
@@ -483,7 +487,7 @@ def show_structure_tree_dialog(
 ) -> Optional[List]:
     """
     弹出结构树；确认返回 visible 元件ID 列表，取消返回 None。
-    locked_hidden_element_ids：强制留在左侧且不可添加到右侧。
+    locked_hidden_element_ids：强制留在待选项（右侧）且不可添加到已选项。
     """
     dlg = StructureTreeDialog(
         parent,

@@ -1,7 +1,7 @@
 """
 管口附件参数渲染模块
 用于渲染管口附件元件的参数到UI界面
-固定三列：参数名称、参数值、参数单位
+固定三列：参数名称、参数值、单位（库字段仍为参数单位）
 根据管口定义中的附件类型动态创建tab页
 """
 from collections import defaultdict
@@ -16,8 +16,17 @@ from modules.cailiaodingyi.controllers.combo import ComboPopupEventFilter, Multi
 from modules.cailiaodingyi.controllers.table import (
     setup_param_detail_table,
     install_param_detail_selection_highlight,
+    apply_param_detail_headers,
+    param_name_text_alignment,
+    install_param_detail_name_wrap,
+    refresh_param_detail_row_heights,
 )
-from modules.cailiaodingyi.funcs.funcs_pdf_input import db_config_1, db_config_2, get_options_for_param
+from modules.cailiaodingyi.funcs.funcs_pdf_input import (
+    db_config_1,
+    db_config_2,
+    db_config_3,
+    get_options_for_param,
+)
 from modules.cailiaodingyi.funcs.funcs_pdf_render import _set_table_tooltips, _install_tooltip_updater
 from modules.cailiaodingyi.funcs.funcs_pdf_change import (
     get_filtered_material_options,
@@ -106,11 +115,47 @@ def _set_tip(viewer_instance, msg, *, success=True, auto_clear_ms=5000):
         print(f"[提示栏写入失败] {e}")
 
 
+def _load_attachment_types_from_db():
+    """
+    从元件库「管口附件表」读取附件类型，按对应ID排序（与管口定义下拉同源）。
+    """
+    connection = None
+    try:
+        connection = pymysql.connect(**db_config_3)
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT 附件类型
+                FROM 管口附件表
+                WHERE 附件类型 IS NOT NULL AND 附件类型 != ''
+                ORDER BY 对应ID
+                """
+            )
+            rows = cursor.fetchall() or []
+        result = []
+        seen = set()
+        for row in rows:
+            name = (row.get("附件类型") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        return result
+    except Exception as e:
+        print(f"[管口附件] 读取元件库管口附件表失败: {e}")
+        return []
+    finally:
+        if connection:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
 def get_attachment_tab_types_by_product(product_id):
     """
     从产品设计活动表_管口附件附加参数表中查询Tab分类，用于创建tab页
     返回: 去重后的Tab分类列表，按附件类型分组，每个附件类型内按Tab_ID排序
-    例如: ["接管法兰配对法兰", "接管法兰配对法兰2", "接管拉筋", "防冲挡板"]
+    附件类型顺序取自元件库「管口附件表」
     """
     connection = pymysql.connect(**db_config_1)
     try:
@@ -126,7 +171,7 @@ def get_attachment_tab_types_by_product(product_id):
             rows = cursor.fetchall()
             
             # 按附件类型分组，每个附件类型内按Tab_ID排序
-            fixed_tab_order = ["接管法兰配对法兰", "接管拉筋", "防冲挡板", "破涡器"]
+            tab_order = _load_attachment_types_from_db()
             attachment_type_groups = {}
             for row in rows:
                 tab_classification = row.get('Tab分类', '').strip()
@@ -137,13 +182,19 @@ def get_attachment_tab_types_by_product(product_id):
                     attachment_type_groups[attachment_type] = []
                 attachment_type_groups[attachment_type].append((tab_classification, min_tab_id))
             
-            # 按固定顺序和Tab_ID排序
+            # 按库表顺序排；活动库里有、但管口附件表暂无的类型追加在后
             result = []
-            for attachment_type in fixed_tab_order:
+            seen_types = set()
+            for attachment_type in tab_order:
                 if attachment_type in attachment_type_groups:
-                    # 按Tab_ID排序
                     groups = sorted(attachment_type_groups[attachment_type], key=lambda x: x[1] or '')
                     result.extend([g[0] for g in groups])
+                    seen_types.add(attachment_type)
+            for attachment_type, groups in attachment_type_groups.items():
+                if attachment_type in seen_types:
+                    continue
+                groups_sorted = sorted(groups, key=lambda x: x[1] or '')
+                result.extend([g[0] for g in groups_sorted])
             
             return result
     finally:
@@ -175,10 +226,10 @@ def load_attachment_param_data(product_id, tab_classification):
 
 def get_attachment_type_options():
     """
-    获取管口附件类型下拉框选项
+    获取管口附件类型下拉框选项（元件库「管口附件表」）
     返回: 附件类型选项列表
     """
-    return ["接管法兰配对法兰", "接管拉筋", "防冲挡板", "破涡器"]
+    return _load_attachment_types_from_db()
 
 
 def copy_attachment_tab_from_current(product_id, attachment_type, source_tab_name, source_param_values, viewer_instance):
@@ -603,8 +654,7 @@ def _create_attachment_tab_page(tab_classification):
     layout.setSpacing(6)
     
     table = QTableWidget()
-    table.setColumnCount(3)
-    table.setHorizontalHeaderLabels(['参数名称', '参数值', '参数单位'])
+    apply_param_detail_headers(table)
     table.verticalHeader().setVisible(False)
     table.setAlternatingRowColors(False)
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -650,8 +700,7 @@ def render_empty_attachment_ui(viewer_instance, placeholder_tab_name="管口附�
     # 清空并设置表头
     table.clear()
     table.setRowCount(0)
-    table.setColumnCount(3)
-    table.setHorizontalHeaderLabels(['参数名称', '参数值', '参数单位'])
+    apply_param_detail_headers(table)
     _setup_table_header_style(table)
     
     # 记录到动态字典，避免后续引用空指针
@@ -938,8 +987,7 @@ def _setup_table_basic_properties(table):
     table._loading = True
     table.clear()
     table.setRowCount(0)
-    table.setColumnCount(3)
-    table.setHorizontalHeaderLabels(['参数名称', '参数值', '参数单位'])
+    apply_param_detail_headers(table)
     
     # 安装事件过滤器
     flt = ComboPopupEventFilter(table)
@@ -1454,7 +1502,7 @@ def _install_attachment_flange_gasket_linkage(
     value_col: int = 1,
 ):
     """
-    「接管法兰配对法兰」附件：垫片联动
+    管口附件垫片联动（有垫片相关参数行时才生效，不按附件类型名硬编码）：
     - 垫片类型：按压力体系(PN/CLASS)从主表取候选
     - 垫片标准：选类型后给出该类型下全部「垫片标准」候选（下拉）
     - 垫片型式：选标准后按对应规则ID读明细表候选；默认型式以主表「垫片型式」为准
@@ -1462,14 +1510,13 @@ def _install_attachment_flange_gasket_linkage(
     """
     if not product_id:
         return
-    if (attachment_type or "").strip() != "接管法兰配对法兰":
-        return
 
     type_name, std_name, mat_name, style_name = "垫片类型", "垫片标准", "垫片材料", "垫片型式"
     type_row = _find_first_row_by_param(table, param_col, type_name)
     std_row = _find_first_row_by_param(table, param_col, std_name)
     mat_row = _find_first_row_by_param(table, param_col, mat_name)
     style_row = _find_first_row_by_param(table, param_col, style_name)
+    # 无垫片参数结构的附件（如拉筋/挡板）直接跳过
     if type_row is None or std_row is None or mat_row is None or style_row is None:
         return
 
@@ -2256,6 +2303,8 @@ def _render_attachment_table_data(table, attachment_type, guankou_codes, param_d
     
     # 设置表头样式
     _setup_table_header_style(table)
+    install_param_detail_name_wrap(table)
+    refresh_param_detail_row_heights(table)
     
     # 安装事件处理器
     _install_table_event_handlers(table)
@@ -2435,10 +2484,10 @@ def _add_param_row(table, param_name, guankou_codes, param_data, material_option
     row = table.rowCount()
     table.insertRow(row)
     
-    # 参数名称列
+    # 参数名称列（内容左对齐；表头仍居中）
     name_item = QTableWidgetItem(param_name)
     name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-    name_item.setTextAlignment(Qt.AlignCenter)  # 居中显示，模仿普通元件
+    name_item.setTextAlignment(param_name_text_alignment())
     table.setItem(row, 0, name_item)
     
     # 参数值列

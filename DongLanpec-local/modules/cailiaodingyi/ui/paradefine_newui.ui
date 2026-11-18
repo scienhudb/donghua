@@ -1137,12 +1137,12 @@ QMenu::item:selected {
                     </column>
                     <column>
                      <property name="text">
-                      <string>参数数值</string>
+                      <string>参数值</string>
                      </property>
                     </column>
                     <column>
                      <property name="text">
-                      <string>参数单位</string>
+                      <string>单位</string>
                      </property>
                     </column>
                    </widget>
@@ -1229,12 +1229,12 @@ QMenu::item:selected {
                             </column>
                             <column>
                              <property name="text">
-                              <string>参数数值</string>
+                              <string>参数值</string>
                              </property>
                             </column>
                             <column>
                              <property name="text">
-                              <string>参数单位</string>
+                              <string>单位</string>
                              </property>
                             </column>
                            </widget>

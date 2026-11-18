@@ -262,8 +262,12 @@ def load_pipe_attachment_from_template(product_id, template_name, force_reload=F
                     tab_id = base_timestamp + tab_id_counter
                     tab_id_counter += 1
 
-                    # 从模板参数中筛出对应 Tab分类 的行
-                    type_params = [p for p in template_params if p.get('Tab分类') == attachment_type]
+                    # 从模板参数中筛出对应附件（Tab分类 / 附件类型同名匹配）
+                    type_params = [
+                        p for p in template_params
+                        if (p.get("Tab分类") or "").strip() == attachment_type
+                        or (p.get("附件类型") or "").strip() == attachment_type
+                    ]
                     if not type_params:
                         print(f"[管口附件][模板加载] 附件类型 '{attachment_type}' 在模板中没有找到参数结构")
                         continue
@@ -1027,6 +1031,17 @@ class DesignParameterDefineInputerViewer(QWidget):
         if source == "guankou":
             # 必须把 接管 / 接管法兰 / 补强圈 分开
             # 并且把 1/2/3 分开
+            #
+            # 注意：库中「接管/接管法兰是否添加覆层」通常是不带序号的单值行，
+            # 而材料四字段是 接管材料类型1/2/3。这里先识别覆层开关，避免被
+            # startswith("接管") 误分到 default；真正对齐到 1/2/3 列组由
+            # _expand_guankou_shared_overlay_items 完成。
+            if pname == "接管是否添加覆层":
+                return ("guankou", "接管", "default")
+
+            if pname == "接管法兰是否添加覆层":
+                return ("guankou", "接管法兰", "default")
+
             if pname.startswith("接管法兰覆层"):
                 m = re.search(r"(\d+)$", pname)
                 idx = m.group(1) if m else "default"
@@ -1051,13 +1066,6 @@ class DesignParameterDefineInputerViewer(QWidget):
                 m = re.search(r"(\d+)$", pname)
                 idx = m.group(1) if m else "default"
                 return ("guankou", "补强圈", idx)
-
-            # 是否添加覆层这种没有编号的，也要挂到对应主组上
-            if pname == "接管是否添加覆层":
-                return ("guankou", "接管", "overlay_flag")
-
-            if pname == "接管法兰是否添加覆层":
-                return ("guankou", "接管法兰", "overlay_flag")
 
             return ("guankou", "other", "default")
 
@@ -1544,11 +1552,84 @@ class DesignParameterDefineInputerViewer(QWidget):
             filtered_items.append(item)
         return filtered_items
 
+    def _expand_guankou_shared_overlay_items(self, all_items):
+        """
+        管口「接管/接管法兰是否添加覆层」在库中多为不带 1/2/3 的单值，
+        材料四字段则是 接管材料类型1/2/3。把覆层项复制挂到同 Tab/类别下
+        已存在的材料列组，使待替换筛选与写入能和材料四字段对齐。
+        """
+        from collections import defaultdict
+
+        overlay_to_prefix = {
+            "接管是否添加覆层": "接管",
+            "接管法兰是否添加覆层": "接管法兰",
+        }
+
+        overlay_items = []
+        other_items = []
+        for item in all_items or []:
+            if str(item.get("source", "")).strip() != "guankou":
+                other_items.append(item)
+                continue
+            pname = str(item.get("param_name", "")).strip()
+            if pname in overlay_to_prefix:
+                overlay_items.append(item)
+            else:
+                other_items.append(item)
+
+        if not overlay_items:
+            return list(all_items or [])
+
+        indices_map = defaultdict(set)
+        for item in other_items:
+            if str(item.get("source", "")).strip() != "guankou":
+                continue
+            gk = item.get("group_key")
+            if not isinstance(gk, tuple) or len(gk) < 4:
+                continue
+            tab_id, category, sub = gk[1], gk[2], gk[3]
+            if not isinstance(sub, tuple) or len(sub) < 3:
+                continue
+            prefix = str(sub[1])
+            idx = str(sub[2])
+            if prefix in {"接管", "接管法兰"}:
+                indices_map[(str(tab_id), str(category), prefix)].add(idx)
+
+        expanded = list(other_items)
+        for item in overlay_items:
+            pname = str(item.get("param_name", "")).strip()
+            prefix = overlay_to_prefix[pname]
+            gk = item.get("group_key")
+            tab_id = gk[1] if isinstance(gk, tuple) and len(gk) > 1 else ""
+            category = gk[2] if isinstance(gk, tuple) and len(gk) > 2 else ""
+            indices = indices_map.get((str(tab_id), str(category), prefix)) or set()
+
+            numeric = sorted((i for i in indices if str(i).isdigit()), key=lambda x: int(x))
+            if numeric:
+                targets = numeric
+            elif indices:
+                targets = sorted(indices)
+            else:
+                targets = ["default"]
+
+            for idx in targets:
+                new_item = dict(item)
+                new_item["group_key"] = (
+                    "guankou",
+                    tab_id,
+                    category,
+                    ("guankou", prefix, str(idx)),
+                )
+                expanded.append(new_item)
+
+        return expanded
+
     def _build_batch_replace_group_data(self, selected_ids):
         from collections import defaultdict
 
         all_items = self.iter_replaceable_material_rows_for_selected_ids(selected_ids)
         all_items = self._filter_replaceable_batch_items(all_items)
+        all_items = self._expand_guankou_shared_overlay_items(all_items)
         if not all_items:
             return None, None
 
@@ -1673,6 +1754,10 @@ class DesignParameterDefineInputerViewer(QWidget):
         row_btn = QHBoxLayout()
         btn_ok = QPushButton("确定")
         btn_cancel = QPushButton("取消")
+        # 避免在材料牌号输入框按回车时误触发“确定”
+        btn_ok.setAutoDefault(False)
+        btn_ok.setDefault(False)
+        btn_cancel.setAutoDefault(False)
         row_btn.addStretch()
         row_btn.addWidget(btn_ok)
         row_btn.addWidget(btn_cancel)
@@ -1905,6 +1990,79 @@ class DesignParameterDefineInputerViewer(QWidget):
         old_std.currentTextChanged.connect(lambda _: refresh_old_value_combos("材料标准"))
         old_overlay.currentTextChanged.connect(lambda _: refresh_old_value_combos("是否添加覆层"))
 
+        class _BatchGradeEnterFilter(QtCore.QObject):
+            """
+            材料牌号回车：
+            - 下拉已展开：交给默认逻辑选中高亮项
+            - 仅 1 个候选：自动带入并联动
+            - 多个/没有：打开下拉供浏览
+            """
+
+            def _popup_visible(self):
+                view = combo_grade.view()
+                if view is None:
+                    return False
+                # 真正弹出时，列表通常挂在独立 popup 容器上
+                container = view.window()
+                if container is not None and container is not combo_grade.window():
+                    return container.isVisible()
+                popup = QApplication.activePopupWidget()
+                return popup is not None and (
+                    popup is view or view.isAncestorOf(popup) or popup.isAncestorOf(view)
+                )
+
+            def _handle_enter(self):
+                if self._popup_visible():
+                    return False
+
+                refresh_material_combos("材料牌号")
+                kw = (combo_grade.currentText() or "").strip()
+                matches = []
+                for i in range(combo_grade.count()):
+                    t = (combo_grade.itemText(i) or "").strip()
+                    if not t:
+                        continue
+                    if kw and kw not in t:
+                        continue
+                    matches.append(t)
+
+                if len(matches) == 1:
+                    only = matches[0]
+                    combo_grade.blockSignals(True)
+                    try:
+                        idx = combo_grade.findText(only)
+                        if idx >= 0:
+                            combo_grade.setCurrentIndex(idx)
+                        combo_grade.setEditText(only)
+                    finally:
+                        combo_grade.blockSignals(False)
+                    refresh_material_combos("材料牌号")
+                    return True
+
+                # Enter 同一事件周期内同步 showPopup 会被立刻关掉，延后一拍展开
+                QTimer.singleShot(0, combo_grade.showPopup)
+                return True
+
+            def eventFilter(self, obj, event):
+                et = event.type()
+                if et == QEvent.ShortcutOverride:
+                    # 声明要自己处理回车，避免被对话框默认按钮吃掉；仍放行以收到 KeyPress
+                    if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not self._popup_visible():
+                        event.accept()
+                    return False
+                if et != QEvent.KeyPress:
+                    return False
+                if event.key() not in (Qt.Key_Return, Qt.Key_Enter):
+                    return False
+                return self._handle_enter()
+
+        grade_enter_filter = _BatchGradeEnterFilter(combo_grade)
+        combo_grade._batch_grade_enter_filter = grade_enter_filter
+        combo_grade.installEventFilter(grade_enter_filter)
+        grade_line = combo_grade.lineEdit()
+        if grade_line is not None:
+            grade_line.installEventFilter(grade_enter_filter)
+
         refresh_old_value_combos()
         refresh_material_combos()
         # 替换为：是否添加覆层默认选中「否」
@@ -2051,8 +2209,10 @@ class DesignParameterDefineInputerViewer(QWidget):
                         print(f"[批量替换] 普通元件左表同步失败 eid={eid}, err={e}")
 
             self.refresh_left_table_after_batch_replace()
+            # 有实际修改：待替换条件恢复「全选」；
+            # 0 处修改（如材料不合法）：保留用户已选的待替换条件，便于改完新值后重试。
             self._refresh_batch_replace_dialog_context(
-                reset_old_filters=True,
+                reset_old_filters=(total_changed > 0),
                 reset_new_values=True,
             )
             self._update_batch_replace_tip()
@@ -2253,10 +2413,13 @@ class DesignParameterDefineInputerViewer(QWidget):
         self.pushButton_detail = self.findChild(QPushButton, "pushButton_8")
         if self.pushButton_detail:
             self.pushButton_detail.clicked.connect(lambda: on_confirm_param_update(self))
-        # 设置列宽自适应
-        header = self.tableWidget_detail.horizontalHeader()
-        for i in range(self.tableWidget_detail.columnCount()):
-            header.setSectionResizeMode(i, QtWidgets.QHeaderView.Stretch)
+        # 详细定义列宽：名称/值拉伸，单位列收窄
+        from modules.cailiaodingyi.controllers.table import (
+            apply_param_detail_headers,
+            apply_param_detail_column_widths,
+        )
+        apply_param_detail_headers(self.tableWidget_detail)
+        apply_param_detail_column_widths(self.tableWidget_detail)
 
         # 零件列表表格行高亮
         self.tableWidget_parts.itemSelectionChanged.connect(self.on_selection_changed)
@@ -5994,8 +6157,12 @@ class DesignParameterDefineInputerViewer(QWidget):
             # 无数据时清空参数表格（防止显示旧内容）
             table_param.clear()
             table_param.setRowCount(0)
-            table_param.setColumnCount(3)
-            table_param.setHorizontalHeaderLabels(["参数名称", "参数值", "参数单位"])
+            from modules.cailiaodingyi.controllers.table import (
+                apply_param_detail_headers,
+                apply_param_detail_column_widths,
+            )
+            apply_param_detail_headers(table_param)
+            apply_param_detail_column_widths(table_param)
 
     def collect_selected_material_value_options(self, selected_ids):
         """
