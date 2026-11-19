@@ -1376,6 +1376,29 @@ INSULATION_COMPONENT_OPTIONS = ["保温支撑板", "支耳(保温)", "保温支�
 INSULATION_ATTACHMENT_TRIGGER_BASES = frozenset({"保温支撑板", "保温支撑环"})
 
 
+def insulation_uses_attachment_linkage(product_id) -> bool:
+    """
+    保温装置是否与管口「附件定义」联动：
+    - 容器：是（由附件表保温支撑板/环驱动）
+    - 换热器及其他：否（仅结构树选/不选，与普通合并元件一致）
+    """
+    if not product_id:
+        return False
+    try:
+        from modules.cailiaodingyi.funcs.funcs_pdf_input import (
+            load_design_product_data,
+            is_container_product_type,
+            is_heat_exchanger_product_type,
+        )
+        ptype, _ = load_design_product_data(product_id)
+        if is_heat_exchanger_product_type(ptype):
+            return False
+        return is_container_product_type(ptype)
+    except Exception as e:
+        print(f"[保温装置] 判断是否附件联动失败: {e}")
+        return False
+
+
 def _part_names_for_material_type_filter(viewer_instance, table=None, param_col=0, value_col=1):
     """
     供材料类型下拉过滤用的零件名。
@@ -3176,22 +3199,38 @@ def _handle_table_click_impl(viewer_instance, row, col):
     element_name = clicked_element_data.get("零件名称", "")
     # print(f"元件ID{element_id}")
 
-    # 保温装置：无附件且无合并表结构时不进专用页；曾定义后管口删光则允许进空白 Tab
+    # 保温装置：
+    # - 容器：无附件且无合并表结构时不进专用页；曾定义后管口删光则允许进空白 Tab
+    # - 换热器：仅结构树选中即可进专用页（无附件联动）
     if element_name == "保温装置":
         product_id = getattr(viewer_instance, "product_id", None)
-        has_attach = has_insulation_device_from_attachment(product_id)
+        linked = insulation_uses_attachment_linkage(product_id)
         has_merged = _count_element_merged_para_rows(product_id, element_id) > 0
-        if not has_attach and not has_merged:
-            tip = getattr(viewer_instance, "line_tip", None)
-            if tip is not None:
-                tip.setText("无保温装置，保持当前元件")
-                tip.setStyleSheet("color: orange;")
-            print("[保温装置] 附件表无保温支撑板/环且无合并表，保持当前元件界面")
-            return
-        try:
-            reconcile_insulation_merged_para_with_attachment(product_id)
-        except Exception as e:
-            print(f"[保温装置] 点击时合并表对齐失败: {e}")
+        if linked:
+            has_attach = has_insulation_device_from_attachment(product_id)
+            if not has_attach and not has_merged:
+                tip = getattr(viewer_instance, "line_tip", None)
+                if tip is not None:
+                    tip.setText("无保温装置，保持当前元件")
+                    tip.setStyleSheet("color: orange;")
+                print("[保温装置] 附件表无保温支撑板/环且无合并表，保持当前元件界面")
+                return
+            try:
+                reconcile_insulation_merged_para_with_attachment(product_id)
+            except Exception as e:
+                print(f"[保温装置] 点击时合并表对齐失败: {e}")
+        else:
+            # 换热器等：合并表空则按模板补结构；元件名称为空则默认勾选三项
+            try:
+                if not has_merged:
+                    ensure_insulation_merged_para_from_template(
+                        product_id, element_id, force_reload=False
+                    )
+                seed_insulation_component_names_for_heat_exchanger(product_id, element_id)
+                refresh_insulation_define_status(product_id, element_id)
+            except Exception as e:
+                print(f"[保温装置] 换热器补合并表/默认勾选失败: {e}")
+            has_merged = _count_element_merged_para_rows(product_id, element_id) > 0
         if hasattr(viewer_instance, "stackedWidget"):
             viewer_instance.stackedWidget.setCurrentIndex(2)
             if DEBUG_VERBOSE_DEFINE_UI:
@@ -8303,14 +8342,16 @@ def batch_insert_element_merged_para_data(product_id, template_id, template_name
     #
     # print(f"[批量处理] 开始处理 {len(element_ids)} 个元件的附加参数合并表数据: {element_ids}")
 
-    has_insul_attach = has_insulation_device_from_attachment(product_id)
+    # 仅容器：保温装置与附件表联动；换热器等按普通合并元件灌入
+    link_insul = insulation_uses_attachment_linkage(product_id)
+    has_insul_attach = has_insulation_device_from_attachment(product_id) if link_insul else False
 
     for element_id in element_ids:
         try:
             ename = _get_product_element_name(product_id, element_id)
-            if ename == INSULATION_DEVICE_NAME:
+            if ename == INSULATION_DEVICE_NAME and link_insul:
                 if not has_insul_attach:
-                    # 无附件触发：不写入合并表
+                    # 容器且无附件触发：不写入合并表
                     delete_element_merged_para_rows(product_id, element_id)
                     print(f"[保温装置] 附件表无触发，跳过合并表模板灌入 element_id={element_id}")
                     continue
@@ -8328,7 +8369,7 @@ def batch_insert_element_merged_para_data(product_id, template_id, template_name
             print(f"[批量处理] 处理元件 {element_id} 失败: {e}")
             continue
 
-    if has_insul_attach:
+    if link_insul and has_insul_attach:
         try:
             reconcile_insulation_merged_para_with_attachment(product_id)
         except Exception as e:
@@ -8420,9 +8461,15 @@ def ensure_insulation_merged_para_from_template(product_id, element_id=None, for
 
     force_reload=False（默认/场景②）：仅当活动库尚无合并表行时写入；已有行（含结构树清空后的空行）不覆盖。
     force_reload=True（场景③）：强制按模板重灌，覆盖结构树清空留下的空参数行。
+
+    容器：须附件表已有保温支撑板/环；换热器等：不依赖附件（结构树选中即可）。
     """
-    if not product_id or not has_insulation_device_from_attachment(product_id):
+    if not product_id:
         return False
+    if insulation_uses_attachment_linkage(product_id):
+        if not has_insulation_device_from_attachment(product_id):
+            return False
+    # 换热器等：无附件门槛，允许按模板补合并表
     if element_id is None:
         element_id = find_insulation_device_element_id(product_id)
     if not element_id:
@@ -8550,11 +8597,22 @@ def reconcile_insulation_merged_para_with_attachment(product_id) -> None:
     - 有附件但结构树不显示（场景②清空态）：不灌模板，仅必要时回填空的「元件名称」
     - 有附件且已显示：仅当合并表无行时补模板结构；元件名称为空时按附件回填
     对齐后始终按 Tab 重算「是否定义」（不照搬模板表定义状态）。
+
+    换热器等非容器：不与附件联动；若结构树已显示且合并表空则按模板补结构。
     """
     if not product_id:
         return
     element_id = find_insulation_device_element_id(product_id)
     if not element_id:
+        return
+    if not insulation_uses_attachment_linkage(product_id):
+        if get_insulation_device_visibility_flag(product_id, element_id) == "是":
+            ensure_insulation_merged_para_from_template(
+                product_id, element_id, force_reload=False
+            )
+            # 模板「元件名称」多为空：换热器默认勾选三项
+            seed_insulation_component_names_for_heat_exchanger(product_id, element_id)
+            refresh_insulation_define_status(product_id, element_id)
         return
     if not has_insulation_device_from_attachment(product_id):
         flag = get_insulation_device_visibility_flag(product_id, element_id)
@@ -12705,8 +12763,9 @@ def sync_insulation_names_after_attachment_change(product_id, removed_bases=None
     - 删了保温支撑环 → 取消「保温支撑环」
     - 板+环都没了 → 取消三项，并收成空白 Tab（此时才清空材料）
     某 Tab 名称被取消后若仍有其它勾选：材料保持不动。
+    仅容器附件联动产品生效。
     """
-    if not product_id:
+    if not product_id or not insulation_uses_attachment_linkage(product_id):
         return False
     element_id = find_insulation_device_element_id(product_id)
     if not element_id:
@@ -12791,8 +12850,9 @@ def sync_insulation_names_after_attachment_add(product_id, added_bases=None) -> 
     - 新增「保温支撑板」→ 「保温支撑板」+「支耳(保温)」都勾到含「保温支撑环」的 Tab
       （支耳若在其他 Tab，先从他页拿掉再放到目标 Tab，避免跨 Tab 重复）
     已存在同名勾选则跳过（幂等）。
+    仅容器附件联动产品生效。
     """
-    if not product_id:
+    if not product_id or not insulation_uses_attachment_linkage(product_id):
         return False
     element_id = find_insulation_device_element_id(product_id)
     if not element_id:
@@ -12853,8 +12913,9 @@ def blank_insulation_merged_when_no_attachment(product_id, element_id=None) -> b
     """
     附件表已无保温触发、但合并表仍有结构（曾定义过）：
     取消全部三项勾选并收成一个空白 Tab；不整表删除（便于左侧仍可见空白详细页）。
+    仅容器附件联动产品生效。
     """
-    if not product_id:
+    if not product_id or not insulation_uses_attachment_linkage(product_id):
         return False
     if element_id is None:
         element_id = find_insulation_device_element_id(product_id)
@@ -12869,21 +12930,16 @@ def blank_insulation_merged_when_no_attachment(product_id, element_id=None) -> b
     )
 
 
-def sync_insulation_merged_component_names_from_attachment(product_id, element_id=None) -> bool:
+def _seed_insulation_first_tab_component_names(product_id, element_id, seed_names, source_label: str) -> bool:
     """
-    附件表有触发时，若首 Tab「元件名称」仍为空/[]/误写成父级名，则按附件规则写入 JSON。
-    不覆盖用户已勾选的内容。
+    首 Tab「元件名称」为空/[]/误写成父级名时写入 seed_names；已有勾选则不覆盖。
     """
-    if not product_id or not has_insulation_device_from_attachment(product_id):
-        return False
-    if element_id is None:
-        element_id = find_insulation_device_element_id(product_id)
-    if not element_id:
-        return False
-    seed_names = build_insulation_component_names_from_attachment(product_id)
-    if not seed_names:
+    seed_names = [n for n in (seed_names or []) if str(n).strip()]
+    if not product_id or not element_id or not seed_names:
         return False
     first_tab = get_first_tab_for_element(product_id, element_id)
+    if not first_tab:
+        return False
     connection = get_connection(**db_config_1)
     try:
         with connection.cursor() as cursor:
@@ -12920,7 +12976,7 @@ def sync_insulation_merged_component_names_from_attachment(product_id, element_i
                 connection.rollback()
                 return False
             connection.commit()
-            print(f"[保温装置] 已从附件表灌入元件名称: {seed_names}")
+            print(f"[保温装置] 已{source_label}灌入元件名称: {seed_names}")
             return True
     except Exception as e:
         print(f"[保温装置] 灌入元件名称失败: {e}")
@@ -12933,6 +12989,50 @@ def sync_insulation_merged_component_names_from_attachment(product_id, element_i
         return False
     finally:
         connection.close()
+
+
+def sync_insulation_merged_component_names_from_attachment(product_id, element_id=None) -> bool:
+    """
+    附件表有触发时，若首 Tab「元件名称」仍为空/[]/误写成父级名，则按附件规则写入 JSON。
+    不覆盖用户已勾选的内容。仅容器附件联动产品生效。
+    """
+    if (
+        not product_id
+        or not insulation_uses_attachment_linkage(product_id)
+        or not has_insulation_device_from_attachment(product_id)
+    ):
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    seed_names = build_insulation_component_names_from_attachment(product_id)
+    if not seed_names:
+        return False
+    return _seed_insulation_first_tab_component_names(
+        product_id, element_id, seed_names, "从附件表"
+    )
+
+
+def seed_insulation_component_names_for_heat_exchanger(product_id, element_id=None) -> bool:
+    """
+    换热器等非附件联动：材料库模板「元件名称」常为空/[]。
+    结构树已显示且首 Tab 名称为空时，默认勾选三项（支撑板、支耳、支撑环）。
+    不覆盖用户已勾选内容。
+    """
+    if not product_id or insulation_uses_attachment_linkage(product_id):
+        return False
+    if element_id is None:
+        element_id = find_insulation_device_element_id(product_id)
+    if not element_id:
+        return False
+    if get_insulation_device_visibility_flag(product_id, element_id) != "是":
+        return False
+    if _count_element_merged_para_rows(product_id, element_id) <= 0:
+        return False
+    return _seed_insulation_first_tab_component_names(
+        product_id, element_id, list(INSULATION_COMPONENT_OPTIONS), "按换热器默认"
+    )
 
 
 def get_insulation_device_visibility_flag(product_id, element_id=None):
@@ -13162,8 +13262,13 @@ def maybe_restore_insulation_left_material_from_template(product_id, element_id=
     """
     场景③收尾：左侧材料空、但合并表已有材料参数 → 从元件材料模板表恢复左侧。
     场景②（合并表材料亦空）不会触发。
+    仅容器附件联动场景使用。
     """
-    if not product_id or not has_insulation_device_from_attachment(product_id):
+    if (
+        not product_id
+        or not insulation_uses_attachment_linkage(product_id)
+        or not has_insulation_device_from_attachment(product_id)
+    ):
         return False
     if element_id is None:
         element_id = find_insulation_device_element_id(product_id)
@@ -13192,8 +13297,14 @@ def ensure_insulation_device_visible_from_attachment(product_id, force: bool = F
       若已为不显示则尊重场景②，不拉回、不灌模板；
       已显示时仅补「无行」结构；若左侧空且合并表已有材料则补左侧（场景③收尾）。
     返回是否需要刷新左表（显示状态变化或左侧材料刚恢复）。
+
+    仅容器附件联动产品生效；换热器等直接返回 False。
     """
-    if not product_id or not has_insulation_device_from_attachment(product_id):
+    if (
+        not product_id
+        or not insulation_uses_attachment_linkage(product_id)
+        or not has_insulation_device_from_attachment(product_id)
+    ):
         return False
     element_id = find_insulation_device_element_id(product_id)
     if not element_id:
@@ -13255,10 +13366,15 @@ def augment_structure_tree_for_insulation(product_id, all_elements, visible_ids,
     - 活动库尚无「是否显示」记录（初次进入）：默认放入右侧，可移到左侧
     - 活动库已为「否」：尊重用户选择，不再强行放回右侧
     - 活动库已为「是」：保持在右侧（visible_ids 通常已含）
+
+    仅容器附件联动；换热器等不因附件改结构树（与普通元件一致）。
     """
     visible_ids = list(visible_ids or [])
     mandatory_ids = set(mandatory_ids or set())
-    if not has_insulation_device_from_attachment(product_id):
+    if (
+        not insulation_uses_attachment_linkage(product_id)
+        or not has_insulation_device_from_attachment(product_id)
+    ):
         return visible_ids, mandatory_ids
 
     eid = None
@@ -13314,7 +13430,7 @@ def update_insulation_support_material_status(product_id, element_id, is_complet
 def refresh_insulation_define_status(product_id, element_id=None) -> bool:
     """
     按合并表 Tab 重算活动库「定义状态」，不照搬元件材料模板表。
-    模板表「未定义」只作初始默认；有附件触发且 Tab 材料已齐 → 已定义。
+    模板表「未定义」只作初始默认；有勾选且 Tab 材料已齐 → 已定义。
     """
     if not product_id:
         return False
@@ -13323,9 +13439,10 @@ def refresh_insulation_define_status(product_id, element_id=None) -> bool:
     if not element_id:
         return False
     try:
-        # 无附件且无合并表结构：与点进「无保温装置」一致，强制未定义
+        # 容器：无附件且无合并表结构 → 与点进「无保温装置」一致，强制未定义
         if (
-            not has_insulation_device_from_attachment(product_id)
+            insulation_uses_attachment_linkage(product_id)
+            and not has_insulation_device_from_attachment(product_id)
             and _count_element_merged_para_rows(product_id, element_id) <= 0
         ):
             update_insulation_support_material_status(product_id, element_id, False)

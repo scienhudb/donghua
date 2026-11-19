@@ -558,13 +558,15 @@ def clear_element_product_data(product_id: str, element_id) -> None:
     finally:
         conn.close()
 
-    # 保温装置：清空后若元件名称为空，按管口附件表回填（不回填材料等模板参数）
+    # 保温装置（仅容器附件联动）：清空后若元件名称为空，按管口附件表回填（不回填材料等模板参数）
     if elem_name == "保温装置":
         try:
             from modules.cailiaodingyi.controllers.datamanager import (
+                insulation_uses_attachment_linkage,
                 sync_insulation_merged_component_names_from_attachment,
             )
-            sync_insulation_merged_component_names_from_attachment(product_id, element_id)
+            if insulation_uses_attachment_linkage(product_id):
+                sync_insulation_merged_component_names_from_attachment(product_id, element_id)
         except Exception as e:
             _dbg_print(f"[结构树][保温装置] 清空后回填元件名称失败: {e}")
 
@@ -1222,7 +1224,7 @@ def apply_structure_tree_selection(
             ensure_element_name_param(product_id, eid, _element_display_name(item))
         else:
             clear_element_product_data(product_id, eid)
-    # 保温装置：无附件触发时不应残留合并表结构（与管口附件一致）
+    # 保温装置：容器按附件对齐；换热器等仅在已显示时补空合并表
     try:
         from modules.cailiaodingyi.controllers.datamanager import (
             reconcile_insulation_merged_para_with_attachment,

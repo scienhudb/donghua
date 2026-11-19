@@ -5800,14 +5800,17 @@ class DesignParameterDefineInputerViewer(QWidget):
                         elif part_name == "保温装置":
                             from modules.cailiaodingyi.controllers.datamanager import (
                                 has_insulation_device_from_attachment,
+                                insulation_uses_attachment_linkage,
                                 _count_element_merged_para_rows,
                                 find_insulation_device_element_id,
                             )
-                            has_attach = has_insulation_device_from_attachment(self.product_id)
-                            eid = find_insulation_device_element_id(self.product_id)
-                            has_merged = bool(eid) and _count_element_merged_para_rows(self.product_id, eid) > 0
-                            if not has_attach and not has_merged:
-                                return
+                            # 仅容器：无附件且无合并表时不显示示意图；换热器结构树已选即可
+                            if insulation_uses_attachment_linkage(self.product_id):
+                                has_attach = has_insulation_device_from_attachment(self.product_id)
+                                eid = find_insulation_device_element_id(self.product_id)
+                                has_merged = bool(eid) and _count_element_merged_para_rows(self.product_id, eid) > 0
+                                if not has_attach and not has_merged:
+                                    return
             except Exception as e:
                 print(f"[图片显示] 检查管口附件/保温装置数据失败: {e}")
 
@@ -6292,22 +6295,38 @@ class DesignParameterDefineInputerViewer(QWidget):
                         self.line_tip.setStyleSheet("color: orange;")
                     return
             elif part_name == "保温装置":
-                # 无附件且无合并表 → 提示；曾定义后管口删光仍可进空白 Tab
+                # 容器：无附件且无合并表 → 提示；曾定义后管口删光仍可进空白 Tab
+                # 换热器：结构树已选即可进页（不依赖附件）
                 has_attach = False
                 has_merged = False
+                linked = False
                 try:
                     from modules.cailiaodingyi.controllers.datamanager import (
                         has_insulation_device_from_attachment,
+                        insulation_uses_attachment_linkage,
                         reconcile_insulation_merged_para_with_attachment,
+                        ensure_insulation_merged_para_from_template,
+                        seed_insulation_component_names_for_heat_exchanger,
+                        refresh_insulation_define_status,
                         _count_element_merged_para_rows,
                         find_insulation_device_element_id,
                     )
-                    has_attach = has_insulation_device_from_attachment(self.product_id)
+                    linked = insulation_uses_attachment_linkage(self.product_id)
                     eid = find_insulation_device_element_id(self.product_id)
                     has_merged = bool(eid) and _count_element_merged_para_rows(self.product_id, eid) > 0
+                    if linked:
+                        has_attach = has_insulation_device_from_attachment(self.product_id)
+                    elif eid:
+                        if not has_merged:
+                            ensure_insulation_merged_para_from_template(
+                                self.product_id, eid, force_reload=False
+                            )
+                        seed_insulation_component_names_for_heat_exchanger(self.product_id, eid)
+                        refresh_insulation_define_status(self.product_id, eid)
+                        has_merged = _count_element_merged_para_rows(self.product_id, eid) > 0
                 except Exception as e:
                     print(f"[保温装置] 检查附件表失败: {e}")
-                if not has_attach and not has_merged:
+                if linked and not has_attach and not has_merged:
                     if hasattr(self, "line_tip"):
                         self.line_tip.setText("无保温装置，保持当前元件")
                         self.line_tip.setStyleSheet("color: orange;")
